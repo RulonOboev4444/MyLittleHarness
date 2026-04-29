@@ -1,0 +1,727 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import sqlite3
+from contextlib import closing
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from . import __version__
+from .inventory import Inventory
+from .models import Finding
+from .projection import Projection, ProjectionSourceRecord, build_projection
+from .projection_artifacts import ARTIFACT_DIR_REL, artifact_dir
+
+
+INDEX_SCHEMA_VERSION = 1
+INDEX_NAME = "search-index.sqlite3"
+INDEX_REL_PATH = f"{ARTIFACT_DIR_REL}/{INDEX_NAME}"
+INDEX_SIDECAR_NAMES = (
+    INDEX_NAME,
+    f"{INDEX_NAME}-journal",
+    f"{INDEX_NAME}-shm",
+    f"{INDEX_NAME}-wal",
+)
+
+
+@dataclass(frozen=True)
+class IndexShape:
+    source_rows: tuple[dict[str, Any], ...]
+    fts_rows: tuple[dict[str, Any], ...]
+    source_set_hash: str
+    record_set_hash: str
+
+
+@dataclass(frozen=True)
+class FullTextQuery:
+    expression: str
+    mode: str
+
+
+def build_projection_index(inventory: Inventory) -> list[Finding]:
+    findings = _boundary_preflight(inventory.root, create=True)
+    if _has_errors(findings):
+        return findings
+    if not _fts5_is_available():
+        delete_projection_index(inventory)
+        return [
+            Finding("info", "projection-index-boundary", f"owned generated-output boundary: {ARTIFACT_DIR_REL}", ARTIFACT_DIR_REL),
+            Finding("warn", "projection-index-fts5-unavailable", "SQLite FTS5 is unavailable; direct source reads remain authoritative"),
+        ]
+
+    projection = build_projection(inventory)
+    shape = _index_shape(projection)
+    path = index_path(inventory.root)
+    _delete_known_index_paths(inventory.root)
+    try:
+        with closing(sqlite3.connect(path)) as connection:
+            connection.execute("PRAGMA journal_mode=DELETE")
+            connection.execute("PRAGMA synchronous=FULL")
+            _create_schema(connection)
+            _write_metadata(connection, inventory, projection, shape)
+            _write_source_rows(connection, shape.source_rows)
+            _write_fts_rows(connection, shape.fts_rows)
+            connection.commit()
+    except sqlite3.Error as exc:
+        _delete_known_index_paths(inventory.root)
+        return [
+            Finding("info", "projection-index-boundary", f"owned generated-output boundary: {ARTIFACT_DIR_REL}", ARTIFACT_DIR_REL),
+            Finding("warn", "projection-index-build-failed", f"SQLite index build failed; direct source reads remain authoritative: {exc}", INDEX_REL_PATH),
+        ]
+
+    return [
+        Finding("info", "projection-index-boundary", f"owned generated-output boundary: {ARTIFACT_DIR_REL}", ARTIFACT_DIR_REL),
+        Finding("info", "projection-index-build", f"wrote disposable SQLite FTS/BM25 index: {INDEX_REL_PATH}", INDEX_REL_PATH),
+        Finding(
+            "info",
+            "projection-index-records",
+            f"sources={len(shape.source_rows)}; indexed_rows={len(shape.fts_rows)}; source_set_hash={shape.source_set_hash[:12]}; record_set_hash={shape.record_set_hash[:12]}",
+            INDEX_REL_PATH,
+        ),
+    ]
+
+
+def inspect_projection_index(inventory: Inventory, projection: Projection | None = None) -> list[Finding]:
+    projection = projection or build_projection(inventory)
+    findings = _boundary_preflight(inventory.root, create=False)
+    if _has_errors(findings):
+        return findings
+
+    findings.append(Finding("info", "projection-index-boundary", f"owned generated-output boundary: {ARTIFACT_DIR_REL}", ARTIFACT_DIR_REL))
+    findings.extend(_unexpected_index_sidecar_findings(inventory.root))
+    if not _fts5_is_available():
+        findings.append(Finding("warn", "projection-index-fts5-unavailable", "SQLite FTS5 is unavailable; full-text retrieval is skipped"))
+
+    path = index_path(inventory.root)
+    if not path.exists():
+        findings.append(
+            Finding(
+                "info",
+                "projection-index-missing",
+                "SQLite projection index is missing; direct source reads and in-memory projection remain authoritative",
+                INDEX_REL_PATH,
+            )
+        )
+        return findings
+    if not path.is_file():
+        findings.append(Finding("warn", "projection-index-malformed", "SQLite projection index path is not a file", INDEX_REL_PATH))
+        return findings
+
+    try:
+        with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as connection:
+            connection.row_factory = sqlite3.Row
+            findings.extend(_integrity_findings(connection))
+            tables = _table_names(connection)
+            findings.extend(_schema_findings(connection, tables))
+            if _has_index_shape(tables):
+                metadata = _metadata(connection)
+                findings.extend(_metadata_findings(inventory, projection, metadata))
+                findings.extend(_source_stale_findings(connection, projection))
+                findings.extend(_count_findings(connection, projection, metadata))
+    except sqlite3.DatabaseError as exc:
+        findings.append(Finding("warn", "projection-index-corrupt", f"SQLite projection index is unreadable; rebuild recommended: {exc}", INDEX_REL_PATH))
+    except OSError as exc:
+        findings.append(Finding("warn", "projection-index-corrupt", f"SQLite projection index could not be opened; rebuild recommended: {exc}", INDEX_REL_PATH))
+
+    if not any(finding.severity == "warn" for finding in findings):
+        findings.append(Finding("info", "projection-index-current", "SQLite projection index matches current source hashes and record counts", INDEX_REL_PATH))
+    return findings
+
+
+def delete_projection_index(inventory: Inventory) -> list[Finding]:
+    findings = _boundary_preflight(inventory.root, create=False)
+    if _has_errors(findings):
+        return findings
+
+    deleted, skipped = _delete_known_index_paths(inventory.root)
+    skipped_findings = [
+        Finding(
+            "warn",
+            "projection-index-delete-skipped",
+            f"directory-shaped SQLite index sidecar was preserved without recursive delete: {rel_path}",
+            rel_path,
+        )
+        for rel_path in skipped
+    ]
+    if deleted:
+        return [
+            Finding("info", "projection-index-boundary", f"owned generated-output boundary: {ARTIFACT_DIR_REL}", ARTIFACT_DIR_REL),
+            Finding("info", "projection-index-delete", f"deleted {len(deleted)} SQLite index-owned paths", INDEX_REL_PATH),
+            *skipped_findings,
+        ]
+    return [
+        Finding("info", "projection-index-boundary", f"owned generated-output boundary: {ARTIFACT_DIR_REL}", ARTIFACT_DIR_REL),
+        Finding("info", "projection-index-delete", f"SQLite projection index is already absent: {INDEX_REL_PATH}", INDEX_REL_PATH),
+        *skipped_findings,
+    ]
+
+
+def rebuild_projection_index(inventory: Inventory) -> list[Finding]:
+    findings = delete_projection_index(inventory)
+    if _has_errors(findings):
+        return findings
+    return findings + build_projection_index(inventory)
+
+
+def full_text_search_findings(inventory: Inventory, projection: Projection, full_text: str | None, limit: int) -> list[Finding]:
+    if full_text in (None, ""):
+        return []
+
+    inspect_findings = inspect_projection_index(inventory, projection)
+    blocking = [
+        finding
+        for finding in inspect_findings
+        if finding.severity in {"warn", "error"} or finding.code == "projection-index-missing"
+    ]
+    if blocking:
+        finding = blocking[0]
+        return [
+            Finding(
+                "info",
+                "projection-index-query-skipped",
+                f"full-text search skipped for {full_text!r}: {finding.code}; direct exact/path search remains authoritative",
+                finding.source or INDEX_REL_PATH,
+                finding.line,
+            )
+        ]
+
+    fts_query = _fts_query(full_text)
+    if fts_query is None:
+        return [Finding("info", "full-text-no-matches", "full-text query has no indexable terms", INDEX_REL_PATH)]
+
+    source_by_path = projection.source_by_path
+    findings: list[Finding] = [
+        Finding(
+            "info",
+            "projection-index-query-current",
+            f"full-text search uses current source-verified SQLite FTS/BM25 index for {full_text!r}; query_mode={fts_query.mode}",
+            INDEX_REL_PATH,
+        )
+    ]
+    try:
+        with closing(sqlite3.connect(f"file:{index_path(inventory.root)}?mode=ro", uri=True)) as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                """
+                SELECT source_path, line_start, line_end, source_hash, source_role, source_type,
+                       indexed_text, provenance, bm25(fts_rows) AS rank
+                FROM fts_rows
+                WHERE fts_rows MATCH ?
+                ORDER BY rank, source_path, line_start
+                LIMIT ?
+                """,
+                (fts_query.expression, limit),
+            ).fetchall()
+    except sqlite3.Error as exc:
+        return [
+            Finding(
+                "info",
+                "projection-index-query-skipped",
+                f"full-text search skipped for {full_text!r}: SQLite query failed; direct exact/path search remains authoritative: {exc}",
+                INDEX_REL_PATH,
+            )
+        ]
+
+    for row in rows:
+        source = source_by_path.get(str(row["source_path"]))
+        if not _row_is_source_verified(source, int(row["line_start"]), str(row["source_hash"]), str(row["indexed_text"])):
+            findings.append(
+                Finding(
+                    "info",
+                    "projection-index-result-skipped",
+                    f"unverified full-text result skipped: {row['source_path']}:{row['line_start']}",
+                    str(row["source_path"]),
+                    int(row["line_start"]),
+                )
+            )
+            continue
+        findings.append(
+            Finding(
+                "info",
+                "full-text-match",
+                (
+                    f"full-text match for {full_text!r}: rank={float(row['rank']):.6f}; "
+                    f"line_range={row['line_start']}-{row['line_end']}; source_hash={str(row['source_hash'])[:12]}; "
+                    f"query_mode={fts_query.mode}; verification=source-verified; {_trim_line(str(row['indexed_text']))}"
+                ),
+                str(row["source_path"]),
+                int(row["line_start"]),
+            )
+        )
+
+    if len(findings) == 1:
+        findings.append(Finding("info", "full-text-no-matches", "no source-verified full-text matches found", INDEX_REL_PATH))
+    return findings
+
+
+def index_path(root: Path) -> Path:
+    return artifact_dir(root) / INDEX_NAME
+
+
+def _create_schema(connection: sqlite3.Connection) -> None:
+    connection.executescript(
+        """
+        CREATE TABLE metadata (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL
+        );
+        CREATE TABLE source_records (
+          path TEXT PRIMARY KEY,
+          role TEXT NOT NULL,
+          required INTEGER NOT NULL,
+          present INTEGER NOT NULL,
+          readable INTEGER NOT NULL,
+          line_count INTEGER NOT NULL,
+          byte_count INTEGER NOT NULL,
+          heading_count INTEGER NOT NULL,
+          link_count INTEGER NOT NULL,
+          content_hash TEXT,
+          read_error TEXT
+        );
+        CREATE TABLE index_rows (
+          row_id INTEGER PRIMARY KEY,
+          source_path TEXT NOT NULL,
+          line_start INTEGER NOT NULL,
+          line_end INTEGER NOT NULL,
+          source_hash TEXT,
+          source_role TEXT NOT NULL,
+          source_type TEXT NOT NULL,
+          indexed_text TEXT NOT NULL,
+          provenance TEXT NOT NULL
+        );
+        CREATE VIRTUAL TABLE fts_rows USING fts5(
+          source_path UNINDEXED,
+          line_start UNINDEXED,
+          line_end UNINDEXED,
+          source_hash UNINDEXED,
+          source_role UNINDEXED,
+          source_type UNINDEXED,
+          indexed_text,
+          provenance UNINDEXED
+        );
+        """
+    )
+
+
+def _write_metadata(connection: sqlite3.Connection, inventory: Inventory, projection: Projection, shape: IndexShape) -> None:
+    rows = {
+        "schema_version": str(INDEX_SCHEMA_VERSION),
+        "product_version": __version__,
+        "index_kind": "mylittleharness-sqlite-fts-bm25-projection",
+        "root": str(inventory.root),
+        "root_kind": inventory.root_kind,
+        "storage_boundary": ARTIFACT_DIR_REL,
+        "source_set_hash": shape.source_set_hash,
+        "record_set_hash": shape.record_set_hash,
+        "source_count": str(projection.summary.source_count),
+        "readable_source_count": str(projection.summary.readable_source_count),
+        "indexed_row_count": str(len(shape.fts_rows)),
+        "fts5_available": "true",
+        "bm25_available": "true",
+        "query_capabilities": json.dumps(
+            {
+                "full_text_search": {
+                    "available": True,
+                    "source_verified": True,
+                    "rank": "bm25",
+                    "generated_cache": True,
+                },
+                "exact_text_search": {
+                    "source": "direct-files-and-in-memory-projection",
+                    "case_sensitive": True,
+                },
+                "path_reference_search": {
+                    "source": "direct-files-and-json-artifact-parity",
+                    "case_sensitive": True,
+                },
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "boundary_note": "repo-visible source files are authoritative; this SQLite index is disposable, rebuildable, and advisory generated output",
+    }
+    connection.executemany("INSERT INTO metadata(key, value) VALUES (?, ?)", sorted(rows.items()))
+
+
+def _write_source_rows(connection: sqlite3.Connection, rows: tuple[dict[str, Any], ...]) -> None:
+    connection.executemany(
+        """
+        INSERT INTO source_records(
+          path, role, required, present, readable, line_count, byte_count,
+          heading_count, link_count, content_hash, read_error
+        )
+        VALUES (:path, :role, :required, :present, :readable, :line_count, :byte_count,
+                :heading_count, :link_count, :content_hash, :read_error)
+        """,
+        rows,
+    )
+
+
+def _write_fts_rows(connection: sqlite3.Connection, rows: tuple[dict[str, Any], ...]) -> None:
+    connection.executemany(
+        """
+        INSERT INTO index_rows(
+          row_id, source_path, line_start, line_end, source_hash, source_role,
+          source_type, indexed_text, provenance
+        )
+        VALUES (:row_id, :source_path, :line_start, :line_end, :source_hash,
+                :source_role, :source_type, :indexed_text, :provenance)
+        """,
+        rows,
+    )
+    connection.executemany(
+        """
+        INSERT INTO fts_rows(rowid, source_path, line_start, line_end, source_hash,
+                             source_role, source_type, indexed_text, provenance)
+        VALUES (:row_id, :source_path, :line_start, :line_end, :source_hash,
+                :source_role, :source_type, :indexed_text, :provenance)
+        """,
+        rows,
+    )
+
+
+def _index_shape(projection: Projection) -> IndexShape:
+    source_rows = tuple(_source_row(source) for source in projection.sources)
+    fts_rows = tuple(_fts_rows(projection.sources))
+    source_set_hash = _payload_hash(
+        [
+            {"path": row["path"], "content_hash": row["content_hash"]}
+            for row in source_rows
+            if row["content_hash"] is not None
+        ]
+    )
+    record_set_hash = _payload_hash(
+        [
+            {
+                "source_path": row["source_path"],
+                "line_start": row["line_start"],
+                "line_end": row["line_end"],
+                "source_hash": row["source_hash"],
+                "text_hash": _text_hash(row["indexed_text"]),
+            }
+            for row in fts_rows
+        ]
+    )
+    return IndexShape(source_rows=source_rows, fts_rows=fts_rows, source_set_hash=source_set_hash, record_set_hash=record_set_hash)
+
+
+def _source_row(source: ProjectionSourceRecord) -> dict[str, Any]:
+    return {
+        "path": source.path,
+        "role": source.role,
+        "required": int(source.required),
+        "present": int(source.present),
+        "readable": int(source.readable),
+        "line_count": source.line_count,
+        "byte_count": source.byte_count,
+        "heading_count": source.heading_count,
+        "link_count": source.link_count,
+        "content_hash": source.content_hash,
+        "read_error": source.read_error,
+    }
+
+
+def _fts_rows(sources: tuple[ProjectionSourceRecord, ...]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    row_id = 1
+    for source in sources:
+        if not source.readable or source.content_hash is None:
+            continue
+        for line_number, line in enumerate(source.content.splitlines(), start=1):
+            if line == "":
+                continue
+            rows.append(
+                {
+                    "row_id": row_id,
+                    "source_path": source.path,
+                    "line_start": line_number,
+                    "line_end": line_number,
+                    "source_hash": source.content_hash,
+                    "source_role": source.role,
+                    "source_type": "inventory-surface",
+                    "indexed_text": line,
+                    "provenance": f"{source.path}:{line_number}",
+                }
+            )
+            row_id += 1
+    return rows
+
+
+def _integrity_findings(connection: sqlite3.Connection) -> list[Finding]:
+    try:
+        rows = connection.execute("PRAGMA quick_check").fetchall()
+    except sqlite3.DatabaseError as exc:
+        return [Finding("warn", "projection-index-corrupt", f"SQLite quick_check failed; rebuild recommended: {exc}", INDEX_REL_PATH)]
+    if rows and str(rows[0][0]).lower() == "ok":
+        return []
+    rendered = ", ".join(str(row[0]) for row in rows[:3]) if rows else "no result"
+    return [Finding("warn", "projection-index-integrity", f"SQLite quick_check did not return ok: {rendered}", INDEX_REL_PATH)]
+
+
+def _schema_findings(connection: sqlite3.Connection, tables: set[str]) -> list[Finding]:
+    findings: list[Finding] = []
+    expected_tables = {"metadata", "source_records", "index_rows", "fts_rows"}
+    for name in sorted(expected_tables - tables):
+        findings.append(Finding("warn", "projection-index-malformed", f"expected SQLite index table is missing: {name}", INDEX_REL_PATH))
+
+    expected_columns = {
+        "metadata": {"key", "value"},
+        "source_records": {"path", "role", "required", "present", "readable", "line_count", "byte_count", "heading_count", "link_count", "content_hash", "read_error"},
+        "index_rows": {"row_id", "source_path", "line_start", "line_end", "source_hash", "source_role", "source_type", "indexed_text", "provenance"},
+        "fts_rows": {"source_path", "line_start", "line_end", "source_hash", "source_role", "source_type", "indexed_text", "provenance"},
+    }
+    for table, columns in expected_columns.items():
+        if table not in tables:
+            continue
+        present = {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
+        missing = columns - present
+        if missing:
+            findings.append(
+                Finding("warn", "projection-index-malformed", f"{table} is missing expected columns: {', '.join(sorted(missing))}", INDEX_REL_PATH)
+            )
+    return findings
+
+
+def _metadata_findings(inventory: Inventory, projection: Projection, metadata: dict[str, str]) -> list[Finding]:
+    findings: list[Finding] = []
+    if metadata.get("schema_version") != str(INDEX_SCHEMA_VERSION):
+        findings.append(
+            Finding(
+                "warn",
+                "projection-index-schema",
+                f"unsupported SQLite index schema {metadata.get('schema_version')!r}; expected {INDEX_SCHEMA_VERSION}",
+                INDEX_REL_PATH,
+            )
+        )
+    if metadata.get("root") and _normalize_path_text(metadata["root"]) != _normalize_path_text(str(inventory.root)):
+        findings.append(
+            Finding(
+                "warn",
+                "projection-index-root-mismatch",
+                f"index root {metadata['root']} does not match current root {inventory.root}",
+                INDEX_REL_PATH,
+            )
+        )
+    shape = _index_shape(projection)
+    if metadata.get("source_set_hash") and metadata.get("source_set_hash") != shape.source_set_hash:
+        findings.append(Finding("warn", "projection-index-hash", "source-set hash does not match current source files; rebuild recommended", INDEX_REL_PATH))
+    if metadata.get("record_set_hash") and metadata.get("record_set_hash") != shape.record_set_hash:
+        findings.append(Finding("warn", "projection-index-hash", "record-set hash does not match current indexed source rows; rebuild recommended", INDEX_REL_PATH))
+    return findings
+
+
+def _source_stale_findings(connection: sqlite3.Connection, projection: Projection) -> list[Finding]:
+    findings: list[Finding] = []
+    try:
+        rows = connection.execute("SELECT path, content_hash FROM source_records WHERE content_hash IS NOT NULL ORDER BY path").fetchall()
+    except sqlite3.DatabaseError as exc:
+        return [Finding("warn", "projection-index-malformed", f"source_records cannot be read: {exc}", INDEX_REL_PATH)]
+
+    stored_hashes = {str(row["path"]): row["content_hash"] for row in rows}
+    current_hashes = {source.path: source.content_hash for source in projection.sources if source.content_hash is not None}
+    changed = [path for path, current_hash in sorted(current_hashes.items()) if stored_hashes.get(path) != current_hash]
+    removed = [path for path in sorted(stored_hashes) if path not in current_hashes]
+    if changed or removed:
+        sample = ", ".join((changed + removed)[:5])
+        findings.append(Finding("warn", "projection-index-stale", f"indexed source hashes differ from current files; sample={sample}; rebuild recommended", INDEX_REL_PATH))
+    return findings
+
+
+def _count_findings(connection: sqlite3.Connection, projection: Projection, metadata: dict[str, str]) -> list[Finding]:
+    findings: list[Finding] = []
+    shape = _index_shape(projection)
+    source_count = _safe_count(connection, "source_records")
+    index_count = _safe_count(connection, "index_rows")
+    fts_count = _safe_count(connection, "fts_rows")
+    if source_count is None or index_count is None or fts_count is None:
+        findings.append(Finding("warn", "projection-index-malformed", "SQLite index row counts could not be read", INDEX_REL_PATH))
+        return findings
+    if source_count != projection.summary.source_count or _metadata_int(metadata, "source_count") != projection.summary.source_count:
+        findings.append(Finding("warn", "projection-index-count", "source count differs from current projection; rebuild recommended", INDEX_REL_PATH))
+    if index_count != len(shape.fts_rows) or fts_count != len(shape.fts_rows) or _metadata_int(metadata, "indexed_row_count") != len(shape.fts_rows):
+        findings.append(Finding("warn", "projection-index-count", "indexed row count differs from current projection; rebuild recommended", INDEX_REL_PATH))
+    if index_count != fts_count:
+        findings.append(Finding("warn", "projection-index-count", "index_rows and fts_rows counts differ; rebuild recommended", INDEX_REL_PATH))
+    return findings
+
+
+def _metadata(connection: sqlite3.Connection) -> dict[str, str]:
+    try:
+        return {str(row["key"]): str(row["value"]) for row in connection.execute("SELECT key, value FROM metadata").fetchall()}
+    except sqlite3.DatabaseError:
+        return {}
+
+
+def _table_names(connection: sqlite3.Connection) -> set[str]:
+    try:
+        return {
+            str(row[0])
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')").fetchall()
+        }
+    except sqlite3.DatabaseError:
+        return set()
+
+
+def _has_index_shape(tables: set[str]) -> bool:
+    return {"metadata", "source_records", "index_rows", "fts_rows"}.issubset(tables)
+
+
+def _safe_count(connection: sqlite3.Connection, table: str) -> int | None:
+    try:
+        return int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+    except (sqlite3.DatabaseError, TypeError, IndexError):
+        return None
+
+
+def _metadata_int(metadata: dict[str, str], key: str) -> int | None:
+    try:
+        return int(metadata.get(key, ""))
+    except ValueError:
+        return None
+
+
+def _unexpected_index_sidecar_findings(root: Path) -> list[Finding]:
+    projection_dir = artifact_dir(root)
+    if not projection_dir.exists() or not projection_dir.is_dir():
+        return []
+    expected = set(INDEX_SIDECAR_NAMES)
+    findings: list[Finding] = []
+    for child in sorted(projection_dir.iterdir(), key=lambda item: item.name.lower()):
+        if child.name.startswith(INDEX_NAME) and child.name not in expected:
+            findings.append(
+                Finding(
+                    "warn",
+                    "projection-index-unexpected-sidecar",
+                    f"unexpected SQLite index sidecar inside owned boundary: {child.name}",
+                    child.relative_to(root).as_posix(),
+                )
+            )
+    return findings
+
+
+def _delete_known_index_paths(root: Path) -> tuple[list[str], list[str]]:
+    projection_dir = artifact_dir(root)
+    if not projection_dir.exists():
+        return [], []
+    deleted: list[str] = []
+    skipped: list[str] = []
+    for name in INDEX_SIDECAR_NAMES:
+        path = projection_dir / name
+        if not path.exists():
+            continue
+        if not _is_under_artifact_dir(root, path):
+            continue
+        if path.is_dir() and not path.is_symlink():
+            skipped.append(path.relative_to(root).as_posix())
+            continue
+        path.unlink()
+        deleted.append(path.relative_to(root).as_posix())
+    return deleted, skipped
+
+
+def _boundary_preflight(root: Path, create: bool) -> list[Finding]:
+    findings: list[Finding] = []
+    root_resolved = root.resolve()
+    current = root
+    for part in ARTIFACT_DIR_REL.split("/"):
+        current = current / part
+        rel_path = current.relative_to(root).as_posix()
+        if current.exists():
+            if current.is_symlink():
+                findings.append(Finding("error", "projection-index-boundary", f"refused symlink in projection index boundary: {rel_path}", rel_path))
+                return findings
+            if not current.is_dir():
+                findings.append(Finding("error", "projection-index-boundary", f"projection index boundary path is not a directory: {rel_path}", rel_path))
+                return findings
+            continue
+        if create:
+            current.mkdir()
+
+    projection_dir = artifact_dir(root)
+    if projection_dir.exists():
+        try:
+            projection_dir.resolve().relative_to(root_resolved)
+        except ValueError:
+            findings.append(Finding("error", "projection-index-boundary", f"projection index boundary escapes target root: {ARTIFACT_DIR_REL}", ARTIFACT_DIR_REL))
+    return findings
+
+
+def _is_under_artifact_dir(root: Path, path: Path) -> bool:
+    boundary = artifact_dir(root).resolve()
+    try:
+        path.resolve().relative_to(boundary)
+        return True
+    except ValueError:
+        return False
+
+
+def _fts5_is_available() -> bool:
+    try:
+        with closing(sqlite3.connect(":memory:")) as connection:
+            connection.execute("CREATE VIRTUAL TABLE fts_probe USING fts5(value)")
+        return True
+    except sqlite3.Error:
+        return False
+
+
+def _fts_query(text: str) -> FullTextQuery | None:
+    terms = re.findall(r"[A-Za-z0-9_]+", text)
+    if not terms:
+        return None
+    if _has_explicit_fts_syntax(text, terms) or len(terms) == 1:
+        return FullTextQuery(" ".join(terms), "fts5-bm25")
+    return FullTextQuery(" OR ".join(_dedupe_terms(terms)), "fts5-bm25-relaxed-or")
+
+
+def _has_explicit_fts_syntax(text: str, terms: list[str]) -> bool:
+    if any(marker in text for marker in ('"', "(", ")", ":", "*")):
+        return True
+    return any(term in {"AND", "OR", "NOT", "NEAR"} for term in terms)
+
+
+def _dedupe_terms(terms: list[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for term in terms:
+        key = term.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(term)
+    return deduped
+
+
+def _row_is_source_verified(source: ProjectionSourceRecord | None, line_number: int, source_hash: str, indexed_text: str) -> bool:
+    if source is None or source.content_hash != source_hash or not source.readable:
+        return False
+    lines = source.content.splitlines()
+    if line_number < 1 or line_number > len(lines):
+        return False
+    return lines[line_number - 1] == indexed_text
+
+
+def _payload_hash(payload: Any) -> str:
+    rendered = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+
+
+def _text_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _normalize_path_text(value: str) -> str:
+    return value.replace("/", "\\").rstrip("\\").casefold()
+
+
+def _trim_line(line: str, limit: int = 140) -> str:
+    compact = re.sub(r"\s+", " ", line.strip())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 3] + "..."
+
+
+def _has_errors(findings: list[Finding]) -> bool:
+    return any(finding.severity == "error" for finding in findings)

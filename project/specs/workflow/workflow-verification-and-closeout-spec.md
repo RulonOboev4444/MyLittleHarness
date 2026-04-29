@@ -1,0 +1,250 @@
+# Workflow Verification Anchors and Closeout Spec
+
+> Product fixture note: In a product source checkout, this spec is retained as a product compatibility fixture for CLI/tests. Operational workflow authority, plans, research, and memory remain in the operating project root; historical archive/evidence material is opt-in only.
+
+## Purpose
+
+This spec defines how the workflow should place verification anchors, what evidence each anchor must produce, and how closeout should remain explicit and cheap-first.
+
+It exists to:
+- verify by meaningful block, not by raw phase count
+- prevent both over-verification and phantom completion
+- keep closeout inspectable
+- avoid hidden escalation from cheap diagnostics into repair or control-plane behavior
+
+This spec does not require a separate verification runtime or background automation.
+
+## MyLittleHarness Core v0 Verification Posture
+
+MyLittleHarness Core v0 completion is evidence-based and repo-visible. A phase, block, or plan is complete only when the evidence names the changed artifact or concise diff summary, the verification method, the observed result, and residual risk or explicit skip rationale.
+
+Core v0 verification must remain valid without Git, GitHub, MCP, hooks, browser state, IDE state, candidate tooling, or external services. When the repository is not a git worktree, closeout records `commit_decision = skipped` with `non-git repo` or policy rationale instead of inventing commit evidence.
+
+Operational switch-over from a compatibility-labeled demo harness to MLH Core is not performed by ordinary contract closeout. A Core v0 plan may produce a switch-over readiness checklist, but any actual switch-over requires a later explicit decision or plan.
+
+For reusable product work, closeout writes working evidence, state writeback, plan archive, and carry-forward decisions in the operating project root, with the product checkout named only as the target root when source/tests/product docs changed there. Closeout must not create archived plans, research history, or workflow operation residue inside the product source tree.
+
+## Authoritative Inputs
+
+- `project/specs/workflow/workflow-artifact-model-spec.md`
+- `project/specs/workflow/workflow-plan-synthesis-spec.md`
+- base workflow closeout rules from `.codex/project-workflow.toml` and the active workflow contract
+
+## Verification Block Model
+
+A verification block is a continuous group of phases or steps that still shape one intermediate artifact or one cheap, reversible subproblem.
+
+The anchor belongs after the block when the work now makes a new claim that can be checked against reality.
+
+## Default Anchor Types
+
+### Plan anchor
+
+When:
+- after research, option synthesis, and draft plan formation
+- before irreversible implementation branching
+
+Checks:
+- scope clarity
+- conflicts with stable memory or stable specs
+- missing constraints
+- dependency fan-in
+- validation and acceptance shape
+
+Output:
+- confirmed plan direction
+- explicit conflict list if canonical docs and the draft direction disagree
+
+### Integration anchor
+
+When:
+- after an implementation block
+- before external integration, interface rollout, or high-cost follow-on work
+
+Checks:
+- contract consistency
+- tests or equivalent verification evidence
+- externally visible behavior
+- migration or compatibility risk when relevant
+- docs impact when relevant
+- when the block claims handoff readiness, whether the evidence is landed stable contract or still only synthesis-ready input
+- whether deferred, optional-next, later-extension, open, or needs-more-research lanes remain explicit instead of being silently promoted
+
+Output:
+- verified block result
+- explicit handoff posture when the block prepares successor rollout
+- or explicit repair / revisit branch
+
+### Closeout anchor
+
+When:
+- before phase closeout, plan archive, or final delivery
+
+Checks:
+- docs decision
+- state writeback
+- verification completeness or explicit skip
+- promotion candidates
+- carry-forward decision for unresolved, deferred, open, and needs-more-research lanes
+- unresolved risks
+- archive or carry-forward decision
+
+Output:
+- closeout summary
+- explicit commit decision or commit skip reason when applicable
+
+## Anchor Placement Heuristics
+
+Insert a verification anchor when at least one condition is true:
+
+- the next block depends on outputs from more than one prior phase
+- a contract, interface, policy, or external behavior boundary has been crossed
+- the next work is expensive, long-running, or hard to roll back
+- uncertainty has accumulated enough that checking now is cheaper than carrying risk forward
+- the workflow is transitioning `design -> execution`, `execution -> integration`, or `integration -> closeout`
+- a demoable or user-visible slice has just been completed
+
+## Skip Heuristics
+
+Do not insert a new anchor when both conditions are true:
+
+- neighboring phases still shape the same artifact or the same cheap reversible subproblem
+- verification would not change the route, scope, or risk posture of the next step
+
+For low-risk trivial work, the first anchor may be skipped when all of these are true:
+
+- the diff is narrow
+- rollback is cheap
+- there is a direct oracle
+- no interface or policy boundary changed
+- the next step does not depend on a multi-phase fan-in
+
+## Evidence Requirements
+
+No block should be treated as complete without local evidence.
+
+Minimum evidence for a verified block:
+- changed artifact path or a concise diff summary
+- verification method
+- observed result
+- residual risks or explicit skip rationale
+
+For docs-only work, evidence may be:
+- landed spec paths
+- explicit consistency review against authoritative inputs
+- identified follow-on implementation gates
+- explicit statement of whether the block landed stable canon or only prepared handoff inputs
+- named carry-forward destinations for any deferred or unresolved lanes
+
+## Handoff Evidence Discipline
+
+A spec-ready synthesis artifact may prove that a contract is ready to land, but it does not prove that stable canon already changed.
+
+If a workflow block claims landed contract, verification should point to normative wording in the stable specs themselves.
+
+If the work stops at synthesis or carry-forward preparation, verification should report that posture explicitly instead of implying rollout completion.
+
+For code work, evidence should prefer deterministic checks such as:
+- tests
+- smoke runs
+- schema or contract validation
+- structured command output
+
+## Verification Modes
+
+The workflow recognizes three verification modes:
+
+- `self-check`
+  Use when the same worker can validate a bounded low/medium-risk block with direct evidence.
+- `independent review`
+  Use when fresh context is likely to catch contract drift, integration risk, or closeout mistakes that the implementation pass may miss.
+- `standalone verdict`
+  Use when verification evidence needs its own durable artifact because the block is risky, externally visible, or audit-heavy.
+
+The mode should match the risk and the audit need. Do not escalate every change into independent review.
+
+## Separate Verification Artifacts
+
+Keep verification inside the active plan by default.
+
+Create a separate verification artifact only when one or more conditions are true:
+
+- the change is medium/high-risk
+- the change affects an external contract, interface, or policy
+- the verification trail is too large or too important to bury inside the plan
+- a later audit will need a standalone verdict
+
+If a separate verification artifact is not justified, do not create one just for symmetry.
+
+## Phantom Completion Guard
+
+The workflow must not mark a block, phase, or plan as complete unless there is explicit evidence or an explicit verified skip.
+
+That means:
+- no silent conversion of intent into completion
+- no closeout based only on chat confidence
+- no phase-complete status without a checkable artifact result
+
+Hooks or helper scripts may assist, but correctness must not depend on hidden hooks.
+
+## Fresh-Context Review and Worktree Use
+
+Fresh-context review is recommended for:
+- risky integration blocks
+- externally visible contract or policy changes
+- closeout passes where an independent reader is likely to catch unresolved drift
+
+Worktree use is allowed only as an opt-in isolation tool when:
+- the review truly benefits from isolation
+- the work is risky enough to justify the extra operational cost
+- the workflow can keep the path explicit and understandable
+
+The workflow must not make worktree-heavy review the default path. Broad worktree swarms, hidden reviewer daemons, and automatic parallel reviewer orchestration remain out of scope for the current workflow.
+
+## Cheap-First Verification Boundaries
+
+- Cheap read-only context and status checks should happen before expensive verification when they can narrow the next action.
+- Failed cheap diagnostics may produce the next recommended action, but they must not silently escalate into broad verification or repair.
+- Repair and other mutating recovery remain explicit.
+- Verification itself must not become a hidden orchestration layer.
+
+## Closeout Contract
+
+Before closeout, the workflow must surface this summary:
+
+- `worktree_start_state`
+- `task_scope`
+- `docs_decision`
+- `state_writeback`
+- `verification`
+- `commit_decision`
+
+Closeout ordering remains:
+
+1. collect outcome and smallest useful evidence
+2. finish docs decision
+3. finish state writeback when required
+4. update or archive the active plan if lifecycle changed
+5. complete verification or mark it explicitly skipped
+6. produce the closeout summary
+7. make the commit decision from that summary and policy
+
+If any required closeout gate is incomplete, the plan stays active.
+
+For MyLittleHarness Core v0 work, closeout must also name carry-forward destinations for deferred enhancement-ledger items, skills/MCP/hooks, package/attach compatibility, rename decisions, and switch-over. Naming a destination does not promote those lanes into core.
+
+When manifest policy is `manual`, the commit decision is skipped even if the directory later becomes a git worktree. When the root is not a git worktree, `worktree_start_state` should record the failed git status fact rather than pretending the tree was clean.
+
+A read-only closeout helper may assemble these fields, including a fail-open VCS posture probe, but helper output is only an input to operator closeout. Clean, dirty, non-git, Git-missing, and Git-failure findings do not approve archive or commit actions. The helper must not stage, stash, commit, checkout, reset, clean, fetch, pull, push, create worktrees, mutate hooks/config, write state, archive plans, or infer task scope stronger than the operator-recorded work.
+
+## Anti-Patterns
+
+The workflow must avoid:
+
+- verification after every phase by habit
+- final closeout with no intermediate integration anchor on risky work
+- marking work complete based only on intention or narration
+- creating standalone verification docs for every tiny task
+- hiding retries, repair loops, or escalation inside verification helpers
+
+

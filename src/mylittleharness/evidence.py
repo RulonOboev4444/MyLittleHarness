@@ -1,0 +1,277 @@
+from __future__ import annotations
+
+from collections.abc import Iterable
+
+from .inventory import Inventory, Surface
+from .models import Finding
+from .evidence_cues import CLOSEOUT_FIELD_NAMES, closeout_field_cues, cue_findings, find_cues
+
+
+ANCHOR_PATTERNS = (
+    ("plan", (r"\bplan anchors?\b", r"\bplan\b.*\banchors?\b")),
+    ("integration", (r"\bintegration anchors?\b", r"\bintegration\b.*\banchors?\b")),
+    ("closeout", (r"\bcloseout anchors?\b", r"\bcloseout\b.*\banchors?\b")),
+)
+
+CARRY_FORWARD_PATTERNS = (
+    r"carry-forward",
+    r"deferred",
+    r"unresolved",
+    r"optional-next",
+    r"later-extension",
+    r"needs-more-research",
+    r"\bopen questions?\b",
+)
+SKIP_RATIONALE_PATTERNS = (
+    r"skip rationale",
+    r"explicit skip",
+    r"verified skip",
+    r"explicitly skipped",
+    r"skipped because",
+)
+
+
+def evidence_findings(inventory: Inventory) -> list[Finding]:
+    state = inventory.state
+    state_data = state.frontmatter.data if state and state.exists else {}
+    active_plan = inventory.active_plan_surface if inventory.active_plan_surface and inventory.active_plan_surface.exists else None
+    findings: list[Finding] = [
+        Finding(
+            "info",
+            "evidence-boundary",
+            "terminal-only read-only report; persistent evidence manifest remains deferred and no files, caches, databases, generated artifacts, VCS probes, hooks, adapters, or mutations are written",
+        ),
+        Finding("info", "evidence-root-kind", f"root kind: {inventory.root_kind}"),
+    ]
+
+    if inventory.root_kind == "product_source_fixture":
+        findings.append(
+            Finding(
+                "info",
+                "evidence-non-authority",
+                "product source checkout contains compatibility fixtures only; evidence findings do not make it an operating project root",
+                state.rel_path if state else None,
+            )
+        )
+
+    findings.extend(_active_plan_findings(inventory, active_plan, state_data))
+    findings.extend(_source_set_findings(active_plan, inventory))
+    findings.extend(_anchor_findings(active_plan, inventory))
+    findings.extend(_identity_findings(active_plan))
+    findings.extend(_closeout_findings(active_plan, inventory))
+    findings.extend(_quality_cue_findings(active_plan))
+    findings.extend(_operator_required_findings(inventory))
+    findings.extend(_line_group_findings(active_plan, "evidence-residual-risk", "residual risk", (r"residual risk", r"residual risks"), inventory))
+    findings.extend(_line_group_findings(active_plan, "evidence-skip-rationale", "skip rationale", SKIP_RATIONALE_PATTERNS, inventory))
+    findings.extend(_line_group_findings(active_plan, "evidence-carry-forward", "carry-forward", CARRY_FORWARD_PATTERNS, inventory))
+    findings.append(
+        Finding(
+            "info",
+            "evidence-non-authority",
+            "candidate evidence can guide closeout assembly, but source files, observed verification, and operator decisions remain authority",
+        )
+    )
+    return findings
+
+
+def _active_plan_findings(inventory: Inventory, active_plan: Surface | None, state_data: dict[str, object]) -> list[Finding]:
+    state = inventory.state
+    plan_status = str(state_data.get("plan_status") or "")
+    configured_plan = str(state_data.get("active_plan") or inventory.manifest.get("memory", {}).get("plan_file", "project/implementation-plan.md"))
+    if active_plan:
+        return [
+            Finding(
+                "info",
+                "evidence-active-plan",
+                f"candidate: active plan present: {active_plan.rel_path}",
+                active_plan.rel_path,
+            )
+        ]
+    if plan_status == "active":
+        return [
+            Finding(
+                "warn",
+                "evidence-active-plan",
+                f"missing: plan_status is active but active plan is not readable: {configured_plan}",
+                state.rel_path if state else configured_plan,
+            )
+        ]
+    return [
+        Finding(
+            "info",
+            "evidence-active-plan",
+            "no active plan is required by current state",
+            state.rel_path if state else None,
+        )
+    ]
+
+
+def _source_set_findings(active_plan: Surface | None, inventory: Inventory) -> list[Finding]:
+    if not active_plan:
+        return [
+            Finding(
+                "info",
+                "evidence-source-set",
+                "source-set scan skipped because no active plan is present",
+            )
+        ]
+    cues = find_cues(active_plan, "source-set", "source-set candidate", (r"\bsource set\b", r"\bsource_set\b"))
+    if not cues:
+        return [
+            Finding(
+                "warn",
+                "evidence-source-set",
+                "missing: active plan has no source-set candidate",
+                active_plan.rel_path,
+            )
+        ]
+    return cue_findings("evidence-source-set", "source-set candidate", cues)
+
+
+def _anchor_findings(active_plan: Surface | None, inventory: Inventory) -> list[Finding]:
+    if not active_plan:
+        return [
+            Finding(
+                "info",
+                "evidence-anchor-missing",
+                "anchor scan skipped because no active plan is present",
+            )
+        ]
+    findings: list[Finding] = []
+    for anchor_name, patterns in ANCHOR_PATTERNS:
+        cues = find_cues(active_plan, f"{anchor_name}-anchor", f"{anchor_name} anchor candidate", patterns)
+        if cues:
+            findings.extend(cue_findings("evidence-anchor-candidate", f"{anchor_name} anchor candidate", cues, limit=2))
+        else:
+            findings.append(
+                Finding(
+                    "warn",
+                    "evidence-anchor-missing",
+                    f"missing: {anchor_name} anchor candidate not found in active plan",
+                    active_plan.rel_path,
+                )
+            )
+    return findings
+
+
+def _identity_findings(active_plan: Surface | None) -> list[Finding]:
+    if not active_plan:
+        return [
+            Finding(
+                "info",
+                "evidence-identity",
+                "cue identity scan skipped because no active plan is present; persistent evidence manifest remains deferred and no evidence manifest was written",
+            )
+        ]
+    return [
+        Finding(
+            "info",
+            "evidence-identity",
+            "report-only cue identity uses kind, source path, line number, normalized preview, and a deterministic hash; persistent evidence manifest remains deferred and no generated report is written",
+            active_plan.rel_path,
+        )
+    ]
+
+
+def _closeout_findings(active_plan: Surface | None, inventory: Inventory) -> list[Finding]:
+    findings: list[Finding] = []
+    policy = inventory.manifest.get("policy", {}) if isinstance(inventory.manifest, dict) else {}
+    closeout_commit = policy.get("closeout_commit")
+    if closeout_commit:
+        findings.append(
+            Finding(
+                "info",
+                "evidence-closeout-candidate",
+                f"candidate: manifest closeout_commit policy is {closeout_commit}",
+                inventory.manifest_surface.rel_path if inventory.manifest_surface else None,
+            )
+        )
+
+    if not active_plan:
+        findings.append(
+            Finding(
+                "info",
+                "evidence-closeout-missing",
+                "closeout field scan skipped because no active plan is present",
+            )
+        )
+        return findings
+
+    for field in CLOSEOUT_FIELD_NAMES:
+        concrete, broad = closeout_field_cues(active_plan, field)
+        if concrete:
+            findings.extend(cue_findings("evidence-closeout-candidate", f"{field} candidate", concrete, limit=2))
+        else:
+            findings.append(
+                Finding(
+                    "warn",
+                    "evidence-closeout-missing",
+                    f"missing: concrete closeout field candidate not found: {field}",
+                    active_plan.rel_path,
+                )
+            )
+            if broad:
+                findings.extend(cue_findings("evidence-closeout-context", f"{field} context", broad, limit=2))
+    return findings
+
+
+def _quality_cue_findings(active_plan: Surface | None) -> list[Finding]:
+    if not active_plan:
+        return [
+            Finding(
+                "info",
+                "evidence-quality-cue",
+                "quality cue scan skipped because no active plan is present; no quality-gate state was written",
+            )
+        ]
+    missing = [field for field in CLOSEOUT_FIELD_NAMES if not closeout_field_cues(active_plan, field)[0]]
+    if missing:
+        return [
+            Finding(
+                "warn",
+                "evidence-quality-cue",
+                f"report-only closeout readiness cue: concrete field evidence missing for {', '.join(missing)}; this does not approve or block lifecycle actions",
+                active_plan.rel_path,
+            )
+        ]
+    return [
+        Finding(
+            "info",
+            "evidence-quality-cue",
+            "report-only closeout readiness cue: concrete closeout field evidence is present; operator decisions and observed verification remain required",
+            active_plan.rel_path,
+        )
+    ]
+
+
+def _operator_required_findings(inventory: Inventory) -> list[Finding]:
+    source = inventory.manifest_surface.rel_path if inventory.manifest_surface and inventory.manifest_surface.exists else None
+    return [
+        Finding(
+            "info",
+            "evidence-operator-required",
+            "operator-required: collect worktree_start_state before closeout; evidence does not run Git or VCS commands",
+            source,
+        ),
+        Finding(
+            "info",
+            "evidence-operator-required",
+            "operator-required: classify task_scope before closeout from the actual work performed",
+            source,
+        ),
+    ]
+
+
+def _line_group_findings(
+    active_plan: Surface | None,
+    code: str,
+    label: str,
+    patterns: Iterable[str],
+    inventory: Inventory,
+) -> list[Finding]:
+    if not active_plan:
+        return [Finding("info", code, f"{label} scan skipped because no active plan is present")]
+    cues = find_cues(active_plan, label.replace(" ", "-"), f"{label} candidate", patterns)
+    if not cues:
+        return [Finding("warn", code, f"missing: {label} candidate not found in active plan", active_plan.rel_path)]
+    return cue_findings(code, f"{label} candidate", cues)

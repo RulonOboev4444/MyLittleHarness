@@ -1,0 +1,26 @@
+workflow = "workflow-core"
+version = 1
+
+# Product compatibility fixture only.
+# Do not open operational plans, archives, research, or workflow memory in this tree.
+# Future product plans live in the operator-provided operating project root
+# with this checkout named as the target root.
+
+[memory]
+state_file = "project/project-state.md"
+plan_file = "project/implementation-plan.md"
+
+[agents]
+orchestrator_skill = "project-orchestrator"
+docs_skill = "sync-docs-from-code"
+
+[policy]
+language = "ru"
+plan_mode = "lazy"
+docmap_mode = "lazy"
+writeback = "meaningful_only"
+docs_check = "mutating_only"
+closeout_commit = "manual"
+
+
+

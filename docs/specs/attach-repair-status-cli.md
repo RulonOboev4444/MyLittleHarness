@@ -1,0 +1,455 @@
+# Attach Repair Status CLI Spec
+
+## Purpose
+
+This spec defines the product boundary for MyLittleHarness CLI surfaces that attach, check, repair, detach, and expose advanced diagnostics for repository contracts.
+
+The CLI contract must be explicit before product code implements commands that inspect or mutate operating memory, fixtures, or reusable product docs.
+
+## Authority
+
+Repo-visible files remain authoritative. A CLI may discover, summarize, validate, or propose changes, but accepted workflow truth remains in the target repository operating root and stable product contracts.
+
+For the portable clean-room posture:
+
+- the operating project root is the repository MyLittleHarness is servicing and owns active operating memory and plans for that repository
+- the product source checkout owns reusable product source and docs
+- archive/evidence roots are opt-in historical lookup targets only
+- MyLittleHarness serves the explicit target repository directly
+
+The CLI must preserve the distinction between live operating memory and product-root compatibility fixtures.
+
+## Non-Authority
+
+CLI output is not authority by itself. Diagnostics, generated reports, dry-run plans, stdout, exit codes, caches, and SQLite rows must not hold the only copy of accepted decisions, active focus, plan status, or stable workflow rules.
+
+A successful status or validate run does not approve switch-over, close a plan, archive history, or authorize repair. A repair proposal does not become accepted until a later mutating path writes repo-visible files under an explicit plan.
+
+## Target Visible CLI
+
+The target product CLI is a small repo utility:
+
+- `init`: attach MyLittleHarness to an explicit target repository. Current implementation routes `init --dry-run` and `init --apply --project <name>` through the same bounded attach behavior as the compatibility `attach` command.
+- `check`: report orientation, validation, and compact check-level drift without writing. Current implementation composes `status`, `validate`, and a small docmap/root-pointer drift section; deeper diagnostics remain explicit advanced commands.
+- `repair`: preview or apply one bounded repair class at a time. Current `repair --dry-run` and `repair --apply` remain the product safety model.
+- `detach`: preview harness disconnect posture and apply a marker-only disabled posture with no surprise deletion. Current `detach --dry-run` is read-only and preservation-first; `detach --apply` creates only the disabled marker in eligible live operating roots.
+
+First-contact docs and top-level help show this small shape first. The first-run operator path starts from source-checkout usage with `PYTHONPATH=src`, optionally verifies package metadata and the console script with `bootstrap --package-smoke`, then points `--root` at the target repository for `init --dry-run`, `check`, `repair --dry-run`, and `detach --dry-run`. Advanced diagnostics may remain available through compatibility commands, hidden/deemphasized help, or an explicit advanced namespace, but they should not define the product front door.
+
+The no-skill start pass is part of the CLI contract. A file-reading, shell-capable agent reads `AGENTS.md`, `.codex/project-workflow.toml`, `project/project-state.md`, and `project/implementation-plan.md` only when `plan_status = "active"` or the operator asks about plan/phase/closeout, then runs `check` before mutation. `.agents/docmap.yaml`, `audit-links`, `check`, and relevant specs provide portable docs-decision inputs; no `docs-impact`, `guide`, or `orient` command is required for v1.
+
+`sync` is not a primary command. Disposable projection refresh, search, semantic readiness, adapter projection, and report assembly stay advanced unless a later implementation proves a visible refresh command reduces operator ceremony.
+
+Compatibility is a transition policy:
+
+- Existing commands and exit semantics must remain intact during the first CLI simplification slice.
+- Old commands may become aliases, advanced commands, or compatibility surfaces after primary `init` and `check` exist.
+- Deprecation starts in docs/help. Normal command stdout should not gain churny warnings unless a later versioned deprecation slice explicitly accepts that behavior.
+- Command removal requires a later scoped deprecation/removal slice with tests and migration notes.
+
+## Current Contract
+
+The implemented 1.0.0 product contract is:
+
+- `init --dry-run` and `init --apply --project <name>` are the primary spellings for bounded scaffold attachment. They preserve the existing attach dry-run/apply behavior, output shape, mutation boundary, and exit behavior.
+- `check` is read-only and sectioned as `Status`, `Validation`, `Drift`, and `Boundary`. It composes `status`, `validate`, and check-level drift findings for candidate docmap gaps, stale configured-root role wording, primary instruction-surface size warnings, and explicit delivered-vs-remainder capability token contradictions in operating-memory or research surfaces, writes no files, returns `1` when validation has error findings, and otherwise returns `0` even when warning findings are present. The primary instruction-surface size warning is limited to start-pass surfaces such as `AGENTS.md`, `README.md`, `.agents/docmap.yaml`, `.codex/project-workflow.toml`, `project/project-state.md`, and the active plan; product docs and stable specs remain covered by advanced `context-budget` detail instead of check-level drift.
+- `detach --dry-run` is the primary detach preview. It is explicit-mode only, returns `0` for readable roots, renders `Root Posture`, `Preservation`, `Marker`, `Generated Projection`, `Manual Recovery`, and `Boundary` sections, uses `detach-*` finding codes, previews `.mylittleharness/detach/disabled.json`, and writes no files, reports, caches, generated outputs, snapshots, Git state, config, hooks, CI files, package artifacts, or workstation state. Bare `detach`, combined modes, unknown flags, and `disable` are argparse usage failures with exit code `2`.
+- `detach --apply` is the marker-only detach apply path. It creates only `.mylittleharness/detach/disabled.json` in eligible live operating roots, leaves valid existing markers for the same root unchanged, returns `0` for marker creation or idempotent reuse, and returns `2` when target root authority, default authority paths, marker path, or existing marker payload is invalid or ambiguous. Product-source fixtures, fallback/archive or generated-output roots, ambiguous roots, missing or unreadable manifest/state surfaces, non-default authority paths, symlink/path conflicts, and boundary conflicts are refused before marker creation. `disable` is explanatory terminology only, not a CLI alias.
+- `detach` preserves `.codex/project-workflow.toml`, `project/project-state.md`, `.agents/docmap.yaml`, `project/specs/workflow/`, archives, research, repair snapshots, and `.mylittleharness/generated/projection/` when present. The disabled marker is informational evidence only and cannot approve cleanup, repair, closeout, archive, commit, rollback, switch-over, lifecycle decisions, or future mutations.
+- `status` is read-only and reports current root posture, manifest presence, state/plan pointers, fixture classification, and obvious residue risks.
+- `validate` is read-only and checks contract structure, required files, path validity, lifecycle status, and cross-link sanity.
+- Read-only status and validation distinguish product-source fixtures from live operating roots. For live operating roots, a root `README.md` is optional, `.agents/docmap.yaml` may remain absent when the manifest uses `docmap_mode = "lazy"`, and prose-style `project/project-state.md` assignment lines may supply read-only lifecycle fields such as `operating_mode`, `plan_status`, and `active_plan`.
+- `context-budget`, `audit-links`, and `doctor` are read-only analyzer commands that report context size, local link/docmap/root-pointer drift, and product-root hygiene. `doctor` stays summary-oriented and reports context-budget warning counts instead of duplicating section-size output. `audit-links` treats repair snapshot copied-file paths such as `files/.agents/docmap.yaml` as snapshot-internal references when they are absent from the repo root.
+- `intelligence [--query TEXT] [--search TEXT] [--path TEXT] [--full-text TEXT] [--limit N] [--focus search|warnings|projection]` is a read-only aggregate command. Its default output reports terminal-only sections named `Summary`, `Boundary`, `Drift`, `Repo Map`, `Backlinks`, `Search`, `Fan-In`, and `Projection`.
+- `intelligence` uses only inventory-discovered surfaces as its initial search and backlink corpus. Exact text search and path/reference search are case-sensitive, `--path` remains a path/reference query rather than a report scope, and `--query` expands a single recovery query into any omitted exact text, path/reference, and full-text modes while explicit mode flags keep their own values.
+- `intelligence --focus search` renders compact source inventory plus `Summary` and `Search` only. Exact text search reads direct source content through the in-memory projection because projection artifacts do not store source bodies. Path-focused search compares valid artifact path/reference rows with the current in-memory projection and reports an advisory skip reason when artifacts are missing, stale, corrupt, malformed, or mismatched. Full-text search uses SQLite FTS/BM25 only when the index is current and source-verified; otherwise it reports an advisory skip reason. Plain multi-term full-text input is relaxed into an OR query over indexable terms for recovery search, while explicit uppercase FTS operators such as `AND`, `OR`, `NOT`, or `NEAR`, quoted input, and other FTS control markers keep explicit query mode. `--limit` controls full-text result count and must be at least `1`. `intelligence --focus warnings` renders compact source inventory plus `Summary` and actionable warning/error findings only, including primary instruction-surface size warnings and remainder-drift warnings when the same explicit capability token is described as delivered/current and future/backlog work in operating-memory or research surfaces outside historical-release context.
+- `intelligence --focus projection` renders compact source inventory plus `Summary`, `Boundary`, and `Projection` only. Projection output reports rebuild status, in-memory storage boundary `none`, owned artifact boundary status, source-hash coverage, record counts, missing/unreadable source diagnostics, and source provenance.
+- Focused and default `intelligence` output may demote optional/lazy/user-global/historical recovery noise to informational findings before computing the intelligence result. This demotion is scoped to `intelligence` and does not change `audit-links`, `doctor`, or validation severity semantics.
+- `intelligence` rebuilds an in-memory projection from `Inventory` on every run and may derive repo-map rows, backlink references, search matches, fan-in summaries, source hashes, and record counts from that projection. It may read the optional SQLite FTS/BM25 index for source-verified full-text results, but it must not write report files, generated artifacts, search indexes, caches, local databases, SQLite files, adapter state, hooks, mutation proposals, or switch-over surfaces.
+- `evidence` is a read-only terminal report with no mode flags. It scans inventory-discovered workflow surfaces for active-plan presence, source-set pointers, verification anchor candidate text, closeout field candidates, validation sections as verification closeout candidates, residual-risk lines, explicit skip rationale, and carry-forward destination mentions. Candidate cue findings include report-only identity metadata from cue kind, source path, line number, normalized preview text, and a deterministic hash. Concrete closeout field candidates require explicit field bullets, exact field headings, or observed result lines; manifest language remains context. It reports `worktree_start_state` and `task_scope` as operator-required reminders instead of running Git or any VCS subprocess, and it remains read-only.
+- `evidence` finding codes use the `evidence-*` family. Findings may report `candidate`, `missing`, `ambiguous`, `operator-required`, identity, or quality-readiness posture, but they must not report helper decisions such as complete, approved, closed, committed, or archived. Missing active plans, absent closeout fields, prose-only state, non-git roots, and product-source fixtures remain report states rather than command failures.
+- `closeout` is a read-only terminal report for closeout assembly. It may run only target-bound read-only VCS probes equivalent to `git -C <root> rev-parse --is-inside-work-tree`, `git -C <root> rev-parse --show-toplevel`, and `git -C <root> status --porcelain=v1`. It must not run Git write operations, remote/network operations, hook/config mutation, stash, checkout, reset, clean, fetch, pull, push, worktree creation, archive, repair, commit, or lifecycle mutation.
+- `closeout` finding codes use the `closeout-*` family, with Git evidence suggestions under `closeout-git-evidence-*`. The report assembles candidates and prompts for `worktree_start_state`, `task_scope`, `docs_decision`, `state_writeback`, `verification`, and `commit_decision`, plus residual-risk, explicit-skip, carry-forward, report-only quality/readiness cues, projection posture, manifest policy, root-kind cues, and optional read-only Git trailer suggestions. Concrete closeout field lines are explicit field bullets, exact field headings, or observed result lines; broad future-contract mentions remain context when concrete field evidence is absent. It may report clean, dirty, non-git, Git-missing, and Git-failure posture, including bounded changed-file counts and samples from porcelain status. For Git worktrees, trailer suggestions are emitted only when explicit closeout lines provide the required fields; for non-git or unknown Git posture, the report gives the Markdown/operator-summary fallback and emits no trailer suggestions. It does not approve closeout, archive plans, decide task scope, stage files, commit, write state, write persistent evidence manifests, or write quality-gate state.
+- `docs_decision` values are `updated`, `not-needed`, and `uncertain`. A docs decision is required when behavior, CLI usage, configuration, setup, contract meaning, permissions, output shape, UX/copy, terminology, rollout, migration, or other user-facing meaning changes. `uncertain` blocks confident closeout language. The decision is an operating-root closeout fact assembled from diff evidence, docmap routing when present, `audit-links`, `check`, and relevant specs; it is not owned by Codex skills, IDE rules, generated reports, MCP clients, hooks, or CI.
+- `preflight` is a read-only terminal report. Without `--template`, it renders `Summary`, `Checks`, `Closeout Readiness`, and `Boundary` sections, summarizes `validate`, `audit-links`, `context-budget`, product hygiene, and read-only closeout posture, and may include VCS posture cues from the existing closeout probe. `preflight --template git-pre-commit` prints only a deterministic POSIX local Git pre-commit wrapper to stdout. The wrapper embeds the resolved target root with shell-safe quoting, runs `mylittleharness --root "$MLH_ROOT" preflight`, warns when `mylittleharness` is unavailable or when preflight does not complete, and always exits `0`. Preflight is suitable for manual or explicitly opted-in wrapper consumption, but it does not install hooks, add CI/GitHub workflows, block by itself, create generated reports, mutate workflow state, repair files, archive, commit, switch roots, or approve lifecycle actions. It returns `0` when the report or template completes, including warning or error findings in report mode; root-load failures and parser usage failures remain exit `2`.
+- `tasks --inspect` is a read-only terminal operator task map and transition tool. It is hidden from top-level help while `tasks --help` and `tasks --inspect` remain supported. It renders `Summary`, `Operator Tasks`, `Compatibility`, `Boundary`, and `Future Power-Ups` sections; groups the existing command surface into orient, verify, search/inspect, evidence/closeout, generated projection, package/bootstrap/switch-over readiness, and attach/repair tasks; records package smoke as documented verification posture while `bootstrap --inspect` is a readiness report; and preserves every existing command, flag, exit behavior, default, mutation boundary, and console script entry point. It is a deprecation candidate after primary `init` and `check` exist because it preserves the overloaded command cockpit. It returns `0` for readable roots; root-load failures remain exit `2`, and bare `tasks` or unknown task flags are argparse usage failures with exit `2`.
+- `bootstrap --inspect` is a read-only terminal bootstrap readiness report and transition diagnostic. It is hidden from top-level help while `bootstrap --help`, `bootstrap --inspect`, and `bootstrap --package-smoke` remain supported. It renders `Summary`, `Package Smoke`, `Bootstrap Apply`, `Switch-Over`, `Publishing`, `Workstation Adoption`, and `Boundary` sections; reports interpreter context, root kind, product package metadata when available, console-script declaration, and PATH discovery for `mylittleharness`; separates local package smoke, rejected standalone bootstrap apply, rejected standalone switch-over automation, publishing automation, package artifact policy, PATH/user-config mutation, and workstation adoption into explicit decision lanes; and returns `0` for readable roots even when future-gate lanes are warning findings. Workstation adoption is no-write readiness evidence only. Standalone `bootstrap --apply` and standalone switch-over automation are rejected as product surfaces; future adoption, publication, or migration checklist behavior needs a later scoped contract with its own command ownership, exact target root, exact write set, dry-run shape, refusal cases, validation gate, rollback posture, cleanup or non-adoption story, closeout evidence, and non-authority wording. It is a deprecation candidate after CLI simplification because bootstrap, publishing, switch-over, and workstation adoption should not be first-contact concepts.
+- `bootstrap --package-smoke` is an explicit local package verification mode for the product source checkout. It renders `Summary`, `Package Root`, `Temp Boundary`, `Install`, `Import`, `Console Script`, and `Boundary` sections; requires `pyproject.toml`, empty `build-system.requires`, the `../../build_backend/mylittleharness_build.py` stdlib backend, and `src/mylittleharness` in a product-source fixture; creates only a temporary source copy and temporary virtual environment outside the product root; runs local install with `--no-index --no-build-isolation --no-deps`; verifies `import mylittleharness` against the pyproject version; verifies `mylittleharness --help`; returns `0` when all smoke checks pass; returns `1` when package-root validation, install, import, or console checks fail; and deletes the temporary workspace before command completion. This is the supported local install verification path for the release candidate, not publication or global installation. Root-load failures remain exit `2`, and bare `bootstrap`, combined modes, unknown bootstrap flags, or apply-like bootstrap flags are argparse usage failures with exit `2`.
+- `semantic --inspect` is a read-only terminal readiness report for future semantic retrieval. It renders `Summary`, `Search Base`, `Runtime`, `Evaluation`, and `Boundary` sections over the current in-memory projection, generated projection artifact posture, SQLite FTS/BM25 index posture, explicit runtime deferral, and report-only evaluation expectations. It returns `0` for readable roots even with readiness warnings.
+- `semantic --evaluate` is a read-only terminal bounded evaluation report. It renders `Summary`, `Corpus`, `Evaluation Queries`, `False-Positive Review`, `Source Verification`, `Degraded Modes`, and `Boundary` sections over fixed built-in queries only: semantic retrieval, source verification, stale-index posture, offline degraded mode, lifecycle-risk terms, and a deterministic negative no-match probe. It uses the current SQLite FTS/BM25 index only when the index is current and source-verified; match findings include source path, line number, query mode, rank, and source hash provenance. Missing, stale, corrupt, malformed, root-mismatched, or FTS5-unavailable indexes are degraded inputs, not write triggers or command failures. Bare `semantic`, combined semantic modes, or unknown flags are argparse usage failures with exit `2`; root-load failures remain exit `2`.
+- `adapter --inspect --target mcp-read-projection` is a read-only terminal adapter inspection report. It uses existing inventory plus an in-memory projection to report adapter identity, purpose, owner, input root, output shape, source-bound provenance hashes, source paths/roles/counts/hashes, link and fan-in counts, optional generated artifact/index posture, and no-authority reminders. It returns `0` for readable roots with info or warning findings; root-load failures remain exit `2`, and missing adapter mode or unknown targets are argparse usage failures with exit `2`.
+- `adapter --serve --target mcp-read-projection --transport stdio` is a foreground dependency-free MCP stdio JSON-RPC tools server over the same read projection. It supports only `initialize`, `notifications/initialized`, `ping`, `tools/list`, and `tools/call`; exposes exactly one tool, `mylittleharness.read_projection`; accepts only an empty-object tool argument shape; and returns both `structuredContent` and a text JSON copy with adapter metadata, root posture, status, sources, sections, finding payloads, and boundary notes. It writes only JSON-RPC messages to stdout, exits cleanly on EOF, and keeps generic CLI/repo files sufficient without MCP tooling. Missing `--transport stdio` is an argparse usage failure with exit `2`; malformed JSON, unknown methods, and unknown tools are protocol errors; non-empty tool arguments are tool execution errors with `isError: true`.
+- `projection --build|--inspect|--delete|--rebuild [--target artifacts|index|all]` is the explicit generated-output command. It owns only `.mylittleharness/generated/projection/`. The default `--target artifacts` writes deterministic schema v2 JSON projection artifacts, records manifest payload hashes, source-set hash, record-set hash, and query capability metadata, diagnoses missing/stale/corrupt/stale-v1/schema/root/incomplete/malformed/unexpected/hash-mismatched artifact sets, and remains advisory. Artifact delete refuses directory-shaped expected JSON artifact paths instead of recursively deleting them. `--target index` writes, inspects, deletes, or rebuilds only `search-index.sqlite3` plus known same-basename SQLite sidecars. It diagnoses missing, stale, corrupt, unsupported FTS5, schema/root/hash/count drift, malformed tables, failed integrity checks, unexpected index sidecars, and directory-shaped sidecars preserved without recursive delete. `--target all` manages both targets. Bare `projection` is a usage failure with exit code `2`.
+- `snapshot --inspect` is the read-only terminal report for repair snapshot inspection. It inspects `.mylittleharness/snapshots/repair/` for snapshot presence, `snapshot.json` readability, schema version, command, repair class, target-root and snapshot-root consistency, copied-file presence, hash and byte-count consistency, current-target posture, retention, manual rollback instructions, and non-authority wording. It reports product-source snapshot debris, fallback/generated/ambiguous root posture, malformed metadata, missing copied files, copied-file mismatch, missing current targets, symlink path conflicts, and snapshot boundary conflicts as findings; it does not write files, create snapshots, repair, roll back, clean up, archive, commit, switch roots, update project state, or approve closeout. Bare `snapshot` is a usage failure with exit code `2`.
+- `init --dry-run` and compatibility `attach --dry-run` report a scaffold proposal without creating files or directories. For a product-source compatibility fixture, they report a no-op rather than proposing operating-root scaffold expansion inside the product tree. For fallback/archive or generated-output roots, required `--project` posture, and symlink or non-directory target path conflicts, they report fail-closed apply predictors without writing.
+- `init --apply --project <name>` and compatibility `attach --apply --project <name>` are the implemented mutating attach modes. They are create-only, refuse product-source compatibility fixtures and fallback/archive or generated-output roots with exit code `2`, refuse symlink or non-directory path conflicts before writing, and may create only absent eager scaffold directories plus absent `.codex/project-workflow.toml` and `project/project-state.md` from explicit templates.
+- `repair --dry-run` reports validation-linked repair proposals without restoring, rewriting, deleting, archiving, or switching roots. For the selected `state-frontmatter-repair` class, it emits a no-write snapshot plan only when validation reports `state-prose-fallback` for the default `project/project-state.md`. For the selected `agents-contract-create` class, it emits a no-write plan only when validation reports missing required `AGENTS.md`. For the selected `docmap-create` class, it emits a no-write plan only when validation reports a missing required `.agents/docmap.yaml`; lazy or not-required docmaps remain absent. For the selected `stable-spec-create` class, it emits a no-write plan only when validation reports missing required `project/specs/workflow/*.md` fixtures. For the selected `.agents/docmap.yaml` route-repair class, it emits no-write snapshot-plan findings that name target files, a deterministic preview snapshot path, metadata fields, refusal or skip reasons, manual rollback posture, and validation commands.
+- `repair --apply` is the implemented limited mutating repair mode. It refuses product-source compatibility fixtures and ambiguous roots with exit code `2`, may snapshot-protect and prepend missing project-state frontmatter in a prose-state live operating root, may create absent eager scaffold directories in a live operating root that already has a readable workflow-core manifest and project state, may create absent required `AGENTS.md` through the `agents-contract-create` class, may create an absent required `.agents/docmap.yaml` through the `docmap-create` class, may create absent required `project/specs/workflow/*.md` files through the `stable-spec-create` class, and may run the selected snapshot-protected `.agents/docmap.yaml` route repair.
+- `repair --dry-run` and `repair --apply` are mutually exclusive, and one of them is required; bare `repair` remains a usage failure with exit code `2`.
+
+Read-only paths may fail open with partial diagnostics when optional metadata, generated projections, adapters, search indexes, or non-frontmatter project-state prose are unavailable. Mutating paths must fail safe when root authority, target files, or repair intent is ambiguous.
+
+The `intelligence` report is advisory. Its finding-code families may include existing link and stale-pointer findings, `remainder-drift`, and focused `intelligence-*`, `repo-map-*`, `backlink-*`, `search-*`, `fan-in-*`, and `projection-*` codes. The remainder-drift signal compares explicit quoted or backticked capability tokens in operating-memory and research surfaces when delivered/current context conflicts with future/backlog/remainder context, ignores historical-release context, and does not infer contradictions from ambiguous prose or ordinary product-doc narrative. The summary section reports root kind, status, corpus count, actionable warning count, active query information, lifecycle fields when available, and top recovery targets. Search results, fan-in summaries, projection diagnostics, and remainder-drift warnings point back to source paths and line numbers when available, but they do not approve repairs, doc rewrites, closeout, archive actions, commits, or plan lifecycle changes.
+
+The `evidence` report is also advisory. It reuses the standard report shape and should keep deterministic finding order: boundary and root posture first, active-plan/source-set signals next, anchor and closeout candidates or gaps, report-only cue identity, quality/readiness cues, operator-required closeout fields, residual-risk or skip-rationale lines, carry-forward cues, and non-authority reminders. It may point to source paths and line numbers when practical, and cue identity should remain deterministic across repeated runs over unchanged source lines. Explicit closeout field bullets, exact field headings, and observed result lines can satisfy closeout candidates; manifest wording, future-contract text, and deferred-lane descriptions should remain context. The report must not create persistent evidence manifests, evidence databases, generated report stores, quality-gate state, background runtimes, adapter output, semantic indexes, commits, archives, repairs, or plan lifecycle mutations.
+
+The `closeout` report is advisory and sectioned for assembly, not approval. It should keep deterministic sections for summary, worktree posture, closeout fields, Git evidence, evidence cues, report-only quality gates, projection posture, and boundary reminders. VCS data is evidence input only: a dirty worktree should be a warning-level posture cue; a clean worktree, non-git root, or missing Git executable should remain a report result rather than a command failure. The Git evidence section suggests trailers in deterministic order only from explicit closeout lines: `MLH-Worktree-Start-State`, `MLH-Task-Scope`, `MLH-Docs-Decision`, `MLH-State-Writeback`, `MLH-Verification`, `MLH-Commit-Decision`, optional `MLH-Residual-Risk`, and optional `MLH-Carry-Forward`. Reported quality gates are readiness cues only and do not become enforcement state. The report must keep manifest policy subordinate to operator closeout rules, especially when `closeout_commit = "manual"` or when a dirty-start mixed-scope task blocks auto-commit. Persistent evidence manifests remain outside the current report-only closeout slice; durable evidence direction is Git trailers or commit metadata for Git repositories and Markdown closeout fields for non-git roots.
+
+The `preflight` report is advisory and sectioned for optional warning workflows, not enforcement. It should summarize existing analyzer and closeout signals instead of inventing a second gate store. Error-level findings may make the report status `error`, but the command still returns `0` after a successful report so operators or wrapper scripts can decide their own policy explicitly. `preflight --template git-pre-commit` is also advisory: it prints a wrapper template only, creates no hook file, and the wrapper itself exits `0` after warning on missing tooling or unsuccessful preflight completion. Preflight output must not be the only closeout truth, and future strict, blocking, CI, installation, or workflow-generation modes require a separate scoped plan.
+
+The `tasks --inspect` report is advisory and sectioned for operator orientation, not orchestration. It should summarize the current command groups, compatibility posture, boundary reminders, package-smoke posture, and future gated lanes without acting as a hidden alias router. Task-map output must not create reports, caches, generated projections, adapter state, hooks, package artifacts, snapshots, mutation proposals, closeout approval, archive actions, commits, switch-over, or lifecycle decisions.
+
+The `bootstrap --inspect` report is advisory and sectioned for readiness, not installation or distribution. It should summarize package smoke posture, interpreter and package metadata context, read-only PATH discovery, rejected standalone bootstrap apply posture, switch-over scoped-contract requirements, publishing deferral, workstation adoption boundaries, and no-authority reminders. Bootstrap readiness output must not execute discovered console scripts, build wheels, create package artifacts, install dependencies, mutate PATH, shell profiles, user config, hooks, CI, IDE/browser/MCP state, write reports, create generated output, publish packages, use publishing credentials, switch roots, approve closeout, archive, commit, repair, or make lifecycle decisions.
+
+The `bootstrap --package-smoke` report is verification evidence, not installation or distribution automation. It may install the package only inside a temporary virtual environment outside the product source root, using a temporary source copy and no network indexes. It proves only package metadata, import/version, and console-script behavior for the current local checkout. It must not persist build directories, wheels, egg-info, package artifacts, reports, caches, virtual environments, or generated output in the product root. Smoke output cannot approve bootstrap apply, switch-over, publishing, workstation adoption, closeout, archive, commit, repair, rollback, or lifecycle decisions.
+
+The `semantic --inspect` report is advisory and sectioned for readiness, not retrieval. It should summarize the current source/projection/search base before any embedding runtime exists, make missing or stale generated projection artifacts and SQLite indexes degraded inputs rather than failures, record that semantic runtime and generated semantic output are deferred, and list evaluation expectations for false positives, stale indexes, missing runtimes, corrupted indexes, offline degraded mode, and source verification. It must not accept semantic search queries, install dependencies, download models, call providers, create `.mylittleharness/generated/semantic/`, write vector stores, write generated reports, mutate files, approve repair, approve closeout, archive, commit, switch roots, or make semantic matches authoritative.
+
+The `semantic --evaluate` report is advisory and sectioned for evaluation, not semantic retrieval. It should use only the fixed product evaluation cases, read only the existing current SQLite FTS/BM25 index plus current source files, and report source-verified matches or degraded-input skips with `semantic-evaluation-*` finding codes. False-positive review should include the negative probe and lifecycle-risk query, and lifecycle-term matches must remain recovery hints only. The command must not accept arbitrary query text, build or rebuild indexes, create generated semantic output, install runtimes, add dependencies, call providers, approve repair, approve closeout, archive, commit, switch roots, or mutate workflow state.
+
+The `adapter` report and stdio tool output are advisory and sectioned for optional integration. They should keep deterministic sections for adapter metadata, projection summary, source records, generated-input posture, and boundary reminders. Generated artifacts and SQLite indexes are optional inputs only: missing generated output should be informational, while stale, corrupt, malformed, or boundary-conflicted generated output should be warning-level degraded input. Adapter output must not copy source bodies or become the only recovery path; generic CLI reports and repo-visible files remain sufficient without MCP tooling installed.
+
+Projection artifacts and indexes are not mutation authority. They may report paths, hashes, link/backlink records, fan-in records, query capability metadata, integrity hashes, summary counts, source-bound line rows, full-text ranks, and query mode, but they must not store lifecycle decisions. SQLite may store indexed source text as generated cache content, but schema and metadata must not create lifecycle authority fields. Missing generated output is informational; stale, corrupt, malformed, unexpected, hash-mismatched, or unsupported generated output is warning-level and should fail open to direct files.
+
+The `snapshot --inspect` report is advisory and uses the standard report shape. A clean inspection can prove that metadata and copied bytes are readable and internally consistent, but it cannot prove that a repair was correct, that rollback should be performed, that old snapshots should be deleted, or that a later repair is authorized. It returns `0` when inspection completes, including warning findings; parser or target-root load failures remain exit `2`.
+
+## Mutation Boundary
+
+Mutating attach and repair behavior is gated by root classification before any filesystem write:
+
+- A live operating root is an operator-provided target repository that owns operating memory and is not classified as product source, product compatibility fixture, archive/evidence material, generated output, adapter state, cache, or archive-only material.
+- A product-source compatibility fixture is any target whose state marks `root_role = "product-source"`, `fixture_status = "product-compatibility-fixture"`, or whose `product_source_root` resolves to the target root. Apply modes must refuse this target with exit code `2`; dry-run modes remain report-only and may return no-op proposals.
+- A fallback, archive, generated-output, adapter, cache, log, local database, package archive, user config, PATH, hook, MCP, GitHub, browser, IDE, or switch-over surface is outside the write boundary. Apply modes must refuse it with exit code `2`.
+
+All allowed write paths must normalize under the explicit target root. A write that would escape the target root, follow ambiguous authority, rewrite an existing file, delete content, move content, archive content, commit changes, mutate user/workstation configuration, or infer authority from stale docs, weak semantic matches, generated projections, caches, adapters, or terminal output is forbidden.
+
+The `projection` command is separate from attach/repair apply modes. It may write and delete generated artifacts and the SQLite index only under `.mylittleharness/generated/projection/`; those generated outputs cannot authorize attach, repair, archive, commit, switch-over, or plan lifecycle changes.
+
+Read-only root classification is broader than mutation authority. Prose-style project-state assignments can make `status` and `validate` understand an operating root. The only mutating path from prose state is the selected `state-frontmatter-repair` class, which snapshots default-path `project/project-state.md`, prepends deterministic frontmatter, runs validation, and then stops before any other repair class.
+
+Snapshot storage is not a generated projection boundary, adapter surface, cache, or authority layer. Snapshot-protected repair may use only the owned target-root safety boundary `.mylittleharness/snapshots/repair/` for the exact repair class named by a dry-run snapshot plan. Apply modes must refuse product-source fixtures, fallback/archive roots, ambiguous roots, generated-output roots, symlink path segments, target-root escapes, and any snapshot boundary conflict before writing. `snapshot --inspect` may report these same root and path postures, but inspection never turns a refused or ambiguous root into mutation authority.
+
+## Attach Apply Contract
+
+The first mutating attach slice is create-only:
+
+- `attach --apply --project <name>` may create absent eager scaffold directories: `.agents`, `.codex`, `project/specs/workflow`, `project/research`, `project/plan-incubation`, `project/archive/plans`, and `project/archive/reference`.
+- `attach --apply --project <name>` may create absent `.codex/project-workflow.toml` and `project/project-state.md` from explicit product templates.
+- `attach --apply --project <name>` refuses fallback/archive or generated-output roots, symlink path segments, existing non-directory scaffold parents, existing non-file template targets, and template content mismatches before any attach write.
+- `--project <name>` is required when `project/project-state.md` would be created. The CLI must not invent a placeholder project name from the folder path.
+- Existing allowed directories are idempotent no-ops. Existing files with exact template content may be treated as no-ops; existing files with different content must be refused until a later snapshot-protected repair implementation names that exact file class.
+- The first attach apply slice does not create `.agents/docmap.yaml` or `project/specs/workflow/*.md` unless a later implementation phase adds explicit template authority for those files.
+
+Attach apply output should list changed paths and refused paths. It must not create report files, validation artifacts, caches, logs, archives, or local databases.
+
+## Repair Apply Contract
+
+Repair remains narrower than validation. A validation diagnostic can become repairable only when the implementation names a deterministic action, an allowed target path, and a matching dry-run proposal.
+
+The implemented repair apply slice may snapshot-protect and prepend missing `project/project-state.md` frontmatter through the `state-frontmatter-repair` class, may create missing scaffold directories, may create absent required `AGENTS.md` through the create-only `agents-contract-create` class, may create an absent required `.agents/docmap.yaml` through the create-only `docmap-create` class, may create absent required `project/specs/workflow/*.md` fixture files through the create-only `stable-spec-create` class, and may rewrite only `.agents/docmap.yaml` route metadata through the snapshot-protected `docmap-route-repair` class. Manifest normalization, malformed or partial state frontmatter repair, AGENTS/stable-spec rewrites, stale-plan cleanup, mirror resync, archive handling, switch-over, broad docmap normalization, and active-plan mutation require later dry-run/apply implementations that name one exact repair class each.
+
+Implemented `repair --apply` behavior:
+
+- requires an existing readable `.codex/project-workflow.toml` with `workflow = "workflow-core"`
+- may run `state-frontmatter-repair` when `validate` reports `state-prose-fallback`, the manifest uses the default state path, required lifecycle assignments are present, and active-plan pointers match the manifest
+- otherwise requires an existing `project/project-state.md` with strict workflow-core frontmatter
+- may create absent eager scaffold directories: `.agents`, `.codex`, `project/specs/workflow`, `project/research`, `project/plan-incubation`, `project/archive/plans`, and `project/archive/reference`
+- treats existing allowed directories as idempotent no-ops
+- may create absent `AGENTS.md` from a packaged minimal operator-contract template only when validation reports it as a missing required surface; existing `AGENTS.md` files are never rewritten
+- may create an absent `.agents/docmap.yaml` only when validation reports it as a missing required surface; `docmap_mode = "lazy"` and not-required docmaps remain no-ops
+- may create absent `project/specs/workflow/*.md` stable workflow spec fixtures only when validation reports `missing-stable-spec`; existing stable spec files are never rewritten
+- may update an existing `.agents/docmap.yaml` only by adding deterministic route entries from `docmap-routing` and `candidate-docmap-gap` diagnostics after creating a repair snapshot
+- after a successful state frontmatter repair, stops before scaffold, AGENTS, docmap, or stable-spec repair and tells the operator to rerun `repair --apply` for any remaining classes
+- refuses product-source compatibility fixtures, fallback/archive evidence, ambiguous roots, non-default state paths, malformed or partial state frontmatter, active-plan mismatch, symlink path segments, non-directory path conflicts, target-root escapes, and snapshot boundary conflicts before content mutation; lazy or not-required docmaps are skipped
+- does not create or rewrite manifest, active plans, existing AGENTS contracts, existing stable specs, archives, research files, reports, caches, local databases, generated outputs, broad docmap structure beyond the deterministic create template, or switch-over surfaces
+
+`repair --apply` must run post-repair `validate` and `audit-links` checks after any allowed write. It returns:
+
+- `0` when the apply pass succeeds and required post-repair validation has no errors, including idempotent no-op success.
+- `1` when the command completed but required post-repair validation still reports errors.
+- `2` when the target root, requested repair, target path, command arguments, or write authority is invalid or ambiguous.
+
+Post-repair output must show changed paths, skipped or refused proposals, the validation result, the audit-link result, snapshot paths when a snapshot is created, manual rollback instructions, and any residual risk. It must not treat a repair proposal or snapshot metadata as authority by itself.
+
+The implemented state frontmatter repair class is `project/project-state.md` frontmatter prepending:
+
+- The target path is limited to default manifest state path `project/project-state.md`.
+- The diagnostic source is `state-prose-fallback` from `validate`; malformed or partial existing frontmatter is refused rather than normalized.
+- The dry-run plan reports repair class `state-frontmatter-repair`, the target file, deterministic frontmatter keys, preview snapshot path, copied-file path, metadata fields, manual rollback posture, validation commands, and non-authority wording.
+- Apply creates a timestamped snapshot, copies pre-repair state bytes to `files/project/project-state.md`, writes snapshot metadata with `planned_frontmatter_keys`, prepends deterministic YAML frontmatter, and preserves the original Markdown body bytes.
+- Manual rollback is copying the snapshot file back to `project/project-state.md`, then running `validate` and `audit-links`.
+- The class cannot repair manifest state paths, malformed frontmatter, active-plan mismatches, active-plan content, archives, stable specs, research files, generated outputs, switch-over posture, or broader lifecycle state.
+
+The implemented create-only docmap repair class is `.agents/docmap.yaml` creation:
+
+- The target path is limited to `.agents/docmap.yaml`.
+- The diagnostic source is `missing-required-surface` for `.agents/docmap.yaml` from `validate`; lazy or not-required docmaps are skipped.
+- The dry-run plan reports repair class `docmap-create`, the target file, deterministic route entries, manual rollback posture, validation commands, and advisory docmap authority.
+- Apply may create `.agents/` when needed, writes deterministic `version: 2` `repo_summary.product_docs_entrypoints` metadata, and never rewrites an existing docmap.
+- No snapshot is created because the class is create-only and preserves no pre-existing bytes.
+- Manual rollback is removal of `.agents/docmap.yaml`; `.agents/` may be removed only when the operator confirms it is empty and was created by this repair.
+- The class cannot make docmap routing authoritative and cannot repair manifest, project state, active plans, stable specs, archives, research files, generated outputs, mirror drift, switch-over posture, or existing docmap route gaps.
+
+The implemented create-only AGENTS repair class is `AGENTS.md` creation:
+
+- The target path is limited to `AGENTS.md`.
+- The diagnostic source is `missing-required-surface` for `AGENTS.md` from `validate`.
+- The dry-run plan reports repair class `agents-contract-create`, the target file, manual rollback posture, validation commands, and operator-contract non-authority wording.
+- Apply writes only an absent `AGENTS.md` from the packaged minimal operating-root template and never rewrites an existing `AGENTS.md`.
+- No snapshot is created because the class is create-only and preserves no pre-existing bytes.
+- Manual rollback is removal of `AGENTS.md`; no cleanup, archive, commit, rollback command, or switch-over is implied.
+- The class cannot make operator-contract text lifecycle authority and cannot repair manifest, project state, active plans, docmaps, stable specs, archives, research files, generated outputs, switch-over posture, or existing `AGENTS.md` content.
+
+The implemented create-only stable spec repair class is `project/specs/workflow/*.md` creation:
+
+- The target directory is limited to `project/specs/workflow/`.
+- The diagnostic source is `missing-stable-spec` from `validate`; existing stable spec files are skipped and never rewritten.
+- The dry-run plan reports repair class `stable-spec-create`, the target directory, planned file names, manual rollback posture, validation commands, and non-authority wording.
+- Apply may create `project/specs/workflow/` when needed, writes only absent expected spec fixture files from packaged MyLittleHarness templates, and preserves all existing spec bytes.
+- No snapshot is created because the class is create-only and preserves no pre-existing bytes.
+- Manual rollback is removal of the created stable spec files; `project/specs/workflow/` may be removed only when the operator confirms it is empty and was created by this repair.
+- The class cannot make stable spec fixtures authoritative by itself and cannot repair manifest, project state, active plans, archives, research files, generated outputs, mirror drift, switch-over posture, or existing stable spec content.
+
+## Repair Snapshot Contract
+
+The MyLittleHarness repair subsystem owns the repair snapshot contract, but the operating root owns the snapshot files. A snapshot is safety evidence for a specific repair attempt, not workflow memory and not accepted truth.
+
+Snapshot storage uses one target-bound boundary:
+
+- Boundary: `.mylittleharness/snapshots/repair/` under the explicit target root.
+- Snapshot directory name: `<YYYYMMDDTHHMMSSZ>-<repair-class>-<target-slug>-<hash-prefix>`.
+- Required files: `snapshot.json` metadata plus byte-for-byte copies of pre-repair target files under `files/`.
+- Path rule: every metadata path and copied file path must normalize under the explicit target root; symlink path segments, non-directory boundary conflicts, path traversal, absolute target paths inside metadata, and existing non-directory snapshot parents are refusal reasons.
+- Product hygiene: snapshots must never be created in a product-source checkout or compatibility fixture. Product-root snapshots are debris, not fixtures.
+
+Snapshot metadata must be inspectable and source-bound. The minimum metadata shape is:
+
+- `schema_version`
+- `created_at_utc`
+- `tool_name` and `tool_version`
+- `command`
+- `root_kind`
+- `repair_class`
+- `target_root`
+- `snapshot_root`
+- `target_paths`
+- `copied_files`
+- `pre_repair_hashes`
+- `planned_post_repair_paths`
+- `source_diagnostics`
+- `planned_route_entries`
+- `retention`
+- `rollback_instructions`
+- `authority_note`
+
+The `authority_note` must state that snapshots cannot approve repair, closeout, archive, commit, switch-over, lifecycle decisions, or future repairs. A successful snapshot proves only that pre-repair bytes were copied and metadata was written before mutation started.
+
+Retention is manual-first. MyLittleHarness must not silently delete, rotate, compress, move, or hide repair snapshots. Cleanup is an operator action after review/closeout, or a later explicit cleanup command with its own dry-run, refusal rules, and docs. Reports may warn about old or numerous snapshots, but warnings do not authorize deletion.
+
+The implemented snapshot repair classes are `project/project-state.md` state frontmatter repair and `.agents/docmap.yaml` route repair:
+
+- The state frontmatter target path is limited to `project/project-state.md`.
+- The state frontmatter dry-run plan reports deterministic frontmatter keys from existing assignment fallback data, preview snapshot path `.mylittleharness/snapshots/repair/00000000T000000Z-state-frontmatter-repair-project-project-state-md-<hash-prefix>`, metadata fields including `planned_frontmatter_keys`, copied-file path `files/project/project-state.md`, manual rollback posture, and validation method.
+- The state frontmatter apply path uses a real UTC timestamp, writes the snapshot before prepending frontmatter, preserves existing body bytes, runs validation, and stops before scaffold/docmap classes.
+- State frontmatter repair cannot make lifecycle state authoritative by itself and cannot repair manifest paths, malformed frontmatter, active plans, archives, stable specs, research files, generated outputs, or switch-over posture.
+
+The implemented docmap snapshot repair class is `.agents/docmap.yaml` route repair:
+
+- The target path is limited to `.agents/docmap.yaml`.
+- The dry-run plan reports deterministic route entries from `docmap-routing` and `candidate-docmap-gap` diagnostics only after it names the exact input diagnostic, target path, preview snapshot path, metadata fields, copied-file path, manual rollback posture, and validation method.
+- The dry-run preview path uses `.mylittleharness/snapshots/repair/00000000T000000Z-docmap-route-repair-agents-docmap-yaml-<hash-prefix>` so repeated report runs over the same target bytes and planned route entries are deterministic. The apply path uses a real UTC timestamp before mutation.
+- An absent required docmap is handled only by the create-only `docmap-create` class; snapshot protection is required before rewriting an existing docmap.
+- Docmap repair cannot make routing metadata authoritative and cannot repair manifest, project state, active plans, stable specs, archives, research files, generated outputs, or switch-over posture.
+
+Implemented state-frontmatter findings:
+
+- `state-frontmatter-scope`: names repair class `state-frontmatter-repair` and target file `project/project-state.md`.
+- `state-frontmatter-plan`: reports the `state-prose-fallback` diagnostic that would allow snapshot-protected frontmatter prepending.
+- `state-frontmatter-keys`: lists planned deterministic frontmatter keys.
+- `state-frontmatter-snapshot-path`: names the preview snapshot directory, `snapshot.json`, and copied-file path `files/project/project-state.md`.
+- `state-frontmatter-metadata`: lists inspectable metadata fields, including `planned_frontmatter_keys`.
+- `state-frontmatter-rollback`: prints manual rollback posture without implying cleanup automation.
+- `state-frontmatter-validation`: names `validate` and `audit-links` as post-apply validation commands.
+- `state-frontmatter-authority`: states that frontmatter repair cannot approve closeout, archive, commit, switch-over, lifecycle decisions, or future repairs.
+- `state-frontmatter-refused`: reports product-source fixtures, fallback/archive or generated-output roots, ambiguous roots, non-default state paths, missing lifecycle assignments, active-plan mismatches, malformed frontmatter, symlink/non-directory target conflicts, target-root escape, snapshot boundary conflicts, and write failures.
+- `state-frontmatter-updated`: names the deterministic frontmatter keys prepended to `project/project-state.md`.
+- `state-frontmatter-rerun`: states that state frontmatter repair completed first and any remaining repair classes require a separate rerun.
+
+Implemented docmap route dry-run snapshot-plan findings:
+
+- `snapshot-plan-scope`: names repair class `docmap-route-repair` and target file `.agents/docmap.yaml`.
+- `snapshot-plan`: reports either no route diagnostics or the exact target file and source diagnostic codes for docmap route repair.
+- `snapshot-path`: names the preview snapshot directory, `snapshot.json`, and copied-file path `files/.agents/docmap.yaml`.
+- `snapshot-metadata`: lists the inspectable metadata fields, including source diagnostics, planned route entries, retention, rollback instructions, and the authority note.
+- `snapshot-route-change`: lists planned route entries from the current diagnostics.
+- `snapshot-rollback`: prints manual rollback posture and explicitly excludes rollback commands, cleanup, archive, commit, and switch-over.
+- `snapshot-validation`: names `validate` and `audit-links` as the post-apply validation commands.
+- `snapshot-authority`: states that snapshot metadata is safety evidence only.
+- `snapshot-plan-refused`: reports product-source fixtures, fallback/archive or generated-output roots, ambiguous roots, missing strict mutation authority, symlink/non-directory target conflicts, target-root escape, snapshot boundary conflicts, and existing preview-directory conflicts.
+- `snapshot-plan-skipped`: reports that `.agents/docmap.yaml` is absent and remains a create-only/bootstrap question.
+
+Implemented docmap-create findings:
+
+- `docmap-create-scope`: names repair class `docmap-create` and target file `.agents/docmap.yaml`.
+- `docmap-create-plan`: reports the missing required docmap diagnostic that would allow create-only repair.
+- `docmap-create-routes`: lists the deterministic route entries for the created docmap.
+- `docmap-create-skipped`: reports existing docmaps, lazy docmaps, or not-required docmaps without writing files.
+- `docmap-create-refused`: reports product-source fixtures, fallback/archive or generated-output roots, ambiguous roots, missing strict mutation authority, symlink/non-directory path conflicts, and target-root escapes.
+- `docmap-create-created`: names the created `.agents/docmap.yaml` file.
+- `docmap-create-parent-created`: names `.agents/` when that parent directory was created for the target.
+- `docmap-create-rollback`: prints manual rollback posture without implying cleanup automation.
+- `docmap-create-authority`: states that docmap routing is advisory and cannot approve repair, closeout, archive, commit, switch-over, lifecycle decisions, or future repairs.
+
+Implemented agents-contract-create findings:
+
+- `agents-contract-create-scope`: names repair class `agents-contract-create` and target file `AGENTS.md`.
+- `agents-contract-create-plan`: reports the missing required `AGENTS.md` diagnostic that would allow create-only repair.
+- `agents-contract-create-skipped`: reports existing `AGENTS.md` files or absent matching diagnostics without writing files.
+- `agents-contract-create-refused`: reports product-source fixtures, fallback/archive or generated-output roots, ambiguous roots, missing strict mutation authority, symlink/non-file path conflicts, target-root escapes, missing packaged templates, and write failures.
+- `agents-contract-create-created`: names the created `AGENTS.md` file.
+- `agents-contract-create-rollback`: prints manual rollback posture without implying cleanup automation.
+- `agents-contract-create-validation`: names `validate` and `audit-links` as post-apply validation commands.
+- `agents-contract-create-authority`: states that `AGENTS.md` cannot approve repair, closeout, archive, commit, switch-over, lifecycle decisions, or future repairs.
+
+Implemented stable-spec-create findings:
+
+- `stable-spec-create-scope`: names repair class `stable-spec-create` and target directory `project/specs/workflow/`.
+- `stable-spec-create-plan`: reports the `missing-stable-spec` diagnostic that would allow create-only stable spec restoration.
+- `stable-spec-create-files`: lists the planned or created stable spec files.
+- `stable-spec-create-skipped`: reports that no missing stable spec diagnostic was found or that stable spec files already exist without writing files.
+- `stable-spec-create-refused`: reports product-source fixtures, fallback/archive or generated-output roots, ambiguous roots, missing strict mutation authority, symlink/non-directory path conflicts, target-root escapes, missing packaged templates, and write failures.
+- `stable-spec-create-created`: names created parent directories or created stable spec files.
+- `stable-spec-create-rollback`: prints manual rollback posture without implying cleanup automation.
+- `stable-spec-create-validation`: names `validate` and `audit-links` as post-apply validation commands.
+- `stable-spec-create-authority`: states that stable spec fixtures cannot approve repair, closeout, archive, commit, switch-over, lifecycle decisions, or future repairs.
+
+Implemented snapshot-protected apply findings:
+
+- `snapshot-apply-scope`: names repair class `docmap-route-repair` and target file `.agents/docmap.yaml`.
+- `snapshot-apply-skipped`: reports absent docmap targets, clean docmaps, or already-present planned entries without creating a snapshot.
+- `snapshot-apply-refused`: reports target path conflicts, unreadable target bytes, non-deterministic route diagnostics, snapshot boundary conflicts, target-root escapes, and write failures before or during the bounded repair.
+- `snapshot-created`: names the timestamped snapshot directory created before docmap mutation.
+- `snapshot-copied-file`: names the copied pre-repair docmap bytes under `files/.agents/docmap.yaml`.
+- `snapshot-metadata-written`: names `snapshot.json`.
+- `repair-docmap-updated`: lists the route entries added to `.agents/docmap.yaml`.
+- `snapshot-rollback`: prints manual rollback instructions.
+- `repair-audit-links`: reports post-repair audit-link warning count.
+
+Implemented snapshot-inspection findings:
+
+- `snapshot-inspect-boundary`: names the inspected repair snapshot boundary and the no-write/no-rollback/no-cleanup posture.
+- `snapshot-inspect-root-posture`: reports live, product-source, fallback/generated, or ambiguous target posture for inspection.
+- `snapshot-inspect-product-debris`: reports repair snapshots found inside a product-source compatibility fixture.
+- `snapshot-inspect-empty`: reports that no repair snapshot directory or no snapshot directories are present.
+- `snapshot-inspect-boundary-conflict`: reports symlink or non-directory conflicts in the snapshot boundary.
+- `snapshot-found`: names each repair snapshot directory found.
+- `snapshot-metadata-read`, `snapshot-metadata-missing`, `snapshot-metadata-malformed`, and `snapshot-metadata-missing-field`: report `snapshot.json` readability and minimum contract shape.
+- `snapshot-schema`, `snapshot-command`, `snapshot-repair-class`, `snapshot-target-root`, and `snapshot-root`: report metadata identity and confinement posture.
+- `snapshot-planned-frontmatter`: reports state-frontmatter snapshot planned keys when the repair class is `state-frontmatter-repair`.
+- `snapshot-copied-file-hash`, `snapshot-copied-file-size`, `snapshot-copied-file-missing`, `snapshot-copied-file-malformed`, and `snapshot-pre-repair-hash`: report copied-file consistency.
+- `snapshot-target-current` and `snapshot-target-missing`: report current target posture relative to the copied pre-repair bytes.
+- `snapshot-retention`, `snapshot-rollback`, and `snapshot-authority`: report manual retention, manual rollback instructions, and snapshot non-authority.
+
+Manifest normalization, malformed or partial project-state frontmatter repair, AGENTS rewrites, stable-spec rewrites, stale-plan cleanup, archive cleanup, mirror resync, and active-plan mutation are explicitly deferred until a later plan gives each class its own deterministic action, snapshot behavior, validation method, residual-risk story, and rollback posture.
+
+## Rollback And Idempotency
+
+Create-only scaffold, AGENTS creation, docmap creation, and stable spec creation operations do not require backups because they never overwrite existing content. The implemented state frontmatter repair and docmap route repair require snapshots before rewriting existing files.
+
+Any operation that would overwrite, delete, rename, normalize, resync, archive, or otherwise change existing content outside selected `project/project-state.md` frontmatter prepending or `.agents/docmap.yaml` route-entry update is blocked unless a later implementation uses the repair snapshot contract above and starts with a no-write dry-run snapshot plan.
+
+Rollback is manual-only for this contract. A create-only docmap repair must print instructions to remove the created docmap and only remove `.agents/` when the operator confirms it is empty and repair-created. A snapshot-protected repair must print rollback instructions that name the snapshot directory, copied files, target files, and validation command. No rollback command, cleanup command, archive action, VCS action, or switch-over action is implied.
+
+Allowed apply behavior must be idempotent: rerunning the same command against an already-created scaffold, already-created AGENTS contract, already-created docmap, already-created stable spec fixture, already-repaired state frontmatter, or already-repaired docmap returns success, reports no changed paths, and leaves file contents unchanged.
+
+## Future Product Gates
+
+The next implementation roadmap is bounded:
+
+1. Detach apply successor: use the implemented dry-run preview as evidence before accepting any fail-closed apply behavior.
+2. Advanced diagnostics cleanup: continue reducing README/spec command sprawl after foregrounding only `init`, `check`, `repair`, and `detach` in top-level help.
+3. Mutation/rule analyzer hardening: review fail-closed apply behavior and add lightweight stale-rule/context signals where they reduce operator risk.
+4. Stronger evidence helpers only if the current read-only Git trailer suggestions prove insufficient without generated evidence authority.
+
+Before future implementation, each CLI surface must define:
+
+- command names, arguments, flags, and output shape
+- read-only versus mutating behavior
+- first-contact versus advanced/compatibility visibility
+- dry-run behavior for every mutating command, including whether dry-run is default or explicitly required
+- allowed root and allowed file boundaries
+- fixture handling for product-root compatibility files
+- diagnostics and exit-code taxonomy
+- compatibility aliases, deprecation/help behavior, and removal gates when existing commands are renamed or hidden
+- Git-trailer suggestion fields and non-git Markdown fallback when durable evidence guidance is in scope
+- snapshot, rollback, retention, and cleanup story for mutations that touch existing content
+- idempotency expectations
+- tests and fixtures for clean, missing, stale, partial, and broken contracts
+- docs cascade and closeout evidence requirements
+
+Repair commands require an additional gate that separates report-first diagnostics from file mutation.
+
+## Validation Expectations
+
+A future implementation should be validated with scenarios for:
+
+- clean operating root status
+- product-root fixture status
+- missing manifest or state file
+- active plan pointer mismatch
+- stale old-root wording
+- forbidden product-root operating memory
+- terminal-only intelligence reports over product fixtures and live operating roots
+- terminal-only evidence reports for no active plan, active plan with evidence, active plan with plural anchor wording and deterministic cue identity, manifest language that remains context rather than concrete closeout evidence, active plan with gaps, product-source fixture posture, live operating roots, prose-state roots, and non-git-safe closeout summary reminders
+- terminal-only closeout reports for no active plan, active plan with closeout candidates, concrete field candidates that outrank broad future-contract context, report-only quality/readiness cues, active plan gaps, product-source fixture posture, live operating roots, prose-state roots, clean Git roots, dirty Git roots, non-git roots, and Git probe failures
+- terminal-only preflight reports and `preflight --template git-pre-commit` output for product-source fixtures, live operating roots, validation-error posture, no-write behavior, closeout/VCS cues, shell-safe root quoting, warning-only wrapper behavior, and unknown flag rejection
+- terminal-only task inspection reports for product-source fixtures and live operating roots, no-write behavior, task grouping, compatibility posture, hidden top-level help, command-specific help, advanced/transition visibility, bare-command usage failure, unknown flag rejection, and representative existing command parser compatibility
+- terminal-only bootstrap readiness reports for product-source fixtures and live operating roots, no-write behavior, interpreter context, package metadata posture, read-only PATH discovery, package-smoke posture, rejected standalone bootstrap apply posture, switch-over scoped-contract gates, publishing, workstation-adoption cues, hidden top-level help, command-specific help, advanced/transition visibility, bare-command usage failure, unknown flag rejection, and apply-like flag rejection
+- terminal-only bootstrap package-smoke reports for product-source fixtures, refused non-product roots, no product-root package artifacts, install/import/console failure reporting, temporary environment boundaries, command-specific help, combined-mode rejection, unknown flag rejection, and apply-like flag rejection
+- primary CLI parser/help tests for `init`, `check`, `repair`, and `detach`, with `attach`, `status`, and `validate` compatibility preserved until a separate deprecation/removal gate
+- terminal-only `detach --dry-run` reports for product-source fixtures, live operating roots, fallback/archive roots, generated-output roots, ambiguous roots, generated projection preservation, no-write behavior, bare-command usage failure, apply-like flag rejection, unknown flag rejection, and boundary conflict posture
+- terminal-only semantic readiness and evaluation reports for product-source fixtures, live operating roots, missing generated projection/index posture, stale generated projection/index posture, corrupt or unavailable index posture, current SQLite FTS/BM25 posture, fixed-query source verification, negative probe no-match posture, lifecycle-risk query wording, no-write behavior, unknown flag rejection, combined-mode rejection, and bare-command usage failure
+- terminal-only adapter reports for product-source fixtures, target-repository live operating roots, missing optional surfaces, missing generated projection inputs, stale generated projection artifacts, no-write behavior, and unknown target rejection
+- projection artifact and index build, inspect, delete, rebuild, v2 JSON integrity metadata, SQLite schema metadata, stale/corrupt/malformed/unexpected/hash/count diagnostics, source-verified full-text search, boundary path conflicts, directory-shaped artifact delete refusal, and visible directory-shaped index sidecar skips
+- snapshot inspect report shape, no-write behavior, no-snapshot roots, valid docmap-route snapshots, malformed metadata, missing copied files, hash/byte-count mismatches, missing or changed current targets, product-source snapshot debris, fallback/generated/ambiguous root posture, symlink path conflicts, and snapshot boundary conflicts
+- state-frontmatter repair dry-run, snapshot-protected apply, metadata, copied pre-repair bytes, body preservation, post-repair validation, idempotent rerun behavior, non-default state path refusal, active-plan mismatch refusal, malformed frontmatter refusal, and snapshot-boundary conflicts
+- exact/path search over inventory surfaces without persistent indexes
+- repo-map, backlink, optional/lazy link, duplicate-reference, and fan-in summaries
+- dry-run attach and repair without writes
+- attach dry-run refusal predictors for fallback/archive roots, generated-output roots, and symlink or non-directory path conflicts
+- attach apply refusal for product-source compatibility fixtures, fallback/archive roots, generated-output roots, and symlink path conflicts
+- attach apply create-only behavior for live operating roots
+- attach apply idempotency with no content changes
+- mutating repair blocked by ambiguous roots or forbidden paths
+- post-repair validation showing the exact files changed
+- repair snapshot metadata, path normalization, retention, manual rollback instructions, and snapshot-boundary conflicts before any content rewrite
+- create-only `AGENTS.md` repair from a missing required diagnostic, including dry-run no-write behavior, packaged template content, path conflicts, manual rollback text, post-repair validation, no snapshot creation, active-plan lifecycle refusal, and idempotent rerun behavior
+- create-only `.agents/docmap.yaml` repair from a missing required diagnostic, including dry-run no-write behavior, deterministic content, lazy no-op behavior, path conflicts, manual rollback text, post-repair validation, no snapshot creation, and idempotent rerun behavior
+- first snapshot-plan dry-run coverage for `.agents/docmap.yaml` route repair without treating docmap metadata as authority
+- snapshot-protected `.agents/docmap.yaml` route repair apply with copied pre-repair bytes, metadata, post-repair validation, audit-link checks, and idempotent rerun behavior
+
+Validation output should be inspectable and concise. It must not create hidden state or generated debris in the product root.
+
+## Explicit Non-Goals
+
+- No automatic repair, broad attach, archive, commit, or switch-over.
+- No file mutation from `init --dry-run`, `attach --dry-run`, or `repair --dry-run`.
+- No state mutation outside snapshot-protected frontmatter prepending for default-path prose `project/project-state.md`; no manifest normalization, malformed frontmatter repair, active-plan mutation, existing AGENTS rewrite, spec rewrite, archive cleanup, broad docmap normalization, or broad repair-all behavior in the implemented repair apply slice.
+- No automatic snapshot cleanup, automatic rollback command, or snapshot creation from dry-run reports.
+- No automatic snapshot cleanup, automatic rollback command, snapshot creation, repair approval, closeout approval, archive action, commit action, switch-over, or lifecycle mutation from `snapshot --inspect`.
+- No init/attach/repair mutation of product fixtures, fallback roots, active plans, archives, user config, PATH, hooks, adapters, MCP, GitHub, generated projections, caches, logs, reports, local databases, package archives, or switch-over surfaces.
+- No generated projection writes outside `.mylittleharness/generated/projection/`.
+- No semantic retrieval runtime, arbitrary semantic query interface, embedding store, vector store, provider call, model download, generated semantic output, or semantic authority from `semantic --inspect` or `semantic --evaluate`.
+- No MCP SDK dependency, HTTP or network MCP transport, generated adapter report, adapter state, source-body copying, adapter-only correctness, or lifecycle authority from `adapter --inspect` or `adapter --serve`.
+- No default persistent evidence manifest, evidence database, generated evidence report store, semantic retrieval, quality-gate enforcement, or background evidence runtime in the current evidence/closeout slice.
+- No Git staging, commit, amend, push, hook installation, or Git config mutation from evidence or closeout helpers.
+- No VCS mutation, GitHub/CI adapter authority, auto-commit, auto-archive, auto-closeout, or helper-owned commit decision in the current `closeout` slice.
+- No hook installation, CI/GitHub workflow creation, generated preflight report store, blocking enforcement mode, lifecycle approval, or helper-owned correctness decision from `preflight`; `preflight --template git-pre-commit` only prints a wrapper template to stdout.
+- No command removal, hidden alias router, generated report store, lifecycle approval, mutation, switch-over, package publishing, hook/CI installation, semantic runtime, adapter runtime, or repair expansion from `tasks --inspect`.
+- No product-root package artifacts, package publishing, PATH/user-config mutation, hook/CI installation, mutating workstation adoption, bootstrap apply, switch-over, lifecycle approval, or repair expansion from `bootstrap --inspect` or `bootstrap --package-smoke`.
+- No broad repair-all command, `--write` alias, or implicit mutation from bare `init`, `attach`, or `repair`.
+- No background daemon, scheduler, queue, or dashboard.
+- No adapter-only correctness through IDE, browser, MCP, GitHub, CI, or hooks.
+
+
+

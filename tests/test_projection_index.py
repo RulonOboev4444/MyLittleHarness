@@ -1,0 +1,301 @@
+from __future__ import annotations
+
+import io
+import json
+import sqlite3
+import sys
+import tempfile
+import unittest
+from contextlib import closing, redirect_stderr, redirect_stdout
+from pathlib import Path
+from unittest.mock import patch
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from mylittleharness.cli import main
+from mylittleharness.projection_artifacts import ARTIFACT_DIR_REL
+from mylittleharness.projection_index import INDEX_NAME, INDEX_REL_PATH, INDEX_SCHEMA_VERSION
+from tests.test_cli import make_root
+
+
+class ProjectionIndexTests(unittest.TestCase):
+    def test_projection_index_build_writes_schema_metadata_and_source_bound_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=False)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "projection", "--build", "--target", "index"])
+
+            self.assertEqual(code, 0)
+            self.assertIn("projection-index-build", output.getvalue())
+            index_path = root / INDEX_REL_PATH
+            self.assertTrue(index_path.is_file())
+            with closing(sqlite3.connect(index_path)) as connection:
+                metadata = dict(connection.execute("SELECT key, value FROM metadata").fetchall())
+                source_count = connection.execute("SELECT COUNT(*) FROM source_records").fetchone()[0]
+                row = connection.execute(
+                    "SELECT source_path, line_start, line_end, source_hash, source_role, source_type, indexed_text, provenance FROM index_rows ORDER BY row_id LIMIT 1"
+                ).fetchone()
+
+            self.assertEqual(str(INDEX_SCHEMA_VERSION), metadata["schema_version"])
+            self.assertEqual("1.0.0", metadata["product_version"])
+            self.assertEqual(".mylittleharness/generated/projection", metadata["storage_boundary"])
+            self.assertEqual("true", metadata["fts5_available"])
+            self.assertEqual("true", metadata["bm25_available"])
+            self.assertEqual("mylittleharness-sqlite-fts-bm25-projection", metadata["index_kind"])
+            self.assertGreater(source_count, 0)
+            self.assertIsNotNone(row)
+            self.assertEqual(row[1], row[2])
+            self.assertEqual("inventory-surface", row[5])
+            self.assertIn(f"{row[0]}:{row[1]}", row[7])
+            metadata_text = json.dumps(metadata, sort_keys=True)
+            for forbidden in ("plan_status", "active_plan", "repair approved", "closeout", "commit", "switch-over"):
+                self.assertNotIn(forbidden, metadata_text)
+
+    def test_projection_target_default_artifacts_and_all_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=False)
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--root", str(root), "projection", "--build"]), 0)
+            self.assertTrue((root / ARTIFACT_DIR_REL / "manifest.json").is_file())
+            self.assertFalse((root / INDEX_REL_PATH).exists())
+
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--root", str(root), "projection", "--build", "--target", "all"]), 0)
+            self.assertTrue((root / ARTIFACT_DIR_REL / "manifest.json").is_file())
+            self.assertTrue((root / INDEX_REL_PATH).is_file())
+
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--root", str(root), "projection", "--delete", "--target", "artifacts"]), 0)
+            self.assertFalse((root / ARTIFACT_DIR_REL / "manifest.json").exists())
+            self.assertTrue((root / INDEX_REL_PATH).is_file())
+
+    def test_projection_index_inspect_reports_drift_and_malformed_index(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=False)
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--root", str(root), "projection", "--build", "--target", "index"]), 0)
+
+            index_path = root / INDEX_REL_PATH
+            with closing(sqlite3.connect(index_path)) as connection:
+                connection.execute("UPDATE metadata SET value = ? WHERE key = 'schema_version'", ("999",))
+                connection.execute("UPDATE metadata SET value = ? WHERE key = 'root'", (str(root / "elsewhere"),))
+                connection.execute("UPDATE metadata SET value = ? WHERE key = 'indexed_row_count'", ("999999",))
+                connection.execute("DELETE FROM index_rows WHERE row_id = (SELECT MIN(row_id) FROM index_rows)")
+                connection.commit()
+            (root / "README.md").write_text("# Changed\nMyLittleHarness changed.\n", encoding="utf-8")
+            (root / ARTIFACT_DIR_REL / f"{INDEX_NAME}.extra").write_text("unexpected\n", encoding="utf-8")
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "projection", "--inspect", "--target", "index"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("projection-index-schema", rendered)
+            self.assertIn("projection-index-root-mismatch", rendered)
+            self.assertIn("projection-index-hash", rendered)
+            self.assertIn("projection-index-stale", rendered)
+            self.assertIn("projection-index-count", rendered)
+            self.assertIn("projection-index-unexpected-sidecar", rendered)
+
+    def test_projection_index_inspect_reports_corrupt_database(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=False)
+            index_path = root / INDEX_REL_PATH
+            index_path.parent.mkdir(parents=True)
+            index_path.write_text("not sqlite\n", encoding="utf-8")
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "projection", "--inspect", "--target", "index"])
+
+            self.assertEqual(code, 0)
+            self.assertIn("projection-index-corrupt", output.getvalue())
+
+    def test_projection_index_delete_removes_only_index_owned_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=False)
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--root", str(root), "projection", "--build", "--target", "all"]), 0)
+            known_sidecar = root / ARTIFACT_DIR_REL / f"{INDEX_NAME}-wal"
+            unexpected_sidecar = root / ARTIFACT_DIR_REL / f"{INDEX_NAME}.extra"
+            known_sidecar.write_text("known\n", encoding="utf-8")
+            unexpected_sidecar.write_text("unexpected\n", encoding="utf-8")
+
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--root", str(root), "projection", "--delete", "--target", "index"]), 0)
+
+            self.assertFalse((root / INDEX_REL_PATH).exists())
+            self.assertFalse(known_sidecar.exists())
+            self.assertTrue(unexpected_sidecar.is_file())
+            self.assertTrue((root / ARTIFACT_DIR_REL / "manifest.json").is_file())
+
+    def test_projection_index_delete_reports_directory_sidecar_skip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=False)
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--root", str(root), "projection", "--build", "--target", "index"]), 0)
+            directory_sidecar = root / ARTIFACT_DIR_REL / f"{INDEX_NAME}-wal"
+            directory_sidecar.mkdir()
+            (directory_sidecar / "keep.txt").write_text("preserved\n", encoding="utf-8")
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "projection", "--delete", "--target", "index"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertFalse((root / INDEX_REL_PATH).exists())
+            self.assertTrue(directory_sidecar.is_dir())
+            self.assertIn("projection-index-delete-skipped", rendered)
+            self.assertIn("directory-shaped SQLite index sidecar", rendered)
+
+    def test_full_text_search_is_optional_source_verified_and_exact_search_survives_delete(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=False)
+            missing_output = io.StringIO()
+            with redirect_stdout(missing_output):
+                missing_code = main(["--root", str(root), "intelligence", "--focus", "search", "--full-text", "MyLittleHarness"])
+            self.assertEqual(missing_code, 0)
+            self.assertIn("projection-index-query-skipped", missing_output.getvalue())
+
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--root", str(root), "projection", "--build", "--target", "index"]), 0)
+            current_output = io.StringIO()
+            with redirect_stdout(current_output):
+                current_code = main(["--root", str(root), "intelligence", "--focus", "search", "--full-text", "MyLittleHarness", "--limit", "5"])
+            current_rendered = current_output.getvalue()
+            self.assertEqual(current_code, 0)
+            self.assertIn("projection-index-query-current", current_rendered)
+            self.assertIn("full-text-match", current_rendered)
+            self.assertIn("verification=source-verified", current_rendered)
+
+            (root / "README.md").write_text("# Changed\nMyLittleHarness changed.\n", encoding="utf-8")
+            stale_output = io.StringIO()
+            with redirect_stdout(stale_output):
+                stale_code = main(["--root", str(root), "intelligence", "--focus", "search", "--full-text", "MyLittleHarness"])
+            self.assertEqual(stale_code, 0)
+            self.assertIn("projection-index-query-skipped", stale_output.getvalue())
+
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--root", str(root), "projection", "--delete", "--target", "index"]), 0)
+            exact_output = io.StringIO()
+            with redirect_stdout(exact_output):
+                exact_code = main(["--root", str(root), "intelligence", "--focus", "search", "--search", "MyLittleHarness"])
+            self.assertEqual(exact_code, 0)
+            self.assertIn("projection-exact-search-source-only", exact_output.getvalue())
+            self.assertIn("search-match", exact_output.getvalue())
+
+    def test_unified_query_uses_current_source_verified_index_and_path_search(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=False)
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--root", str(root), "projection", "--build", "--target", "index"]), 0)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "intelligence", "--focus", "search", "--query", ".agents/docmap.yaml", "--limit", "5"])
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("intelligence-query-expansion", rendered)
+            self.assertIn("projection-index-query-current", rendered)
+            self.assertIn("full-text-match", rendered)
+            self.assertIn("verification=source-verified", rendered)
+            self.assertIn("search-match", rendered)
+            self.assertIn("search-path-match", rendered)
+            self.assertIn("search-path-reference", rendered)
+
+    def test_unified_query_keeps_exact_and_path_results_when_index_is_missing_or_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=False)
+            missing_output = io.StringIO()
+            with redirect_stdout(missing_output):
+                missing_code = main(["--root", str(root), "intelligence", "--focus", "search", "--query", ".agents/docmap.yaml"])
+            missing_rendered = missing_output.getvalue()
+            self.assertEqual(missing_code, 0)
+            self.assertIn("projection-index-query-skipped", missing_rendered)
+            self.assertIn("search-match", missing_rendered)
+            self.assertIn("search-path-reference", missing_rendered)
+
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--root", str(root), "projection", "--build", "--target", "index"]), 0)
+            (root / "README.md").write_text("# Changed\nSee `.agents/docmap.yaml` after stale index.\n", encoding="utf-8")
+            stale_output = io.StringIO()
+            with redirect_stdout(stale_output):
+                stale_code = main(["--root", str(root), "intelligence", "--focus", "search", "--query", ".agents/docmap.yaml"])
+            stale_rendered = stale_output.getvalue()
+            self.assertEqual(stale_code, 0)
+            self.assertIn("projection-index-query-skipped", stale_rendered)
+            self.assertIn("search-match", stale_rendered)
+            self.assertIn("search-path-reference", stale_rendered)
+
+    def test_full_text_plain_multi_term_query_relaxes_to_or_search(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=False)
+            (root / "README.md").write_text("# Readme\nZebraTerm lives in the readme.\n", encoding="utf-8")
+            (root / "AGENTS.md").write_text("# Agents\nYakTerm lives in the agent contract.\n", encoding="utf-8")
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--root", str(root), "projection", "--build", "--target", "index"]), 0)
+
+            relaxed_output = io.StringIO()
+            with redirect_stdout(relaxed_output):
+                relaxed_code = main(["--root", str(root), "intelligence", "--focus", "search", "--full-text", "ZebraTerm YakTerm", "--limit", "5"])
+            relaxed_rendered = relaxed_output.getvalue()
+            self.assertEqual(relaxed_code, 0)
+            self.assertIn("query_mode=fts5-bm25-relaxed-or", relaxed_rendered)
+            self.assertIn("README.md", relaxed_rendered)
+            self.assertIn("AGENTS.md", relaxed_rendered)
+            self.assertNotIn("full-text-no-matches", relaxed_rendered)
+
+            explicit_output = io.StringIO()
+            with redirect_stdout(explicit_output):
+                explicit_code = main(["--root", str(root), "intelligence", "--focus", "search", "--full-text", "ZebraTerm OR YakTerm", "--limit", "5"])
+            self.assertEqual(explicit_code, 0)
+            self.assertIn("query_mode=fts5-bm25", explicit_output.getvalue())
+
+    def test_full_text_limit_requires_positive_integer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=False)
+            output = io.StringIO()
+            with redirect_stderr(output), self.assertRaises(SystemExit) as raised:
+                main(["--root", str(root), "intelligence", "--focus", "search", "--full-text", "MyLittleHarness", "--limit", "0"])
+            self.assertEqual(raised.exception.code, 2)
+            self.assertIn("--limit must be >= 1", output.getvalue())
+
+    def test_unsupported_fts5_degrades_without_index_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=False)
+            output = io.StringIO()
+            with patch("mylittleharness.projection_index._fts5_is_available", return_value=False), redirect_stdout(output):
+                code = main(["--root", str(root), "projection", "--build", "--target", "index"])
+
+            self.assertEqual(code, 0)
+            self.assertIn("projection-index-fts5-unavailable", output.getvalue())
+            self.assertFalse((root / INDEX_REL_PATH).exists())
+
+    def test_projection_index_does_not_authorize_attach_or_repair(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=False)
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--root", str(root), "projection", "--build", "--target", "index"]), 0)
+            with closing(sqlite3.connect(root / INDEX_REL_PATH)) as connection:
+                connection.execute("INSERT OR REPLACE INTO metadata(key, value) VALUES ('pretend_authority', 'repair approved')")
+                connection.commit()
+
+            attach_output = io.StringIO()
+            with redirect_stdout(attach_output):
+                attach_code = main(["--root", str(root), "attach", "--apply", "--project", "Demo"])
+            repair_output = io.StringIO()
+            with redirect_stdout(repair_output):
+                repair_code = main(["--root", str(root), "repair", "--apply"])
+
+            self.assertEqual(attach_code, 2)
+            self.assertEqual(repair_code, 2)
+            self.assertIn("product-source compatibility fixture", attach_output.getvalue())
+            self.assertIn("product-source compatibility fixture", repair_output.getvalue())
+
+
+if __name__ == "__main__":
+    unittest.main()

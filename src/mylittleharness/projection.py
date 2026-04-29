@@ -1,0 +1,324 @@
+from __future__ import annotations
+
+import glob
+import hashlib
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from .inventory import Inventory, Surface
+
+
+ROOT_RELATIVE_LINK_PREFIXES = (
+    ".agents/",
+    ".codex/",
+    "docs/",
+    "project/",
+    "specs/",
+    "src/",
+    "tests/",
+)
+ROOT_RELATIVE_LINK_NAMES = {"README.md", "AGENTS.md", "pyproject.toml"}
+
+
+@dataclass(frozen=True)
+class ProjectionSourceRecord:
+    path: str
+    role: str
+    required: bool
+    present: bool
+    line_count: int
+    byte_count: int
+    heading_count: int
+    link_count: int
+    content_hash: str | None
+    read_error: str | None = None
+    content: str = field(default="", repr=False, compare=False)
+
+    @property
+    def readable(self) -> bool:
+        return self.present and self.read_error is None
+
+
+@dataclass(frozen=True)
+class ProjectionLinkRecord:
+    source: str
+    line: int
+    target: str
+    status: str
+    resolution_kind: str
+
+
+@dataclass(frozen=True)
+class ProjectionFanInRecord:
+    target: str
+    inbound_count: int
+    status: str
+    sources: tuple[str, ...]
+    source: str | None = None
+
+
+@dataclass(frozen=True)
+class ProjectionSummary:
+    rebuild_status: str
+    storage_boundary: str
+    source_count: int
+    present_source_count: int
+    readable_source_count: int
+    hashed_source_count: int
+    missing_required_count: int
+    link_record_count: int
+    fan_in_record_count: int
+
+
+@dataclass(frozen=True)
+class Projection:
+    sources: tuple[ProjectionSourceRecord, ...]
+    links: tuple[ProjectionLinkRecord, ...]
+    fan_in: tuple[ProjectionFanInRecord, ...]
+    summary: ProjectionSummary
+
+    @property
+    def source_by_path(self) -> dict[str, ProjectionSourceRecord]:
+        return {source.path: source for source in self.sources}
+
+
+class LinkResolution:
+    def __init__(self, kind: str, exists: bool = False) -> None:
+        self.kind = kind
+        self.exists = exists
+
+
+def build_projection(inventory: Inventory) -> Projection:
+    sources = tuple(_source_record(surface) for surface in inventory.surfaces)
+    links = tuple(_local_link_records(inventory))
+    fan_in = tuple(_fan_in_records(inventory, links))
+    readable_count = len([source for source in sources if source.readable])
+    hashed_count = len([source for source in sources if source.content_hash is not None])
+    summary = ProjectionSummary(
+        rebuild_status="rebuilt-from-inventory",
+        storage_boundary="none",
+        source_count=len(sources),
+        present_source_count=len([source for source in sources if source.present]),
+        readable_source_count=readable_count,
+        hashed_source_count=hashed_count,
+        missing_required_count=len([source for source in sources if source.required and not source.present]),
+        link_record_count=len(links),
+        fan_in_record_count=len(fan_in),
+    )
+    return Projection(sources=sources, links=links, fan_in=fan_in, summary=summary)
+
+
+def resolve_link(root: Path, target: str, source_rel: str | None = None) -> LinkResolution:
+    clean = target.strip().strip("<>").strip()
+    if not clean:
+        return LinkResolution("unresolved", False)
+    if clean.startswith("#"):
+        return LinkResolution("anchor", True)
+    if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", clean) or clean.startswith("mailto:"):
+        return LinkResolution("external", True)
+    path_part = clean.split("#", 1)[0]
+    if not path_part:
+        return LinkResolution("anchor", True)
+    base = _link_base(root, path_part, source_rel)
+    if any(char in path_part for char in "*?[]{}"):
+        patterns = _expand_brace_pattern(path_part)
+        exists = False
+        for pattern in patterns:
+            resolved_pattern = pattern if _is_absolute_path(pattern) else str(base / pattern)
+            if glob.glob(resolved_pattern):
+                exists = True
+                break
+            if "{" in pattern or "}" in pattern:
+                continue
+            if Path(resolved_pattern).exists():
+                exists = True
+                break
+        return LinkResolution("pattern", exists)
+    if _is_absolute_path(path_part):
+        candidate = Path(path_part)
+    else:
+        candidate = base / path_part
+    return LinkResolution("local", candidate.exists())
+
+
+def normalized_link_path(target: str) -> str:
+    clean = target.strip().strip("<>").strip()
+    if not clean or clean.startswith("#"):
+        return ""
+    path_part = clean.split("#", 1)[0]
+    return re.sub(r"/+", "/", path_part.replace("\\", "/"))
+
+
+def optional_missing_link_reason(inventory: Inventory, target: str) -> str | None:
+    rel = normalized_link_path(target)
+    if not rel:
+        return None
+    root_rel = _root_relative_link_path(inventory, rel)
+    if root_rel is not None:
+        rel = root_rel
+
+    if inventory.root_kind == "live_operating_root":
+        if rel == ".agents/docmap.yaml" and inventory.manifest.get("policy", {}).get("docmap_mode") == "lazy":
+            return "docmap is lazy for this live operating root"
+        if rel == "README.md":
+            return "root README.md is optional for live operating roots"
+
+    state = inventory.state
+    state_data = state.frontmatter.data if state and state.exists else {}
+    operating_root = normalized_link_path(str(state_data.get("operating_root") or state_data.get("canonical_source_evidence_root") or ""))
+    fallback_root = normalized_link_path(str(state_data.get("historical_fallback_root") or ""))
+    if operating_root and rel.casefold() == operating_root.rstrip("/").casefold():
+        return "configured operating root is external local evidence, not a required in-tree product surface"
+    if fallback_root and rel.casefold() == fallback_root.rstrip("/").casefold():
+        return "configured fallback/archive root is opt-in local evidence, not a required product surface"
+    if operating_root and rel.casefold().startswith(operating_root.rstrip("/").casefold() + "/"):
+        rel = rel[len(operating_root.rstrip("/")) + 1 :]
+
+    plan_status = state_data.get("plan_status")
+    manifest_plan = "project/implementation-plan.md"
+    if inventory.manifest:
+        manifest_plan = inventory.manifest.get("memory", {}).get("plan_file", manifest_plan)
+    if rel == str(manifest_plan).replace("\\", "/") and plan_status != "active":
+        return "the implementation plan is a lazy surface when plan_status is not active"
+
+    if rel == "project/plan-incubation" or rel.startswith("project/plan-incubation/"):
+        return "plan incubation surfaces are optional and only exist when a lane is open"
+
+    fixture_root = (
+        state_data.get("projection_status") == "candidate-projection"
+        or state_data.get("root_role") == "product-source"
+        or state_data.get("fixture_status") == "product-compatibility-fixture"
+    )
+    if fixture_root:
+        if (rel == "project/research" or rel.startswith("project/research/")) and rel != "project/research/README.md":
+            return "source-root research artifacts are intentionally excluded from this product compatibility fixture"
+        if rel == "research/README.md":
+            return "the root package-source research mirror is intentionally excluded from this product compatibility fixture"
+        if rel.startswith("project/archive/"):
+            return "historical archives are intentionally excluded from this product compatibility fixture"
+        if rel == "specs/workflow" or rel.startswith("specs/workflow/"):
+            return "root package-source spec mirrors are intentionally excluded from this product source tree"
+    return None
+
+
+def _source_record(surface: Surface) -> ProjectionSourceRecord:
+    content_hash = None
+    if surface.exists and surface.read_error is None:
+        content_hash = hashlib.sha256(surface.content.encode("utf-8", errors="replace")).hexdigest()
+    return ProjectionSourceRecord(
+        path=surface.rel_path,
+        role=surface.role,
+        required=surface.required,
+        present=surface.exists,
+        line_count=surface.line_count,
+        byte_count=surface.byte_count,
+        heading_count=len(surface.headings),
+        link_count=len(surface.links),
+        content_hash=content_hash,
+        read_error=surface.read_error,
+        content=surface.content if surface.exists else "",
+    )
+
+
+def _local_link_records(inventory: Inventory) -> list[ProjectionLinkRecord]:
+    records: list[ProjectionLinkRecord] = []
+    seen: set[tuple[str, str, int]] = set()
+    for surface in inventory.present_surfaces:
+        if surface.role == "package-mirror":
+            continue
+        for link in surface.links:
+            key = (surface.rel_path, link.target, link.line)
+            if key in seen:
+                continue
+            seen.add(key)
+            resolution = resolve_link(inventory.root, link.target, surface.rel_path)
+            if resolution.kind in {"external", "anchor"}:
+                continue
+            target = normalized_link_path(link.target)
+            if resolution.kind == "unresolved":
+                status = "unresolved"
+            elif resolution.kind == "pattern":
+                status = "pattern-present" if resolution.exists else "pattern-missing"
+            elif resolution.exists:
+                status = "present"
+            elif optional_missing_link_reason(inventory, link.target):
+                status = "missing-optional"
+            else:
+                status = "missing"
+            records.append(ProjectionLinkRecord(surface.rel_path, link.line, target or link.target, status, resolution.kind))
+    return sorted(records, key=lambda record: (record.source, record.line, record.target))
+
+
+def _fan_in_records(inventory: Inventory, records: tuple[ProjectionLinkRecord, ...]) -> list[ProjectionFanInRecord]:
+    inbound: dict[str, list[ProjectionLinkRecord]] = {}
+    for record in records:
+        inbound.setdefault(record.target, []).append(record)
+
+    fan_in: list[ProjectionFanInRecord] = []
+    for target, target_records in sorted(inbound.items(), key=lambda item: (-len(item[1]), item[0])):
+        statuses = {record.status for record in target_records}
+        if "missing" in statuses or "unresolved" in statuses:
+            status = "missing"
+        elif "missing-optional" in statuses or "pattern-missing" in statuses:
+            status = "missing-optional"
+        else:
+            status = "present"
+        fan_in.append(
+            ProjectionFanInRecord(
+                target=target,
+                inbound_count=len(target_records),
+                status=status,
+                sources=tuple(_unique_sorted(record.source for record in target_records)),
+                source=target if target in inventory.surface_by_rel else None,
+            )
+        )
+    return fan_in
+
+
+def _link_base(root: Path, path_part: str, source_rel: str | None) -> Path:
+    normalized = normalized_link_path(path_part)
+    if source_rel and source_rel.startswith("docs/") and normalized.startswith(("architecture/", "specs/")):
+        return root / Path(source_rel).parent
+    if not source_rel or _is_repo_root_relative_link(normalized):
+        return root
+    source_parent = Path(source_rel).parent
+    if str(source_parent) in ("", "."):
+        return root
+    return root / source_parent
+
+
+def _is_repo_root_relative_link(normalized: str) -> bool:
+    if normalized in ROOT_RELATIVE_LINK_NAMES:
+        return True
+    return any(normalized.startswith(prefix) for prefix in ROOT_RELATIVE_LINK_PREFIXES)
+
+
+def _expand_brace_pattern(value: str) -> list[str]:
+    match = re.search(r"\{([^{}]+)\}", value)
+    if not match:
+        return [value]
+    prefix = value[: match.start()]
+    suffix = value[match.end() :]
+    return [prefix + option + suffix for option in match.group(1).split(",")]
+
+
+def _is_absolute_path(value: str) -> bool:
+    return bool(re.match(r"^[A-Za-z]:[\\/]", value)) or Path(value).is_absolute()
+
+
+def _root_relative_link_path(inventory: Inventory, rel: str) -> str | None:
+    if not _is_absolute_path(rel):
+        return None
+    root = normalized_link_path(str(inventory.root)).rstrip("/")
+    if rel.casefold() == root.casefold():
+        return ""
+    prefix = root + "/"
+    if rel.casefold().startswith(prefix.casefold()):
+        return rel[len(prefix) :]
+    return None
+
+
+def _unique_sorted(values) -> list[str]:
+    return sorted(set(values))
+

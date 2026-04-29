@@ -1,0 +1,15 @@
+[build-system]
+requires = []
+build-backend = "mylittleharness_build"
+backend-path = ["build_backend"]
+
+[project]
+name = "mylittleharness"
+version = "1.0.0"
+description = "MyLittleHarness workflow analyzer packaged with primary init/check/repair/detach CLI posture, explicit bootstrap package-smoke verification, unified read-only intelligence query search, marker-only detach apply, read-only rule/context and remainder drift diagnostics, hidden-help advanced tasks/bootstrap diagnostics, semantic readiness and no-runtime evaluation reports, optional preflight warnings and hook templates, MCP read-projection adapter inspection and stdio serving, report-only evidence hardening, closeout quality cues and Git trailer suggestions, snapshot inspection, create-only AGENTS/docmap/stable-spec repair, and snapshot-protected state frontmatter repair"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+mylittleharness = "mylittleharness.cli:main"
