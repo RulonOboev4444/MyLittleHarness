@@ -19,10 +19,10 @@ last_updated: "2026-04-29"
 ## Fixture Boundary
 
 - This file is product compatibility fixture metadata for the `mylittleharness` CLI/tests.
-- It is not operating project memory.
+- It is not live task memory.
 - The configured operating project root represents an explicit target repository for CLI/tests.
-- The configured archive/evidence root is opt-in historical material only.
-- This checkout is the reusable product source tree and implementation target.
+- The configured fallback root is fixture-only reference material.
+- This repository contains the reusable MyLittleHarness product source, docs, tests, and package metadata.
 - `workflow-core` remains only a compatibility label for fixture manifest and operator-contract compatibility.
 - `plan_status = "none"`.
 - No active implementation plan is open in this product tree.

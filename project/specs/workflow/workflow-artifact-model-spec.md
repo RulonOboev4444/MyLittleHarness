@@ -1,6 +1,6 @@
 # Workflow Artifact Model and Authority Spec
 
-> Product fixture note: In a product source checkout, this spec is retained as a product compatibility fixture for CLI/tests. Operational workflow authority, plans, research, and memory remain in the operating project root; historical archive/evidence material is opt-in only.
+> Product fixture note: This spec is retained as a product compatibility fixture for CLI/tests. Live workflow authority, plans, research, and memory remain in the target repository; legacy reference material is opened only for a named blocker.
 
 ## Purpose
 
@@ -32,11 +32,11 @@ Core v0 consists of the small repo-native contract that keeps agent work recover
 
 Core v0 does not include operational switch-over, package/archive regeneration, evidence IDs, quality gates, candidate tooling, hidden hooks, MCP, daemons, schedulers, dashboards, mandatory adapters, or a second mutable memory tree. Those ideas stay deferred enhancement or projection lanes unless a future plan promotes them through their gates.
 
-## Operating Root And Product Source Boundary
+## Target And Product Boundary
 
-The operating project root is the operating/research root for MyLittleHarness work. Working plans, `project-state`, research intake, incubation, navigation, workflow execution, and clean-room closeout evidence live there while the harness is carrying the work. Historical archive/evidence material is opt-in only.
+The target repository owns active MyLittleHarness work. Working plans, `project-state`, research intake, incubation, navigation, workflow execution, and closeout evidence live there while the harness is carrying the work. Legacy reference material is opened only for a named blocker.
 
-The product source checkout is a clean reusable product source tree and implementation target only. It may contain product source, tests, README/product docs, and minimal product compatibility fixtures when the CLI/tests still need a local workflow-shaped root. Those fixtures are not operational memory and do not make the product checkout a workflow execution root.
+The product repository may contain product source, tests, README/product docs, and minimal product compatibility fixtures when the CLI/tests still need a local workflow-shaped root. Those fixtures are not live task memory and do not make the product repository a workflow execution root.
 
 Rules:
 - future reusable product implementation plans open in the operating project root and name the product checkout as the target root

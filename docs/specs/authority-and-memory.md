@@ -10,7 +10,7 @@ MyLittleHarness authority is file-first. Accepted decisions, current focus, plan
 
 Product docs under `docs/...` describe reusable architecture and product contracts. They do not operate the current workflow by themselves.
 
-The operating project root owns active focus, current plan status, research intake, and closeout evidence for the repository MyLittleHarness is servicing. The product source checkout owns reusable source, tests, and product documentation. Archive/evidence roots are opt-in historical lookup targets only.
+The target repository owns active focus, current plan status, research intake, and closeout evidence for the repository MyLittleHarness is servicing. The product repository owns reusable source, tests, and product documentation. Legacy reference material is opened only for a named blocker.
 
 ## Memory Rule
 

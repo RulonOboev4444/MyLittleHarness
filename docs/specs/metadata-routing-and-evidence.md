@@ -34,7 +34,7 @@ Metadata cannot authorize mutation, closeout, switch-over, repair, or archiving 
 
 Metadata and routing are allowed when they reduce context load and improve recovery. They must stay lightweight, repo-visible when durable, and subordinate to the files they describe.
 
-Operating project work uses the target repository operating root as the place for active memory and new research. The product source checkout receives reusable product specs only. Historical archive/evidence material is not part of default routing.
+Target repository work keeps active memory and new research in that target repository. The product repository receives reusable product specs only. Legacy reference material is not part of default routing.
 
 Routing surfaces should behave like tables of contents or impact maps, not hidden policy engines. Weak semantic matches, stale docmaps, and incomplete metadata may guide reading, but they must not authorize writes.
 
@@ -90,7 +90,7 @@ A valid implementation should prove that:
 - generated reports can be deleted and rebuilt when a later generated-report feature exists
 - routing never authorizes mutation by itself
 - repair snapshot metadata and `snapshot --inspect` remain evidence for copied bytes, not authority for repair, rollback, cleanup, or closeout
-- historical archive/evidence context is opt-in, not default source material
+- legacy reference material is opened only for a named blocker
 
 Validation should prefer report-first checks. Mutating doc repair requires a separate explicit plan.
 

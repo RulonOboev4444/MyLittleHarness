@@ -10,7 +10,7 @@ The harness should help an agent start cheaply, load details just in time, and e
 
 The operating root owns current focus, active plan status, research intake, and closeout evidence for the repository MyLittleHarness is servicing. Product docs define reusable rules and gates. Generated summaries, search results, metadata, adapters, and background task state are support surfaces only.
 
-For the portable clean-room posture, an operating project root owns active memory and research, the product source checkout owns reusable docs/source, and archive/evidence roots are opt-in lookup targets only. MyLittleHarness must remain a direct product for an explicit target repository.
+For the portable clean-room posture, the target repository owns active memory and research, while the product repository owns reusable docs/source. Legacy reference material is opened only for a named blocker. MyLittleHarness must remain a direct product for an explicit target repository.
 
 The canonical start pass should be driven by explicit repo-visible files, not broad historical context or adapter memory.
 

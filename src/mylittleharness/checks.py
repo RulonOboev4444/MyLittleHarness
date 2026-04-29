@@ -4714,7 +4714,7 @@ def _is_mylittleharness_product_context(inventory: Inventory) -> bool:
         or data.get("fixture_status") == EXPECTED_PRODUCT_FIXTURE_STATUS
         or bool(data.get("operating_root") or data.get("product_source_root") or data.get("historical_fallback_root"))
         or _same_path_value(data.get("product_source_root"), inventory.root)
-        or _string_contains(inventory, "MyLittleHarness Product Source")
+        or _string_contains(inventory, "# MyLittleHarness")
     )
 
 
@@ -4726,7 +4726,7 @@ def _has_no_switch_over_posture(inventory: Inventory) -> bool:
     text = "\n".join(surface.content for surface in inventory.present_surfaces if surface.role != "package-mirror").lower()
     signals = (
         "no operational switch-over",
-        "not an operating workflow root",
+        "stores fixture metadata only",
         "does not switch operation",
         "do not perform operational switch-over",
         "no active implementation plan",
@@ -4893,7 +4893,7 @@ def _optional_missing_link_reason(inventory: Inventory, target: str) -> str | No
         if rel == "research/README.md":
             return "the root package-source research mirror is intentionally excluded from this product compatibility fixture"
         if rel.startswith("project/archive/"):
-            return "historical archives are intentionally excluded from this product compatibility fixture"
+            return "legacy archives are intentionally excluded from this product compatibility fixture"
         if rel == "specs/workflow" or rel.startswith("specs/workflow/"):
             return "root package-source spec mirrors are intentionally excluded from this product source tree"
     return None
@@ -4938,7 +4938,7 @@ def _line_claims_operating_role(line: str) -> bool:
             "not hold",
             "product source",
             "source tree",
-            "implementation target",
+            "fixture metadata",
             "target root",
         )
     ):
@@ -4950,9 +4950,8 @@ def _line_claims_product_role(line: str) -> bool:
     lowered = line.lower()
     if any(marker in lowered for marker in ("operating root", "operating/research", "research pilot", "plans, state", "operating evidence")):
         return False
-    return any(marker in lowered for marker in ("product source root", "product root", "reusable product source", "implementation target"))
+    return any(marker in lowered for marker in ("product source root", "product root", "product repository", "fixture metadata"))
 
 
 def load_for_root(root: Path) -> Inventory:
     return load_inventory(root)
-

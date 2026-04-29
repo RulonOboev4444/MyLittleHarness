@@ -2,25 +2,21 @@
 
 ## Purpose
 
-This spec defines the boundary between the reusable MyLittleHarness product source checkout and an operator-provided operating project root.
+This spec defines how the MyLittleHarness product repository stays separate from the repositories it inspects or attaches to.
 
-The shipped product model is MyLittleHarness serving one explicit target repository directly.
+The shipped product serves one explicit target repository at a time.
 
 ## Portable Root Roles
 
-- Product source checkout: reusable product source, tests, product README/operator orientation, product docs under `docs/...`, and minimal compatibility fixtures for CLI/tests.
-- Operating project root: the explicitly targeted repository after MyLittleHarness is attached; it owns that repository's active implementation plans, project state, research and raw intake, incubation notes, navigation/routing surfaces, workflow execution state, closeout evidence, and other current operating memory.
-- Archive/evidence root: opt-in historical material opened only for a named blocker with a narrow lookup.
+- Product repository: reusable product source, tests, product README/operator orientation, product docs under `docs/...`, and minimal compatibility fixtures for CLI/tests.
+- Target repository: the explicitly targeted repository MyLittleHarness inspects or attaches to; it owns its own plans, project state, research, navigation/routing surfaces, closeout evidence, and other task memory.
+- Legacy reference material: old context opened only for a named blocker with a narrow lookup.
 - Generated-output boundary: rebuildable artifacts, reports, caches, or indexes that remain disposable and subordinate to source files.
 - Repair snapshot boundary: target-bound safety evidence under `.mylittleharness/snapshots/repair/` inside an explicit live operating root.
 - Explicit target root: the root supplied by the operator to a CLI command.
 - Ambiguous target: a target whose role cannot be proven from metadata, path, and product contract.
 
-The product folder name is not product vocabulary. The product name is MyLittleHarness.
-
-The local `MLH-Core` folder is the current clean product source checkout and may later be renamed to `MyLittleHarness`.
-
-## Product Source Responsibilities
+## Product Repository Responsibilities
 
 The product source checkout holds:
 
@@ -32,7 +28,7 @@ The product source checkout holds:
 - minimal compatibility fixtures for CLI/tests when needed
 - package metadata for the reusable stdlib package and console script
 
-The product source checkout is an implementation target, not the operating root.
+The product repository is for MyLittleHarness source, docs, tests, fixtures, and package metadata.
 
 ## Forbidden Product-Root Content
 
@@ -67,7 +63,7 @@ Clean reusable architecture and specs belong under `docs/...`.
 
 The product source checkout is never the target for live workflow mutation. `init --apply`, compatibility `attach --apply`, `repair --apply`, and `detach --apply` must refuse product-source compatibility fixtures with exit code `2`; `init --dry-run`, `detach --dry-run`, compatibility `attach --dry-run`, and `repair --dry-run` remain report-only for product-source fixtures.
 
-A live operating root may be attached only when the operator supplies it explicitly and it is not classified as product source, archive/evidence material, generated output, adapter state, cache, log, local database, package archive, user config, PATH, hook, MCP, browser, IDE, GitHub, CI, or switch-over surface.
+A live operating root may be attached only when the operator supplies it explicitly and it is not classified as product source, legacy reference material, generated output, adapter state, cache, log, local database, package archive, user config, PATH, hook, MCP, browser, IDE, GitHub, CI, or switch-over surface.
 
 The first attach apply scope is create-only. It may create eager scaffold directories and absent `.codex/project-workflow.toml` plus `project/project-state.md` from explicit templates, with `--project <name>` required for state creation. It must not create active implementation plans, archives, research intake, generated validation artifacts, logs, caches, local databases, or workflow execution residue in the product source tree.
 
@@ -77,7 +73,7 @@ Repair apply must stay narrower than validation: only deterministic proposals wi
 
 ## Local Versus Reusable
 
-Absolute local paths are operator evidence. They are not public product law and must not be hardcoded into reusable product behavior.
+Absolute local paths are operator evidence. They are not public product law and must not be hardcoded into shipped product behavior.
 
 Reusable MyLittleHarness currently supports local-only `bootstrap --package-smoke` verification of the existing stdlib package and `mylittleharness` console script through the stdlib build backend under `build_backend/`, with build artifacts kept outside the product source checkout. It also supports `bootstrap --inspect` as a read-only hidden-help readiness report that separates package smoke, rejected standalone bootstrap apply, switch-over, publishing, package artifact policy, PATH/user-config mutation, and workstation adoption without performing them. `bootstrap --inspect` may report interpreter context, product package metadata when available, console-script declaration, and PATH discovery for `mylittleharness`, but it does not execute discovered tools or mutate workstation state. Configurable roots, publishing, mutating workstation adoption, root hygiene validation expansion, generated-output boundary expansion, and any future adoption or switch-over apply behavior require later scoped product plans with command ownership outside a generic bootstrap apply lane.
 

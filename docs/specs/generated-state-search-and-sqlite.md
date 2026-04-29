@@ -8,7 +8,7 @@ Generated projections may improve speed and review quality. They must remain reb
 
 ## Authority
 
-Files hold authority. Product contracts live under `docs/...` in the product source checkout. Active operating memory and plans live in the operating project root. Historical archive/evidence material is opt-in only.
+Files hold authority. Product contracts live under `docs/...` in the product repository. Active memory and plans live in the target repository. Legacy reference material is opened only for a named blocker.
 
 Generated search indexes, backlink graphs, repo maps, reports, and SQLite databases may point to authority. They do not own authority.
 

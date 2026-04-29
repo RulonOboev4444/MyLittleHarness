@@ -196,7 +196,7 @@ def optional_missing_link_reason(inventory: Inventory, target: str) -> str | Non
         if rel == "research/README.md":
             return "the root package-source research mirror is intentionally excluded from this product compatibility fixture"
         if rel.startswith("project/archive/"):
-            return "historical archives are intentionally excluded from this product compatibility fixture"
+            return "legacy archives are intentionally excluded from this product compatibility fixture"
         if rel == "specs/workflow" or rel.startswith("specs/workflow/"):
             return "root package-source spec mirrors are intentionally excluded from this product source tree"
     return None

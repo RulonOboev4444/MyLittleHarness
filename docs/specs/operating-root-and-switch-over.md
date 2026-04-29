@@ -45,11 +45,11 @@ Any root map used by future tools must distinguish at least:
 
 - the target repository operating root that owns active memory and plans for that repository
 - the product root that owns reusable source, tests, and docs
-- archive/evidence roots that are opt-in material only
+- legacy reference material opened only for a named blocker
 - generated-output locations that are disposable and subordinate
 - repair snapshot locations that are target-bound safety evidence only
 
-Read-only root discovery may fail open to explicit file paths and operator-provided context. Mutating paths must fail safe when the target root is missing, ambiguous, outside an allowed root, or classified as archive/evidence-only.
+Read-only root discovery may fail open to explicit file paths and operator-provided context. Mutating paths must fail safe when the target root is missing, ambiguous, outside an allowed root, or classified as legacy reference material.
 
 Product docs alone do not switch operation. Standalone switch-over automation is rejected; any future migration or adoption checklist requires an explicit plan with validation evidence and rollback posture.
 
@@ -63,7 +63,7 @@ For read-only validation, live operating roots may use lighter orientation surfa
 
 Every mutating command must classify the target root before applying changes:
 
-- `live_operating_root`: an explicit target repository that owns operating memory and is not the MyLittleHarness product source, a compatibility fixture, archive/evidence material, generated output, adapter state, cache, or archive-only material.
+- `live_operating_root`: an explicit target repository that owns operating memory and is not the MyLittleHarness product source, a compatibility fixture, legacy reference material, generated output, adapter state, cache, or archive-only material.
 - `product_source_fixture`: a product root or compatibility fixture, including targets that mark `root_role = "product-source"`, `fixture_status = "product-compatibility-fixture"`, or `product_source_root` equal to the target path. Apply modes refuse this class with exit code `2`.
 - `fallback_or_archive`: historical roots, archive roots, old context trees, and opt-in evidence mines. Apply modes refuse this class with exit code `2`.
 - `generated_or_adapter_surface`: generated projections, caches, logs, local databases, reports, package artifacts, hooks, user/workstation config, PATH, IDE/browser/MCP/GitHub/CI state, and other adapter-owned surfaces. Apply modes refuse this class with exit code `2`.
@@ -114,4 +114,3 @@ Validation may start as read-only reports and fixtures. Mutating repair or switc
 - No guarantee that current local absolute paths are portable defaults.
 - No automatic migration from one root to another.
 - No extra root as product runtime, supervisor, or mandatory evidence authority.
-

@@ -1,13 +1,13 @@
-# MyLittleHarness Product Source
+# MyLittleHarness
 
-This checkout is a reusable product source tree and implementation target for MyLittleHarness. It is not an operating workflow root, and its folder name must not become product vocabulary. The folder may later be renamed to `MyLittleHarness`; the product identity is already MyLittleHarness.
+MyLittleHarness is a portable, file-first harness for adding lightweight workflow memory, validation, repair, and read-only diagnostics to a target repository.
 
-In reusable product behavior, an operating root is the user's target repository after MyLittleHarness is attached. The product chain is `MyLittleHarness -> target repository`. Historical archive or evidence roots are opt-in lookup targets only.
+This repository contains the Python package, tests, reusable product docs, and minimal compatibility fixtures used to validate MyLittleHarness itself.
 
 ## What This Contains
 
-- `README.md` as this product-source orientation surface.
-- `AGENTS.md` as the minimal product-source operator contract.
+- `README.md` as the product overview.
+- `AGENTS.md` as the minimal operator contract for product work.
 - `docs/` as the reusable MyLittleHarness product architecture/spec documentation spine.
 - `.codex/project-workflow.toml`, `.agents/docmap.yaml`, `project/project-state.md`, and `project/specs/workflow/*.md` as minimal product compatibility fixtures for CLI/tests.
 - `pyproject.toml`, `build_backend/`, `src/mylittleharness/`, and `tests/` for the 1.0.0 stdlib analyzer CLI, small primary command surface, compatibility command surface, hidden-help advanced diagnostics, explicit package-smoke verification, unified source-verified intelligence query search, read-only Git evidence suggestions, disposable projection helpers, bounded attach/repair mutation paths, create-only AGENTS and stable spec repair, marker-only detach apply, and optional read-only MCP projection adapter.
@@ -185,12 +185,11 @@ Inside this product tree, `src/mylittleharness/`, `tests/`, `pyproject.toml`, an
 
 Reusable product architecture and specs live under `docs/`, starting at `docs/README.md`. Those docs are the clean product documentation home; `project/specs/workflow/*.md` remains compatibility fixture territory for CLI/tests.
 
-Do not copy archives, recover old context by default, or open new plans here. A later product rename or packaging flow may change the local source folder name, but it must preserve the direct target-repository model.
+Keep this repository focused on product source, tests, docs, and compatibility fixtures. Do not copy legacy context, runtime logs, research dumps, generated validation artifacts, or active task plans into it.
 
 ## Fresh Agent Start
 
-1. Recover workflow context from the task's explicit operating root or target root. For reusable product behavior it is the user's target repository.
+1. Recover workflow context from the repository named by the current task.
 2. Use this directory only as the product source / target root.
 3. Read `README.md`, `AGENTS.md`, and the relevant source/tests for local implementation work.
 4. Read the fixture workflow files only when changing CLI validation behavior or product compatibility fixtures.
-

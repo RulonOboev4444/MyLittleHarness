@@ -16,7 +16,7 @@
 | Product module | Reusable CLI/modules/docs/fixtures plus local package smoke posture | Product source, not operating memory or package artifact storage | `src/mylittleharness`, tests, `pyproject.toml`, and `docs/...` |
 | Reject | Anti-patterns that violate authority, rebuildability, or solo leverage | Out of product architecture unless reclassified by scoped design | No destination |
 
-The reusable product chain is MyLittleHarness serving a target repository directly.
+MyLittleHarness serves one explicit target repository at a time.
 
 ## Flow
 

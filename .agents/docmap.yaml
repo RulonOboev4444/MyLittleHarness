@@ -16,10 +16,9 @@ repo_summary:
     - "project/project-state.md"
     - "project/specs/workflow/"
   notes: >-
-    This checkout is the clean reusable product source tree and implementation target.
-    In shipped product behavior, the operating root is the user's target repository after MyLittleHarness is attached.
-    Historical archive/evidence roots are opt-in lookup targets only.
-    The workflow-shaped files in this tree are minimal product compatibility fixtures for the CLI/tests, not operational workflow memory.
+    This repository contains the MyLittleHarness package, tests, docs, and compatibility fixtures.
+    In shipped product behavior, commands act on an explicit target repository supplied by the operator.
+    The workflow-shaped files in this tree are minimal product compatibility fixtures for the CLI/tests, not live workflow memory.
     Reusable product architecture and specs live under docs/.
     No active implementation plan, archived plan, research corpus, raw intake, package mirror, runtime debris, cache, or generated validation artifact belongs here.
 

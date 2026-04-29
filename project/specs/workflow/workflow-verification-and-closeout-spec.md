@@ -1,6 +1,6 @@
 # Workflow Verification Anchors and Closeout Spec
 
-> Product fixture note: In a product source checkout, this spec is retained as a product compatibility fixture for CLI/tests. Operational workflow authority, plans, research, and memory remain in the operating project root; historical archive/evidence material is opt-in only.
+> Product fixture note: This spec is retained as a product compatibility fixture for CLI/tests. Live workflow authority, plans, research, and memory remain in the target repository; legacy reference material is opened only for a named blocker.
 
 ## Purpose
 

@@ -2,9 +2,9 @@
 
 ## Purpose
 
-This is a portable field manual for keeping MyLittleHarness work in a clean operating project root while the reusable product source remains separate. It is not an implementation plan, not switch-over approval, and not permission to copy historical archive material into the product checkout.
+This is a portable field manual for keeping MyLittleHarness work in the target repository while the reusable product source remains separate. It is not an implementation plan, not switch-over approval, and not permission to copy legacy material into the product repository.
 
-The field guide carries forward reusable product invariants: file-first authority, one operating memory surface, generated-state subordination, and explicit boundaries between product source, operating memory, and archive/evidence roots.
+The field guide carries forward reusable product invariants: file-first authority, one operating memory surface, generated-state subordination, and explicit boundaries between product source, target-repository memory, and legacy reference material.
 
 Reusable MyLittleHarness behavior attaches to and services the target repository directly.
 
@@ -12,7 +12,7 @@ Reusable MyLittleHarness behavior attaches to and services the target repository
 
 - Product source checkout: reusable source, tests, product docs, and minimal compatibility fixtures.
 - Operating project root: active focus, current project memory, implementation plans, research intake, operating evidence, and closeout records.
-- Archive/evidence root: opt-in historical material opened only for named blockers and narrow lookup.
+- Legacy reference material: old context opened only for named blockers and narrow lookup.
 - Generated-output boundary: rebuildable artifacts, caches, indexes, and reports that remain disposable and subordinate to source files.
 - Explicit target root: the root supplied to a CLI command by the operator.
 - Ambiguous target: any root whose role cannot be proven from metadata, target path, and product contracts.
@@ -53,11 +53,11 @@ Reusable MyLittleHarness behavior attaches to and services the target repository
 - Broad historical rationale.
 - Package/source mirror history.
 - Local path assumptions except as operator evidence.
-- Any active memory from an archive/evidence root.
+- Any active memory from legacy reference material.
 
 ## Rules For Reopening Historical Context
 
-Historical archive/evidence material may be reopened only when all of these are true:
+Legacy reference material may be reopened only when all of these are true:
 
 - A clean-room decision hits a concrete blocker.
 - The question is named before the lookup begins.
@@ -76,5 +76,4 @@ The operating project root remains current when validation shows:
 - New research intake and extraction do not create a context swamp.
 - Doctor/validate pass succeeds.
 - Product specs stay in the product source checkout.
-- Historical archive/evidence roots remain narrow opt-in lookup targets, not default context.
-
+- Legacy reference material remains narrow opt-in lookup context, not default context.

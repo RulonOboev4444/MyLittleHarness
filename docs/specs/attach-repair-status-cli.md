@@ -14,7 +14,7 @@ For the portable clean-room posture:
 
 - the operating project root is the repository MyLittleHarness is servicing and owns active operating memory and plans for that repository
 - the product source checkout owns reusable product source and docs
-- archive/evidence roots are opt-in historical lookup targets only
+- legacy reference material is opened only for a named blocker
 - MyLittleHarness serves the explicit target repository directly
 
 The CLI must preserve the distinction between live operating memory and product-root compatibility fixtures.
@@ -117,7 +117,7 @@ The `snapshot --inspect` report is advisory and uses the standard report shape. 
 
 Mutating attach and repair behavior is gated by root classification before any filesystem write:
 
-- A live operating root is an operator-provided target repository that owns operating memory and is not classified as product source, product compatibility fixture, archive/evidence material, generated output, adapter state, cache, or archive-only material.
+- A live operating root is an operator-provided target repository that owns operating memory and is not classified as product source, product compatibility fixture, legacy reference material, generated output, adapter state, cache, or archive-only material.
 - A product-source compatibility fixture is any target whose state marks `root_role = "product-source"`, `fixture_status = "product-compatibility-fixture"`, or whose `product_source_root` resolves to the target root. Apply modes must refuse this target with exit code `2`; dry-run modes remain report-only and may return no-op proposals.
 - A fallback, archive, generated-output, adapter, cache, log, local database, package archive, user config, PATH, hook, MCP, GitHub, browser, IDE, or switch-over surface is outside the write boundary. Apply modes must refuse it with exit code `2`.
 
