@@ -9,6 +9,7 @@ from .evidence_cues import CLOSEOUT_FIELD_NAMES, closeout_field_cues, cue_findin
 from .projection_artifacts import inspect_projection_artifacts
 from .projection_index import inspect_projection_index
 from .vcs import VcsPosture, probe_vcs
+from .writeback import WritebackFact, state_writeback_facts
 
 
 RESIDUAL_RISK_PATTERNS = (r"\bresidual risks?\b", r"\brisk remains\b", r"\bremaining risk\b")
@@ -173,11 +174,18 @@ def _changed_samples(posture: VcsPosture) -> str:
 def _closeout_field_findings(inventory: Inventory, posture: VcsPosture) -> list[Finding]:
     findings: list[Finding] = []
     active_plan = inventory.active_plan_surface if inventory.active_plan_surface and inventory.active_plan_surface.exists else None
-    if not active_plan:
+    facts = state_writeback_facts(inventory.state)
+    if not active_plan and not facts:
         findings.append(Finding("info", "closeout-field-scan", "closeout field scan skipped because no active plan is present"))
     else:
         for field in CLOSEOUT_FIELD_NAMES:
-            findings.extend(_field_findings(active_plan, field))
+            fact = facts.get(field)
+            if fact:
+                findings.append(_writeback_fact_finding(f"closeout-{field.replace('_', '-')}", f"{field} candidate", fact))
+            elif active_plan:
+                findings.extend(_field_findings(active_plan, field))
+            else:
+                findings.append(Finding("warn", f"closeout-{field.replace('_', '-')}", f"missing: concrete closeout field candidate not found: {field}"))
     findings.extend(_commit_input_findings(inventory, posture))
     return findings
 
@@ -191,6 +199,16 @@ def _field_findings(active_plan: Surface, field: str) -> list[Finding]:
     if broad:
         findings.extend(cue_findings(f"{code}-context", f"{field} context", broad, limit=2))
     return findings
+
+
+def _writeback_fact_finding(code: str, label: str, fact: WritebackFact) -> Finding:
+    return Finding(
+        "info",
+        code,
+        f"candidate: {label}: - {fact.field}: {fact.value}; source={fact.source}:{fact.line}",
+        fact.source,
+        fact.line,
+    )
 
 
 def _commit_input_findings(inventory: Inventory, posture: VcsPosture) -> list[Finding]:
@@ -246,7 +264,8 @@ def _git_evidence_findings(inventory: Inventory, posture: VcsPosture) -> list[Fi
         return findings
 
     active_plan = inventory.active_plan_surface if inventory.active_plan_surface and inventory.active_plan_surface.exists else None
-    if not active_plan:
+    facts = state_writeback_facts(inventory.state)
+    if not active_plan and not facts:
         findings.append(
             Finding(
                 "info",
@@ -256,14 +275,15 @@ def _git_evidence_findings(inventory: Inventory, posture: VcsPosture) -> list[Fi
         )
         return findings
 
-    values, missing = _required_trailer_values(active_plan)
+    trailer_source = active_plan.rel_path if active_plan else (inventory.state.rel_path if inventory.state and inventory.state.exists else None)
+    values, missing = _required_trailer_values(inventory, active_plan)
     if missing:
         findings.append(
             Finding(
                 "warn",
                 "closeout-git-evidence-missing",
                 f"missing required closeout field lines for Git trailer suggestions: {', '.join(missing)}",
-                active_plan.rel_path,
+                trailer_source,
             )
         )
         return findings
@@ -276,32 +296,34 @@ def _git_evidence_findings(inventory: Inventory, posture: VcsPosture) -> list[Fi
                 "info",
                 "closeout-git-evidence-trailer",
                 f"suggestion: {trailer_name}: {value}",
-                active_plan.rel_path,
+                trailer_source,
             )
         )
 
-    for trailer_name, value in _optional_trailer_values(active_plan):
+    for trailer_name, value in _optional_trailer_values(inventory, active_plan):
         findings.append(
             Finding(
                 "info",
                 "closeout-git-evidence-trailer",
                 f"suggestion: {trailer_name}: {value}",
-                active_plan.rel_path,
+                trailer_source,
             )
         )
     return findings
 
 
-def _required_trailer_values(active_plan: Surface) -> tuple[list[tuple[str, str]], list[str]]:
+def _required_trailer_values(inventory: Inventory, active_plan: Surface | None) -> tuple[list[tuple[str, str]], list[str]]:
     values: list[tuple[str, str]] = []
     missing: list[str] = []
+    facts = state_writeback_facts(inventory.state)
     for field, trailer_name in GIT_EVIDENCE_REQUIRED_TRAILERS:
-        if field in {"worktree_start_state", "task_scope"}:
+        value = _state_fact_value(facts, field)
+        if not value and active_plan and field in {"worktree_start_state", "task_scope"}:
             value = _explicit_line_value(active_plan, ("task_scope", "task scope"))
             if field == "worktree_start_state":
                 value = _explicit_line_value(active_plan, ("worktree_start_state", "worktree start state"))
         else:
-            value = _closeout_field_trailer_value(active_plan, field)
+            value = value or (_closeout_field_trailer_value(active_plan, field) if active_plan else "")
         if value:
             values.append((trailer_name, value))
         else:
@@ -318,13 +340,19 @@ def _closeout_field_trailer_value(active_plan: Surface, field: str) -> str:
     return ""
 
 
-def _optional_trailer_values(active_plan: Surface) -> list[tuple[str, str]]:
+def _optional_trailer_values(inventory: Inventory, active_plan: Surface | None) -> list[tuple[str, str]]:
     values: list[tuple[str, str]] = []
+    facts = state_writeback_facts(inventory.state)
     for _key, trailer_name, labels in GIT_EVIDENCE_OPTIONAL_TRAILERS:
-        value = _explicit_line_value(active_plan, labels)
+        value = _state_fact_value(facts, _key) or (_explicit_line_value(active_plan, labels) if active_plan else "")
         if value:
             values.append((trailer_name, value))
     return values
+
+
+def _state_fact_value(facts: dict[str, WritebackFact], field: str) -> str:
+    fact = facts.get(field)
+    return _normalize_trailer_value(fact.value) if fact else ""
 
 
 def _explicit_line_value(surface: Surface, labels: tuple[str, ...]) -> str:
@@ -352,13 +380,16 @@ def _normalize_trailer_value(value: str) -> str:
 def _evidence_cue_findings(inventory: Inventory) -> list[Finding]:
     active_plan = inventory.active_plan_surface if inventory.active_plan_surface and inventory.active_plan_surface.exists else None
     findings: list[Finding] = []
-    findings.extend(_line_group_findings(active_plan, "closeout-residual-risk", "residual risk", RESIDUAL_RISK_PATTERNS))
+    facts = state_writeback_facts(inventory.state)
+    findings.extend(_line_group_findings(active_plan, "closeout-residual-risk", "residual risk", RESIDUAL_RISK_PATTERNS, facts.get("residual_risk")))
     findings.extend(_line_group_findings(active_plan, "closeout-skip-rationale", "skip rationale", SKIP_RATIONALE_PATTERNS))
-    findings.extend(_line_group_findings(active_plan, "closeout-carry-forward", "carry-forward", CARRY_FORWARD_PATTERNS))
+    findings.extend(_line_group_findings(active_plan, "closeout-carry-forward", "carry-forward", CARRY_FORWARD_PATTERNS, facts.get("carry_forward")))
     return findings
 
 
-def _line_group_findings(active_plan: Surface | None, code: str, label: str, patterns: Iterable[str]) -> list[Finding]:
+def _line_group_findings(active_plan: Surface | None, code: str, label: str, patterns: Iterable[str], fact: WritebackFact | None = None) -> list[Finding]:
+    if fact:
+        return [_writeback_fact_finding(code, f"{label} candidate", fact)]
     if not active_plan:
         return [Finding("info", code, f"{label} scan skipped because no active plan is present")]
     cues = find_cues(active_plan, label.replace(" ", "-"), f"{label} candidate", patterns)
@@ -369,6 +400,7 @@ def _line_group_findings(active_plan: Surface | None, code: str, label: str, pat
 
 def _quality_gate_findings(inventory: Inventory, posture: VcsPosture) -> list[Finding]:
     active_plan = inventory.active_plan_surface if inventory.active_plan_surface and inventory.active_plan_surface.exists else None
+    facts = state_writeback_facts(inventory.state)
     findings = [
         Finding(
             "info",
@@ -376,17 +408,22 @@ def _quality_gate_findings(inventory: Inventory, posture: VcsPosture) -> list[Fi
             "report-only quality gates assemble readiness cues only; persistent evidence manifest remains deferred and no gate state, evidence manifest, archive action, commit action, repair, or lifecycle mutation is written",
         )
     ]
-    if not active_plan:
+    if not active_plan and not facts:
         findings.append(Finding("info", "closeout-quality-gate", "active-plan quality scan skipped because no active plan is present"))
     else:
-        missing = [field for field in CLOSEOUT_FIELD_NAMES if not closeout_field_cues(active_plan, field)[0]]
+        fact_source = active_plan.rel_path if active_plan else (inventory.state.rel_path if inventory.state and inventory.state.exists else None)
+        missing = [
+            field
+            for field in CLOSEOUT_FIELD_NAMES
+            if field not in facts and (not active_plan or not closeout_field_cues(active_plan, field)[0])
+        ]
         if missing:
             findings.append(
                 Finding(
                     "warn",
                     "closeout-quality-gate",
                     f"missing concrete closeout field evidence: {', '.join(missing)}",
-                    active_plan.rel_path,
+                    fact_source,
                 )
             )
         else:
@@ -395,7 +432,7 @@ def _quality_gate_findings(inventory: Inventory, posture: VcsPosture) -> list[Fi
                     "info",
                     "closeout-quality-gate",
                     "concrete closeout field evidence is present; observed verification and operator decisions remain required",
-                    active_plan.rel_path,
+                    fact_source,
                 )
             )
     if posture.state == "dirty":
@@ -436,6 +473,6 @@ def _boundary_findings(inventory: Inventory) -> list[Finding]:
         Finding(
             "info",
             "closeout-no-mutation",
-            "report did not stage, commit, archive, repair, switch roots, write state, create generated evidence, or change projection artifacts",
+            "report did not stage, commit, archive, repair, change target roots, write state, create generated evidence, or change projection artifacts",
         ),
     ]

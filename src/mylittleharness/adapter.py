@@ -197,7 +197,7 @@ def _boundary_findings() -> list[Finding]:
         Finding(
             "info",
             "adapter-no-authority",
-            "adapter output is helper evidence only and cannot authorize accepted decisions, repair, closeout, archive, commit, switch-over, or lifecycle changes",
+            "adapter output is helper evidence only and cannot authorize accepted decisions, repair, closeout, archive, commit, lifecycle changes",
         ),
         Finding(
             "info",
@@ -294,7 +294,7 @@ def _tool_definition() -> dict[str, object]:
         "title": "MyLittleHarness Read Projection",
         "description": (
             "Return a source-bound, read-only projection summary for a MyLittleHarness root without copying source bodies "
-            "or approving lifecycle actions."
+            "or approving lifecycle decisions."
         ),
         "inputSchema": {"type": "object", "additionalProperties": False},
         "outputSchema": {

@@ -27,6 +27,100 @@ class InventoryTests(unittest.TestCase):
             errors = [finding for finding in validation_findings(inventory) if finding.severity == "error"]
             self.assertEqual(errors, [])
 
+    def test_inventory_classifies_present_memory_routes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_minimal_root(Path(tmp), active=False, docmap=True)
+            (root / "project/specs/workflow/workflow-memory-routing-spec.md").write_text("# Memory Routing\n", encoding="utf-8")
+            (root / "project/plan-incubation").mkdir()
+            (root / "project/plan-incubation/memory-routing.md").write_text("# Incubation\n", encoding="utf-8")
+            (root / "project/research").mkdir()
+            (root / "project/research/memory-routing.md").write_text("# Research\n", encoding="utf-8")
+
+            inventory = load_inventory(root)
+
+            self.assertEqual("operating-guardrails", inventory.surface_by_rel["AGENTS.md"].memory_route)
+            self.assertEqual("state", inventory.surface_by_rel["project/project-state.md"].memory_route)
+            self.assertEqual("stable-specs", inventory.surface_by_rel["project/specs/workflow/workflow-memory-routing-spec.md"].memory_route)
+            self.assertEqual("incubation", inventory.surface_by_rel["project/plan-incubation/memory-routing.md"].memory_route)
+            self.assertEqual("research", inventory.surface_by_rel["project/research/memory-routing.md"].memory_route)
+
+    def test_inventory_discovers_decision_adr_and_verification_routes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_route_metadata_live_root(Path(tmp))
+            (root / "project/decisions").mkdir()
+            (root / "project/adrs").mkdir()
+            (root / "project/verification").mkdir()
+            (root / "project/decisions/no-parallel-memory.md").write_text('---\nstatus: "accepted"\n---\n# Decision\n', encoding="utf-8")
+            (root / "project/adrs/0001-routing.md").write_text('---\nstatus: "accepted"\n---\n# ADR\n', encoding="utf-8")
+            (root / "project/verification/route-metadata.md").write_text('---\nstatus: "passed"\n---\n# Verification\n', encoding="utf-8")
+
+            inventory = load_inventory(root)
+
+            self.assertEqual("decisions", inventory.surface_by_rel["project/decisions/no-parallel-memory.md"].memory_route)
+            self.assertEqual("adrs", inventory.surface_by_rel["project/adrs/0001-routing.md"].memory_route)
+            self.assertEqual("verification", inventory.surface_by_rel["project/verification/route-metadata.md"].memory_route)
+
+    def test_route_metadata_validation_reports_advisory_warnings_for_live_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_route_metadata_live_root(Path(tmp))
+            (root / "project/research").mkdir()
+            (root / "project/plan-incubation").mkdir()
+            (root / "project/decisions").mkdir()
+            (root / "project/archive/reference/research").mkdir(parents=True)
+            (root / "project/archive/reference/research/raw.md").write_text("# Archived Raw\n", encoding="utf-8")
+            (root / "project/plan-incubation/idea.md").write_text('---\nstatus: "incubating"\n---\n# Idea\n', encoding="utf-8")
+            (root / "project/research/old.md").write_text(
+                '---\nstatus: "archived"\narchived_to: "project/archive/reference/research/raw.md"\n---\n# Old\n',
+                encoding="utf-8",
+            )
+            (root / "project/research/bad.md").write_text(
+                "---\n"
+                'status: "teleported"\n'
+                'promoted_to: "project/archive/reference/research/raw.md"\n'
+                'archived_to: "project/research/archive.md"\n'
+                'related_research: "../outside.md"\n'
+                'source_incubation: ["project/plan-incubation/missing.md"]\n'
+                "---\n"
+                "# Bad\n",
+                encoding="utf-8",
+            )
+            (root / "project/decisions/current.md").write_text(
+                '---\nstatus: "accepted"\nrelated_research: "project/research/old.md"\n---\n# Current\n',
+                encoding="utf-8",
+            )
+            (root / "project/decisions/malformed.md").write_text(
+                "---\nstatus:\n  nested: no\n---\n# Malformed\n",
+                encoding="utf-8",
+            )
+
+            inventory = load_inventory(root)
+            warnings = [finding for finding in validation_findings(inventory) if finding.code.startswith("route-metadata-")]
+            codes = [finding.code for finding in warnings]
+
+            self.assertIn("route-metadata-status", codes)
+            self.assertIn("route-metadata-destination", codes)
+            self.assertIn("route-metadata-path", codes)
+            self.assertIn("route-metadata-missing-target", codes)
+            self.assertIn("route-metadata-stale-reference", codes)
+            self.assertIn("route-metadata-frontmatter", codes)
+            self.assertIn("route-metadata-authority", codes)
+            self.assertTrue(all(finding.severity in {"warn", "info"} for finding in warnings))
+
+    def test_route_metadata_validation_is_live_root_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_minimal_root(Path(tmp), active=False, docmap=True)
+            (root / "project/research").mkdir()
+            (root / "project/research/bad.md").write_text(
+                '---\nstatus: "teleported"\narchived_to: "../outside.md"\n---\n# Bad\n',
+                encoding="utf-8",
+            )
+
+            inventory = load_inventory(root)
+            codes = [finding.code for finding in validation_findings(inventory)]
+
+            self.assertNotIn("route-metadata-status", codes)
+            self.assertNotIn("route-metadata-path", codes)
+
     def test_status_reports_product_root_posture(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_minimal_root(Path(tmp), active=False, docmap=True)
@@ -39,7 +133,6 @@ class InventoryTests(unittest.TestCase):
                 "operating-root",
                 "product-root",
                 "fallback-root",
-                "no-switch-over",
             ):
                 self.assertIn(expected, codes)
 
@@ -75,6 +168,105 @@ class InventoryTests(unittest.TestCase):
             errors = [finding.code for finding in validation_findings(inventory) if finding.severity == "error"]
             self.assertIn("active-plan-missing", errors)
 
+    def test_active_phase_fields_are_required_when_state_is_active(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_minimal_root(Path(tmp), active=True, docmap=True)
+            state = root / "project/project-state.md"
+            state.write_text(
+                state.read_text(encoding="utf-8")
+                .replace('active_phase: "Phase 1"\n', "")
+                .replace('phase_status: "in_progress"\n', ""),
+                encoding="utf-8",
+            )
+            inventory = load_inventory(root)
+            warnings = [finding.code for finding in validation_findings(inventory) if finding.severity == "warn"]
+            self.assertIn("active-phase-field", warnings)
+            self.assertIn("phase-status-field", warnings)
+
+    def test_complete_active_plan_warns_on_uncertain_docs_decision_frontmatter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_minimal_root(Path(tmp), active=True, docmap=True)
+            state = root / "project/project-state.md"
+            state.write_text(state.read_text(encoding="utf-8").replace('phase_status: "in_progress"', 'phase_status: "complete"'), encoding="utf-8")
+            (root / "project/implementation-plan.md").write_text(
+                '---\ntitle: "Plan"\ndocs_decision: "uncertain"\n---\n# Plan\n\n- docs_decision: updated\n',
+                encoding="utf-8",
+            )
+            inventory = load_inventory(root)
+            warnings = [finding.code for finding in validation_findings(inventory) if finding.severity == "warn"]
+            self.assertIn("active-plan-docs-decision-uncertain", warnings)
+
+    def test_complete_active_plan_warns_on_pending_phase_body_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_minimal_root(Path(tmp), active=True, docmap=True)
+            state = root / "project/project-state.md"
+            state.write_text(
+                state.read_text(encoding="utf-8")
+                .replace('active_phase: "Phase 1"', 'active_phase: "phase-2-verify"')
+                .replace('phase_status: "in_progress"', 'phase_status: "complete"'),
+                encoding="utf-8",
+            )
+            (root / "project/implementation-plan.md").write_text(
+                "# Plan\n\n"
+                "## Phase 1: Setup\n\n"
+                "- id: `phase-1-setup`\n"
+                "- status: `pending`\n\n"
+                "## Phase 2: Verify\n\n"
+                "- id: `phase-2-verify`\n"
+                "- status: `in_progress`\n",
+                encoding="utf-8",
+            )
+            inventory = load_inventory(root)
+            warnings = [finding.code for finding in validation_findings(inventory) if finding.severity == "warn"]
+            self.assertIn("active-plan-phase-body-drift", warnings)
+
+    def test_complete_closeout_active_plan_warns_when_not_archived(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_minimal_root(Path(tmp), active=True, docmap=True)
+            state = root / "project/project-state.md"
+            state.write_text(
+                state.read_text(encoding="utf-8").replace('phase_status: "in_progress"', 'phase_status: "complete"')
+                + "\n## MLH Closeout Writeback\n\n"
+                "<!-- BEGIN mylittleharness-closeout-writeback v1 -->\n"
+                "- docs_decision: updated\n"
+                "- state_writeback: complete\n"
+                "- verification: targeted suite passed\n"
+                "- commit_decision: manual policy\n"
+                "<!-- END mylittleharness-closeout-writeback v1 -->\n",
+                encoding="utf-8",
+            )
+            (root / "project/implementation-plan.md").write_text(
+                "# Plan\n\n"
+                "## Phase 1\n\n"
+                "- status: `done`\n",
+                encoding="utf-8",
+            )
+            inventory = load_inventory(root)
+            warnings = [finding.code for finding in validation_findings(inventory) if finding.severity == "warn"]
+            self.assertIn("active-plan-complete-not-archived", warnings)
+
+    def test_active_plan_warns_on_invalid_docs_decision_frontmatter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_minimal_root(Path(tmp), active=True, docmap=True)
+            (root / "project/implementation-plan.md").write_text(
+                '---\ntitle: "Plan"\ndocs_decision: "maybe"\n---\n# Plan\n',
+                encoding="utf-8",
+            )
+            inventory = load_inventory(root)
+            warnings = [finding.code for finding in validation_findings(inventory) if finding.severity == "warn"]
+            self.assertIn("active-plan-docs-decision-value", warnings)
+
+    def test_generated_active_plan_shape_warns_when_expected_sections_are_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_minimal_root(Path(tmp), active=True, docmap=True)
+            (root / "project/implementation-plan.md").write_text(
+                '---\nplan_id: "2026-05-01-generated"\nstatus: "in_progress"\ndocs_decision: "uncertain"\n---\n# Generated\n\n## Objective\n\nDo work.\n',
+                encoding="utf-8",
+            )
+            inventory = load_inventory(root)
+            warnings = [finding.code for finding in validation_findings(inventory) if finding.severity == "warn"]
+            self.assertIn("active-plan-generated-shape", warnings)
+
     def test_mirror_drift_is_reported_as_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_minimal_root(Path(tmp), active=False, docmap=True, mirrors=True)
@@ -101,8 +293,8 @@ class InventoryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = make_minimal_root(Path(tmp), active=False, docmap=True)
             (root / "docs/architecture").mkdir(parents=True)
-            (root / "docs/README.md").write_text("Read `architecture/target-architecture.md`.\n", encoding="utf-8")
-            (root / "docs/architecture/target-architecture.md").write_text("# Target\n", encoding="utf-8")
+            (root / "docs/README.md").write_text("Read `architecture/product-architecture.md`.\n", encoding="utf-8")
+            (root / "docs/architecture/product-architecture.md").write_text("# Product\n", encoding="utf-8")
             inventory = load_inventory(root)
             warnings = [
                 finding
@@ -249,8 +441,12 @@ class InventoryTests(unittest.TestCase):
             root = make_minimal_root(Path(tmp), active=False, docmap=True)
             (root / "project/research").mkdir()
             (root / "project/research/raw.md").write_text("# Raw\n", encoding="utf-8")
+            (root / "project/incubator").mkdir()
+            (root / "project/incubator/idea.md").write_text("# Idea\n", encoding="utf-8")
             (root / "project/archive/plans").mkdir(parents=True)
             (root / "project/archive/plans/old.md").write_text("# Old\n", encoding="utf-8")
+            (root / "project/decisions").mkdir()
+            (root / "project/decisions/no-revisit.md").write_text("# Decision\n", encoding="utf-8")
             (root / "__pycache__").mkdir()
             (root / "debug.log").write_text("debug\n", encoding="utf-8")
             (root / "local.sqlite").write_text("", encoding="utf-8")
@@ -269,7 +465,9 @@ class InventoryTests(unittest.TestCase):
             self.assertIn("forbidden-product-surface", codes)
             self.assertIn("product-debris", codes)
             self.assertIn("project/research", sources)
+            self.assertIn("project/incubator", sources)
             self.assertIn("project/archive", sources)
+            self.assertIn("project/decisions", sources)
             self.assertIn("__pycache__", sources)
             self.assertIn("debug.log", sources)
             self.assertIn("local.sqlite", sources)
@@ -290,8 +488,9 @@ def make_minimal_root(root: Path, active: bool, docmap: bool, mirrors: bool = Fa
     )
     plan_status = "active" if active else "none"
     active_plan = "project/implementation-plan.md" if active else ""
+    phase_fields = 'active_phase: "Phase 1"\nphase_status: "in_progress"\n' if active else ""
     (root / "project/project-state.md").write_text(
-        f'---\nproject: "MyLittleHarness"\nroot_role: "product-source"\nfixture_status: "product-compatibility-fixture"\nworkflow: "workflow-core"\noperating_mode: "plan"\nplan_status: "{plan_status}"\nactive_plan: "{active_plan}"\noperating_root: "{root.parent / "operator-root"}"\nproduct_source_root: "{root}"\nhistorical_fallback_root: "{root.parent / "legacy-root"}"\n---\n# State\n\nNo active implementation plan is open in this product tree.\nThis product tree stores fixture metadata only.\n',
+        f'---\nproject: "MyLittleHarness"\nroot_role: "product-source"\nfixture_status: "product-compatibility-fixture"\nworkflow: "workflow-core"\noperating_mode: "plan"\nplan_status: "{plan_status}"\nactive_plan: "{active_plan}"\n{phase_fields}operating_root: "{root.parent / "operator-root"}"\nproduct_source_root: "{root}"\nhistorical_fallback_root: "{root.parent / "legacy-root"}"\n---\n# State\n\nNo active implementation plan is open in this product tree.\nThis product tree stores fixture metadata only.\n',
         encoding="utf-8",
     )
     (root / "README.md").write_text("# README\n", encoding="utf-8")
@@ -313,6 +512,14 @@ def make_minimal_root(root: Path, active: bool, docmap: bool, mirrors: bool = Fa
     return root
 
 
+def make_route_metadata_live_root(root: Path) -> Path:
+    make_minimal_root(root, active=False, docmap=True)
+    (root / "project/project-state.md").write_text(
+        '---\nproject: "Demo"\nworkflow: "workflow-core"\noperating_mode: "ad_hoc"\nplan_status: "none"\nactive_plan: ""\n---\n# State\n',
+        encoding="utf-8",
+    )
+    return root
+
+
 if __name__ == "__main__":
     unittest.main()
-

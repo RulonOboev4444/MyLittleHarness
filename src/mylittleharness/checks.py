@@ -21,8 +21,16 @@ from .inventory import (
 )
 from .models import Finding
 from .projection import Projection, ProjectionLinkRecord, build_projection
-from .projection_artifacts import ARTIFACT_DIR_REL, inspect_projection_artifacts, projection_artifact_path_query_findings
-from .projection_index import full_text_search_findings, inspect_projection_index
+from .projection_artifacts import ARTIFACT_DIR_REL, build_projection_artifacts, inspect_projection_artifacts, projection_artifact_path_query_findings
+from .projection_index import INDEX_REL_PATH, build_projection_index, full_text_search_findings, inspect_projection_index
+from .routes import ROUTE_BY_ID, classify_memory_route, lifecycle_route_rows
+from .writeback import (
+    active_plan_body_facts,
+    active_plan_phase_body_status_fact,
+    canonical_phase_body_status,
+    closeout_values_are_complete,
+    state_writeback_facts,
+)
 
 
 LARGE_FILE_LINES = 500
@@ -36,7 +44,9 @@ FAN_IN_RESULT_LIMIT = 20
 
 PRODUCT_HYGIENE_OPERATIONAL_PREFIXES = {
     "project/implementation-plan.md": "active implementation plans live in the operating root",
+    "project/decisions": "decision and do-not-revisit records live in the operating root",
     "project/archive": "archives and historical memory live in the operating root",
+    "project/incubator": "legacy incubator notes must use canonical project/plan-incubation in the operating root",
     "project/plan-incubation": "incubation notes live in the operating root",
     "project/problem-reports": "problem reports and new intake live in the operating root",
     "project/raw-intake": "raw intake lives in the operating root",
@@ -132,6 +142,8 @@ STATE_FRONTMATTER_TARGET_REL = "project/project-state.md"
 STATE_FRONTMATTER_TARGET_SLUG = "project-project-state-md"
 STATE_FRONTMATTER_COPY_REL = "files/project/project-state.md"
 STATE_FRONTMATTER_OPTIONAL_KEYS = (
+    "active_phase",
+    "phase_status",
     "last_archived_plan",
     "operating_root",
     "canonical_source_evidence_root",
@@ -215,6 +227,72 @@ HISTORICAL_CONTEXT_MARKERS = (
     "release history",
     "superseded",
 )
+PHASE_STATUS_VALUES = {
+    "pending",
+    "active",
+    "in_progress",
+    "blocked",
+    "complete",
+    "skipped",
+    "paused",
+}
+DOCS_DECISION_VALUES = {"updated", "not-needed", "uncertain"}
+ROUTE_METADATA_VALIDATED_ROUTES = {"adrs", "decisions", "incubation", "research", "stable-specs", "verification"}
+ROUTE_METADATA_STATUS_VALUES = {
+    "accepted",
+    "active",
+    "archived",
+    "blocked",
+    "complete",
+    "distilled",
+    "draft",
+    "failed",
+    "implemented",
+    "imported",
+    "incubating",
+    "in_progress",
+    "in-progress",
+    "partial",
+    "passed",
+    "paused",
+    "pending",
+    "proposed",
+    "promoted",
+    "rejected",
+    "research-ready",
+    "skipped",
+    "superseded",
+}
+ROUTE_METADATA_SCALAR_PATH_FIELDS = {"archived_to", "promoted_to"}
+ROUTE_METADATA_FLEXIBLE_PATH_FIELDS = {
+    "related_adr",
+    "related_adrs",
+    "related_decision",
+    "related_decisions",
+    "related_doc",
+    "related_docs",
+    "related_incubation",
+    "related_plan",
+    "related_research",
+    "related_spec",
+    "related_specs",
+    "related_verification",
+    "source_incubation",
+    "source_research",
+    "superseded_by",
+    "supersedes",
+}
+ROUTE_METADATA_PROMOTION_TARGET_ROUTES = {
+    "active-plan",
+    "adrs",
+    "decisions",
+    "operating-guardrails",
+    "product-docs",
+    "stable-specs",
+    "state",
+    "verification",
+}
+LIFECYCLE_ROUTE_ROWS = lifecycle_route_rows()
 
 
 def status_findings(inventory: Inventory) -> list[Finding]:
@@ -223,6 +301,8 @@ def status_findings(inventory: Inventory) -> list[Finding]:
     data = state.frontmatter.data if state else {}
     findings.append(Finding("info", "root-kind", f"root kind: {inventory.root_kind}"))
     findings.extend(_product_posture_status_findings(inventory))
+    findings.extend(lifecycle_route_findings(inventory))
+    findings.extend(lifecycle_summary_findings(inventory))
     for key in (
         "project",
         "root_role",
@@ -230,6 +310,8 @@ def status_findings(inventory: Inventory) -> list[Finding]:
         "operating_mode",
         "plan_status",
         "active_plan",
+        "active_phase",
+        "phase_status",
         "operating_root",
         "product_source_root",
         "projection_status",
@@ -267,12 +349,154 @@ def status_findings(inventory: Inventory) -> list[Finding]:
         findings.append(Finding("info", "operating-root", f"operating root: {source_root}", state.rel_path if state else None))
     if product_root:
         findings.append(Finding("info", "product-root", f"product source root: {product_root}", state.rel_path if state else None))
-    if _string_contains(inventory, "switch-over"):
-        findings.append(Finding("info", "switch-over", "root-boundary wording says no operational switch-over has happened"))
     marker = inventory.surface_by_rel.get(DETACH_MARKER_REL_PATH)
     if marker and marker.exists:
         findings.extend(_detach_marker_status_findings(inventory, marker))
     return findings
+
+
+def lifecycle_summary_findings(inventory: Inventory) -> list[Finding]:
+    if inventory.root_kind != "live_operating_root":
+        return []
+    state = inventory.state
+    data = state.frontmatter.data if state and state.exists else {}
+    plan_status = str(data.get("plan_status") or "")
+    active_phase = str(data.get("active_phase") or "")
+    phase_status = str(data.get("phase_status") or "")
+    active_plan = str(data.get("active_plan") or "project/implementation-plan.md")
+    source = state.rel_path if state else None
+    if plan_status == "active":
+        phase_label = f"; active_phase: {active_phase}" if active_phase else ""
+        if phase_status == "complete":
+            return [
+                Finding(
+                    "info",
+                    "lifecycle-summary",
+                    (
+                        f"active plan phase is complete{phase_label}; implementation work is not pending; "
+                        "next action is explicit closeout/writeback, archive, or manual commit per policy"
+                    ),
+                    source,
+                )
+            ]
+        if phase_status in {"active", "in_progress"}:
+            return [
+                Finding(
+                    "info",
+                    "lifecycle-summary",
+                    f"active plan is in progress{phase_label}; continue from project-state active_phase and phase_status",
+                    source,
+                )
+            ]
+        if phase_status in {"blocked", "paused"}:
+            return [
+                Finding(
+                    "warn",
+                    "lifecycle-summary",
+                    f"active plan is {phase_status}{phase_label}; resolve the blocker or update lifecycle state before continuing",
+                    source,
+                )
+            ]
+        if phase_status == "skipped":
+            return [
+                Finding(
+                    "info",
+                    "lifecycle-summary",
+                    f"active plan phase is skipped{phase_label}; next action is explicit lifecycle writeback or archive decision",
+                    source,
+                )
+            ]
+        return [
+            Finding(
+                "info",
+                "lifecycle-summary",
+                f"active plan is open at {active_plan}; phase_status is {phase_status or 'not recorded'}",
+                source,
+            )
+        ]
+    if plan_status in {"", "none"}:
+        return [Finding("info", "lifecycle-summary", "no active implementation plan is open", source)]
+    return [
+        Finding(
+            "warn",
+            "lifecycle-summary",
+            f"plan_status is {plan_status!r}; expected active or none for normal continuation",
+            source,
+        )
+    ]
+
+
+def lifecycle_route_findings(inventory: Inventory) -> list[Finding]:
+    if inventory.root_kind != "live_operating_root":
+        return []
+    findings = [
+        Finding(
+            "info",
+            "lifecycle-route-table",
+            (
+                "canonical lifecycle route table for live operating roots; "
+                "advisory only and cannot approve mutation, repair, closeout, archive, commit, or lifecycle decisions"
+            ),
+        )
+    ]
+    findings.extend(
+        Finding("info", "lifecycle-route", f"{name}: {target}; {purpose}")
+        for name, target, purpose in LIFECYCLE_ROUTE_ROWS
+    )
+    return findings
+
+
+def memory_route_inventory_findings(inventory: Inventory) -> list[Finding]:
+    if inventory.root_kind != "live_operating_root":
+        return []
+
+    surfaces = [surface for surface in inventory.present_surfaces if surface.memory_route]
+    if not surfaces:
+        return [Finding("info", "memory-route-inventory", "no present repo-visible surfaces were classified")]
+
+    route_counts: dict[str, list[Surface]] = {}
+    for surface in surfaces:
+        route_counts.setdefault(surface.memory_route, []).append(surface)
+
+    findings = [
+        Finding(
+            "info",
+            "memory-route-inventory",
+            f"classified {len(surfaces)} present repo-visible surface(s) into {len(route_counts)} memory route(s)",
+        )
+    ]
+    for route_id in _ordered_route_ids(route_counts):
+        route = ROUTE_BY_ID.get(route_id)
+        route_surfaces = sorted(route_counts[route_id], key=lambda item: item.rel_path)
+        examples = ", ".join(surface.rel_path for surface in route_surfaces[:3])
+        if len(route_surfaces) > 3:
+            examples += f", +{len(route_surfaces) - 3} more"
+        target = route.target if route else "<unknown>"
+        findings.append(
+            Finding(
+                "info",
+                "memory-route",
+                f"{route_id}: {len(route_surfaces)} surface(s); target: {target}; examples: {examples}",
+            )
+        )
+
+    for surface in sorted(surfaces, key=lambda item: item.rel_path):
+        route = ROUTE_BY_ID.get(surface.memory_route)
+        purpose = route.purpose if route else "unknown route"
+        findings.append(
+            Finding(
+                "info",
+                "memory-route-surface",
+                f"{surface.rel_path} -> {surface.memory_route}; {purpose}",
+                surface.rel_path,
+            )
+        )
+    return findings
+
+
+def _ordered_route_ids(route_counts: dict[str, list[Surface]]) -> list[str]:
+    registry_order = {route_id: index for index, route_id in enumerate(ROUTE_BY_ID)}
+    return sorted(route_counts, key=lambda route_id: (registry_order.get(route_id, len(registry_order)), route_id))
 
 
 def validation_findings(inventory: Inventory) -> list[Finding]:
@@ -280,12 +504,41 @@ def validation_findings(inventory: Inventory) -> list[Finding]:
     findings.extend(_required_surface_findings(inventory))
     findings.extend(_manifest_findings(inventory))
     findings.extend(_state_findings(inventory))
+    findings.extend(_incubation_contract_findings(inventory))
     findings.extend(_product_posture_findings(inventory))
     findings.extend(_active_plan_findings(inventory))
     findings.extend(_spec_findings(inventory))
     findings.extend(_frontmatter_findings(inventory))
+    findings.extend(_route_metadata_findings(inventory))
     findings.extend(_docmap_findings(inventory))
     findings.extend(_mirror_findings(inventory))
+    return findings
+
+
+def _incubation_contract_findings(inventory: Inventory) -> list[Finding]:
+    if inventory.root_kind != "live_operating_root":
+        return []
+    findings: list[Finding] = []
+    legacy_path = inventory.root / "project/incubator"
+    if legacy_path.exists():
+        findings.append(
+            Finding(
+                "warn",
+                "incubation-legacy-path",
+                "project/incubator is a legacy or ambiguous idea surface; use canonical project/plan-incubation/*.md for incubation notes",
+                "project/incubator",
+            )
+        )
+    agents = inventory.surface_by_rel.get("AGENTS.md")
+    if agents and agents.exists and "project/plan-incubation" not in agents.content:
+        findings.append(
+            Finding(
+                "warn",
+                "agents-incubation-contract-missing",
+                "AGENTS.md does not name the canonical incubation surface; idea-incubation requests should create or update project/plan-incubation/*.md instead of project-state carry-forward bullets",
+                "AGENTS.md",
+            )
+        )
     return findings
 
 
@@ -534,6 +787,34 @@ def intelligence_sections(
     return [("Summary", _intelligence_summary_findings(inventory, normalized_sections, search_text, path_text, full_text))] + normalized_sections
 
 
+def intelligence_route_sections(inventory: Inventory) -> list[tuple[str, list[Finding]]]:
+    boundary = [
+        Finding("info", "intelligence-routes-read-only", "intelligence --focus routes reports lifecycle routing without writing files"),
+        Finding(
+            "info",
+            "intelligence-routes-boundary",
+            (
+                "route output is advisory and cannot approve mutation, repair, closeout, archive, commit, "
+                "or lifecycle decisions"
+            ),
+        ),
+        Finding("info", "intelligence-routes-root-kind", f"root kind: {inventory.root_kind}"),
+    ]
+    if inventory.root_kind != "live_operating_root":
+        boundary.append(
+            Finding(
+                "info",
+                "route-table-scope",
+                "lifecycle route table is reported only for live operating roots; product-source fixtures remain product/fixture context",
+            )
+        )
+    sections = [("Boundary", boundary), ("Lifecycle Routes", lifecycle_route_findings(inventory))]
+    discovered = memory_route_inventory_findings(inventory)
+    if discovered:
+        sections.append(("Discovered Routes", discovered))
+    return sections
+
+
 def flatten_sections(sections: list[tuple[str, list[Finding]]]) -> list[Finding]:
     return [finding for _, findings in sections for finding in findings]
 
@@ -610,7 +891,7 @@ def _intelligence_summary_findings(
     ]
     state = inventory.state
     state_data = state.frontmatter.data if state and state.exists else {}
-    for key in ("operating_mode", "plan_status", "active_plan"):
+    for key in ("operating_mode", "plan_status", "active_plan", "active_phase", "phase_status"):
         value = state_data.get(key)
         if value not in (None, ""):
             summary.append(Finding("info", "intelligence-state", f"{key}: {value}", state.rel_path if state else None))
@@ -936,7 +1217,7 @@ def _projection_findings(inventory: Inventory, projection: Projection) -> list[F
         Finding(
             "info",
             "projection-authority",
-            "repo-visible files remain authoritative; generated artifacts are disposable and never approve repairs, closeout, commits, or switch-over",
+            "repo-visible files remain authoritative; generated artifacts are disposable and never approve repairs, closeout, commits, or lifecycle decisions",
         ),
         Finding(
             "info",
@@ -1058,7 +1339,7 @@ DETACH_MARKER_DIR_REL = ".mylittleharness/detach"
 DETACH_MARKER_REL_PATH = f"{DETACH_MARKER_DIR_REL}/disabled.json"
 DETACH_MARKER_SCHEMA_VERSION = 1
 DETACH_MARKER_MANUAL_RECOVERY = f"manual recovery only: remove {DETACH_MARKER_REL_PATH} to clear the marker; preserved repo-visible authority files remain the source of truth"
-DETACH_MARKER_NON_AUTHORITY = "detach marker is informational evidence only and cannot approve cleanup, repair, closeout, archive, commit, rollback, switch-over, lifecycle decisions, or future mutations"
+DETACH_MARKER_NON_AUTHORITY = "detach marker is informational evidence only and cannot approve cleanup, repair, closeout, archive, commit, rollback, lifecycle decisions, or future mutations"
 
 
 def detach_dry_run_sections(inventory: Inventory) -> list[tuple[str, list[Finding]]]:
@@ -1214,7 +1495,7 @@ def _detach_generated_projection_findings(inventory: Inventory) -> list[Finding]
     if projection_path.exists():
         return [
             Finding("info", "detach-generated-projection", f"disposable generated projection boundary is present and preserved: {ARTIFACT_DIR_REL}", ARTIFACT_DIR_REL),
-            Finding("info", "detach-generated-projection-authority", "generated projections remain build-to-delete speedups and cannot approve detach, repair, closeout, archive, commit, switch-over, or lifecycle decisions"),
+            Finding("info", "detach-generated-projection-authority", "generated projections remain build-to-delete speedups and cannot approve detach, repair, closeout, archive, commit, lifecycle decisions"),
         ]
     return [
         Finding("info", "detach-generated-projection", f"disposable generated projection boundary is absent and no cleanup is proposed: {ARTIFACT_DIR_REL}", ARTIFACT_DIR_REL),
@@ -1241,7 +1522,7 @@ def _detach_apply_recovery_findings() -> list[Finding]:
 def _detach_boundary_findings(inventory: Inventory) -> list[Finding]:
     findings = [
         Finding("info", "detach-read-only", "detach --dry-run writes no files, reports, caches, generated outputs, snapshots, Git state, config, hooks, CI files, package artifacts, or workstation state"),
-        Finding("info", "detach-no-authority", "detach dry-run output cannot approve cleanup, repair, closeout, archive, commit, switch-over, lifecycle decisions, or future mutations"),
+        Finding("info", "detach-no-authority", "detach dry-run output cannot approve cleanup, repair, closeout, archive, commit, lifecycle decisions, or future mutations"),
     ]
     findings.extend(_detach_path_conflict_findings(inventory))
     return findings
@@ -1516,6 +1797,7 @@ def attach_apply_findings(inventory: Inventory, project_name: str | None) -> lis
         ]
 
     errors = _attach_apply_preflight_errors(inventory, normalized_project)
+    errors.extend(_attach_generated_projection_preflight_errors(inventory))
     if errors:
         return errors
 
@@ -1551,10 +1833,108 @@ def attach_apply_findings(inventory: Inventory, project_name: str | None) -> lis
         Finding(
             "info",
             "attach-apply-boundary",
-            "attach --apply wrote only eager scaffold directories and absent manifest/state templates",
+            "attach --apply wrote eager scaffold directories, absent manifest/state templates, and attach-time disposable generated projection output",
         )
     )
+    refreshed_inventory = load_inventory(inventory.root)
+    findings.extend(_attach_generated_projection_findings(refreshed_inventory))
     return findings
+
+
+def _attach_generated_projection_findings(inventory: Inventory) -> list[Finding]:
+    findings: list[Finding] = [
+        Finding(
+            "info",
+            "attach-generated-projection-boundary",
+            f"attach-time generated projection boundary: {ARTIFACT_DIR_REL}",
+            ARTIFACT_DIR_REL,
+        )
+    ]
+    artifact_findings = build_projection_artifacts(inventory)
+    index_findings = build_projection_index(inventory)
+    build_findings = artifact_findings + index_findings
+    if any(finding.severity == "error" for finding in build_findings):
+        findings.append(
+            Finding(
+                "error",
+                "attach-generated-projection-refused",
+                "attach-time generated projection setup was refused by the owned boundary preflight",
+                ARTIFACT_DIR_REL,
+            )
+        )
+    elif any(finding.code in {"projection-index-fts5-unavailable", "projection-index-build-failed"} for finding in index_findings):
+        findings.append(
+            Finding(
+                "warn",
+                "attach-generated-projection-unavailable",
+                f"SQLite FTS/BM25 index was unavailable; JSON projection artifacts were built and no current index is required: {INDEX_REL_PATH}",
+                INDEX_REL_PATH,
+            )
+        )
+    elif any(finding.code == "projection-index-build" for finding in index_findings):
+        findings.append(
+            Finding(
+                "info",
+                "attach-generated-projection-build",
+                f"built schema v2 JSON projection artifacts and SQLite FTS/BM25 index: {INDEX_REL_PATH}",
+                INDEX_REL_PATH,
+            )
+        )
+    else:
+        findings.append(
+            Finding(
+                "info",
+                "attach-generated-projection-skipped",
+                "attach-time generated projection setup completed without a SQLite build finding",
+                ARTIFACT_DIR_REL,
+            )
+        )
+    findings.extend(build_findings)
+    return findings
+
+
+def _attach_generated_projection_preflight_errors(inventory: Inventory) -> list[Finding]:
+    errors: list[Finding] = []
+    root_resolved = inventory.root.resolve()
+    current = inventory.root
+    for part in ARTIFACT_DIR_REL.split("/"):
+        current = current / part
+        rel_path = current.relative_to(inventory.root).as_posix()
+        if current.is_symlink():
+            errors.append(
+                Finding(
+                    "error",
+                    "attach-generated-projection-refused",
+                    f"cannot create attach-time generated projection because a symlink segment exists: {rel_path}",
+                    rel_path,
+                )
+            )
+            return errors
+        if current.exists() and not current.is_dir():
+            errors.append(
+                Finding(
+                    "error",
+                    "attach-generated-projection-refused",
+                    f"cannot create attach-time generated projection because a non-directory segment exists: {rel_path}",
+                    rel_path,
+                )
+            )
+            return errors
+
+    projection_dir = inventory.root / ARTIFACT_DIR_REL
+    if projection_dir.exists():
+        try:
+            projection_dir.resolve().relative_to(root_resolved)
+        except ValueError:
+            errors.append(
+                Finding(
+                    "error",
+                    "attach-generated-projection-refused",
+                    f"attach-time generated projection boundary escapes target root: {ARTIFACT_DIR_REL}",
+                    ARTIFACT_DIR_REL,
+                )
+            )
+    return errors
 
 
 def _attach_apply_preflight_errors(inventory: Inventory, project_name: str | None) -> list[Finding]:
@@ -1720,7 +2100,11 @@ def repair_dry_run_findings(inventory: Inventory) -> list[Finding]:
         ),
     ]
     validation = validation_findings(inventory)
-    actionable = [finding for finding in validation if finding.severity in {"error", "warn"}]
+    actionable = [
+        finding
+        for finding in validation
+        if finding.severity in {"error", "warn"} and not _is_route_metadata_advisory(finding)
+    ]
     findings.extend(_state_frontmatter_plan_findings(inventory, validation))
     findings.extend(_agents_contract_create_plan_findings(inventory, validation))
     findings.extend(_docmap_snapshot_plan_findings(inventory, validation))
@@ -1915,13 +2299,13 @@ def snapshot_inspect_findings(inventory: Inventory) -> list[Finding]:
             "snapshot-inspect-boundary",
             (
                 f"inspecting repair snapshots under {SNAPSHOT_REPAIR_ROOT_REL}/; terminal-only read-only report; "
-                "no rollback, cleanup, repair, archive, commit, switch-over, or lifecycle action is implied"
+                "no rollback, cleanup, repair, archive, commit, or lifecycle mutation is implied"
             ),
         ),
         Finding(
             "info",
             "snapshot-authority",
-            "repair snapshots are safety evidence only and cannot approve repair, closeout, archive, commit, switch-over, lifecycle decisions, or future repairs",
+            "repair snapshots are safety evidence only and cannot approve repair, closeout, archive, commit, lifecycle decisions, or future repairs",
         ),
     ]
     findings.extend(_snapshot_inspect_root_posture_findings(inventory))
@@ -2127,6 +2511,10 @@ def _repair_proposal_for(finding: Finding) -> Finding:
     )
 
 
+def _is_route_metadata_advisory(finding: Finding) -> bool:
+    return finding.code.startswith("route-metadata-")
+
+
 def _state_frontmatter_plan_findings(inventory: Inventory, validation: list[Finding]) -> list[Finding]:
     findings: list[Finding] = [
         Finding(
@@ -2200,7 +2588,7 @@ def _state_frontmatter_plan_findings(inventory: Inventory, validation: list[Find
             Finding(
                 "info",
                 "state-frontmatter-rollback",
-                f"manual rollback only: copy {snapshot_dir}/{STATE_FRONTMATTER_COPY_REL} back to {STATE_FRONTMATTER_TARGET_REL}; no rollback command, cleanup, archive, commit, or switch-over is implied",
+                f"manual rollback only: copy {snapshot_dir}/{STATE_FRONTMATTER_COPY_REL} back to {STATE_FRONTMATTER_TARGET_REL}; no rollback command, cleanup, archive, commit, or lifecycle mutation is implied",
                 STATE_FRONTMATTER_TARGET_REL,
             ),
             Finding(
@@ -2212,7 +2600,7 @@ def _state_frontmatter_plan_findings(inventory: Inventory, validation: list[Find
             Finding(
                 "info",
                 "state-frontmatter-authority",
-                "state frontmatter repair cannot approve closeout, archive, commit, switch-over, lifecycle decisions, or future repairs",
+                "state frontmatter repair cannot approve closeout, archive, commit, lifecycle decisions, or future repairs",
                 STATE_FRONTMATTER_TARGET_REL,
             ),
         ]
@@ -2337,7 +2725,7 @@ def _docmap_snapshot_plan_findings(inventory: Inventory, validation: list[Findin
             Finding(
                 "info",
                 "snapshot-rollback",
-                f"manual rollback only: copy {snapshot_dir}/{DOCMAP_REPAIR_COPY_REL} back to {DOCMAP_REPAIR_TARGET_REL}; no rollback command, cleanup, archive, commit, or switch-over is implied",
+                f"manual rollback only: copy {snapshot_dir}/{DOCMAP_REPAIR_COPY_REL} back to {DOCMAP_REPAIR_TARGET_REL}; no rollback command, cleanup, archive, commit, or lifecycle mutation is implied",
                 DOCMAP_REPAIR_TARGET_REL,
             ),
             Finding(
@@ -2349,7 +2737,7 @@ def _docmap_snapshot_plan_findings(inventory: Inventory, validation: list[Findin
             Finding(
                 "info",
                 "snapshot-authority",
-                "snapshot metadata is safety evidence only and cannot approve repair, closeout, archive, commit, switch-over, lifecycle decisions, or future repairs",
+                "snapshot metadata is safety evidence only and cannot approve repair, closeout, archive, commit, lifecycle decisions, or future repairs",
                 DOCMAP_REPAIR_TARGET_REL,
             ),
         ]
@@ -2466,7 +2854,7 @@ def _docmap_create_plan_findings(inventory: Inventory, validation: list[Finding]
             Finding(
                 "info",
                 "docmap-create-authority",
-                "docmap routing is advisory and cannot approve repair, closeout, archive, commit, switch-over, lifecycle decisions, or future repairs",
+                "docmap routing is advisory and cannot approve repair, closeout, archive, commit, lifecycle decisions, or future repairs",
                 DOCMAP_REPAIR_TARGET_REL,
             ),
         ]
@@ -2569,7 +2957,7 @@ def _agents_contract_create_plan_findings(inventory: Inventory, validation: list
             Finding(
                 "info",
                 "agents-contract-create-rollback",
-                f"manual rollback only: remove {AGENTS_CONTRACT_TARGET_REL}; no rollback command, cleanup, archive, commit, or switch-over is implied",
+                f"manual rollback only: remove {AGENTS_CONTRACT_TARGET_REL}; no rollback command, cleanup, archive, commit, or lifecycle mutation is implied",
                 AGENTS_CONTRACT_TARGET_REL,
             ),
             Finding(
@@ -2581,7 +2969,7 @@ def _agents_contract_create_plan_findings(inventory: Inventory, validation: list
             Finding(
                 "info",
                 "agents-contract-create-authority",
-                "AGENTS.md is an operator contract surface and cannot approve repair, closeout, archive, commit, switch-over, lifecycle decisions, or future repairs",
+                "AGENTS.md is an operator contract surface and cannot approve repair, closeout, archive, commit, lifecycle decisions, or future repairs",
                 AGENTS_CONTRACT_TARGET_REL,
             ),
         ]
@@ -2657,13 +3045,13 @@ def _agents_contract_create_apply_findings(inventory: Inventory, validation: lis
             Finding(
                 "info",
                 "agents-contract-create-rollback",
-                f"manual rollback only: remove {AGENTS_CONTRACT_TARGET_REL}; no rollback command, cleanup, archive, commit, or switch-over is implied",
+                f"manual rollback only: remove {AGENTS_CONTRACT_TARGET_REL}; no rollback command, cleanup, archive, commit, or lifecycle mutation is implied",
                 AGENTS_CONTRACT_TARGET_REL,
             ),
             Finding(
                 "info",
                 "agents-contract-create-authority",
-                "AGENTS.md is an operator contract surface and cannot approve repair, closeout, archive, commit, switch-over, lifecycle decisions, or future repairs",
+                "AGENTS.md is an operator contract surface and cannot approve repair, closeout, archive, commit, lifecycle decisions, or future repairs",
                 AGENTS_CONTRACT_TARGET_REL,
             ),
         ]
@@ -2782,7 +3170,7 @@ def _docmap_create_apply_findings(inventory: Inventory, validation: list[Finding
             Finding(
                 "info",
                 "docmap-create-authority",
-                "docmap routing is advisory and cannot approve repair, closeout, archive, commit, switch-over, lifecycle decisions, or future repairs",
+                "docmap routing is advisory and cannot approve repair, closeout, archive, commit, lifecycle decisions, or future repairs",
                 DOCMAP_REPAIR_TARGET_REL,
             ),
         ]
@@ -2897,7 +3285,7 @@ def _stable_spec_create_plan_findings(inventory: Inventory, validation: list[Fin
             Finding(
                 "info",
                 "stable-spec-create-authority",
-                "stable spec fixtures are repo-visible compatibility surfaces and cannot approve repair, closeout, archive, commit, switch-over, lifecycle decisions, or future repairs",
+                "stable spec fixtures are repo-visible compatibility surfaces and cannot approve repair, closeout, archive, commit, lifecycle decisions, or future repairs",
                 STABLE_SPEC_ROOT_REL,
             ),
         ]
@@ -2990,7 +3378,7 @@ def _stable_spec_create_apply_findings(inventory: Inventory, validation: list[Fi
             Finding(
                 "info",
                 "stable-spec-create-authority",
-                "stable spec fixtures are repo-visible compatibility surfaces and cannot approve repair, closeout, archive, commit, switch-over, lifecycle decisions, or future repairs",
+                "stable spec fixtures are repo-visible compatibility surfaces and cannot approve repair, closeout, archive, commit, lifecycle decisions, or future repairs",
                 STABLE_SPEC_ROOT_REL,
             ),
         ]
@@ -3304,7 +3692,7 @@ def _state_frontmatter_apply_findings(inventory: Inventory, validation: list[Fin
             Finding(
                 "info",
                 "state-frontmatter-authority",
-                "snapshot metadata is safety evidence only and cannot approve repair, closeout, archive, commit, switch-over, lifecycle decisions, or future repairs",
+                "snapshot metadata is safety evidence only and cannot approve repair, closeout, archive, commit, lifecycle decisions, or future repairs",
                 STATE_FRONTMATTER_TARGET_REL,
             ),
         ]
@@ -3569,7 +3957,7 @@ def _docmap_snapshot_apply_findings(inventory: Inventory, validation: list[Findi
             Finding(
                 "info",
                 "snapshot-authority",
-                "snapshot metadata is safety evidence only and cannot approve repair, closeout, archive, commit, switch-over, lifecycle decisions, or future repairs",
+                "snapshot metadata is safety evidence only and cannot approve repair, closeout, archive, commit, lifecycle decisions, or future repairs",
                 DOCMAP_REPAIR_TARGET_REL,
             ),
         ]
@@ -3737,7 +4125,7 @@ def _state_frontmatter_snapshot_metadata(
         ),
         "authority_note": (
             "snapshot metadata is safety evidence only and cannot approve repair, closeout, archive, commit, "
-            "switch-over, lifecycle decisions, or future repairs"
+            "lifecycle decisions, or future repairs"
         ),
     }
 
@@ -3791,7 +4179,7 @@ def _docmap_snapshot_metadata(
         ),
         "authority_note": (
             "snapshot metadata is safety evidence only and cannot approve repair, closeout, archive, commit, "
-            "switch-over, lifecycle decisions, or future repairs"
+            "lifecycle decisions, or future repairs"
         ),
     }
 
@@ -4347,15 +4735,6 @@ def _product_posture_status_findings(inventory: Inventory) -> list[Finding]:
         findings.append(Finding("info", "product-root", f"product root: {product_root}", state.rel_path))
     if fallback_root:
         findings.append(Finding("info", "fallback-root", f"fallback root: {fallback_root}", state.rel_path))
-    if _has_no_switch_over_posture(inventory):
-        findings.append(
-            Finding(
-                "info",
-                "no-switch-over",
-                "no operational switch-over: product root remains source/target while operating memory stays outside it",
-                state.rel_path,
-            )
-        )
     return findings
 
 
@@ -4449,15 +4828,6 @@ def _product_posture_findings(inventory: Inventory) -> list[Finding]:
                 state.rel_path,
             )
         )
-    if not _has_no_switch_over_posture(inventory):
-        findings.append(
-            Finding(
-                "warn",
-                "product-posture-switch-over",
-                "product-root posture does not explicitly say operational switch-over has not happened",
-                state.rel_path,
-            )
-        )
     return findings
 
 
@@ -4473,11 +4843,201 @@ def _active_plan_findings(inventory: Inventory) -> list[Finding]:
             findings.append(Finding("error", "active-plan-field", "plan_status is active but active_plan is empty", state.rel_path if state else None))
         if not plan or not plan.exists:
             findings.append(Finding("error", "active-plan-missing", f"plan_status is active but {active_plan} is missing", active_plan))
+        if not data.get("active_phase"):
+            findings.append(
+                Finding(
+                    "warn",
+                    "active-phase-field",
+                    "plan_status is active but active_phase is empty; record the current plan phase explicitly",
+                    state.rel_path if state else None,
+                )
+            )
+        phase_status = str(data.get("phase_status") or "")
+        if not phase_status:
+            findings.append(
+                Finding(
+                    "warn",
+                    "phase-status-field",
+                    "plan_status is active but phase_status is empty; record one of: active, blocked, complete, in_progress, paused, pending, skipped",
+                    state.rel_path if state else None,
+                )
+            )
+        elif phase_status not in PHASE_STATUS_VALUES:
+            findings.append(
+                Finding(
+                    "warn",
+                    "phase-status-value",
+                    f"phase_status is {phase_status!r}; expected one of: active, blocked, complete, in_progress, paused, pending, skipped",
+                    state.rel_path if state else None,
+                )
+            )
+        if plan and plan.exists:
+            findings.extend(_active_plan_generated_shape_findings(plan))
+            findings.extend(_active_plan_docs_decision_findings(plan, data))
+            findings.extend(_active_plan_writeback_drift_findings(inventory, plan))
+            findings.extend(_active_plan_lifecycle_drift_findings(inventory, plan, data))
     elif plan and plan.exists:
         findings.append(Finding("warn", "stale-plan-file", "implementation plan exists while plan_status is not active", plan.rel_path))
     manifest_plan = inventory.manifest.get("memory", {}).get("plan_file") if inventory.manifest else None
     if status == "active" and manifest_plan and str(active_plan).replace("\\", "/") != str(manifest_plan).replace("\\", "/"):
         findings.append(Finding("error", "active-plan-manifest", "active_plan differs from manifest memory.plan_file", state.rel_path if state else None))
+    return findings
+
+
+def _active_plan_generated_shape_findings(plan: Surface) -> list[Finding]:
+    if not plan.frontmatter.has_frontmatter or not plan.frontmatter.data.get("plan_id"):
+        return []
+    heading_titles = {heading.title for heading in plan.headings}
+    required = {
+        "Objective",
+        "Authority Inputs",
+        "Non-goals",
+        "Invariants",
+        "File Ownership",
+        "Phases",
+        "Verification Strategy",
+        "Docs Decision",
+        "State Transfer",
+        "Refusal Conditions",
+        "Closeout Checklist",
+        "Decision Log",
+    }
+    missing = sorted(required - heading_titles)
+    if not missing:
+        return []
+    return [
+        Finding(
+            "warn",
+            "active-plan-generated-shape",
+            f"generated active plan is missing expected sections: {', '.join(missing)}",
+            plan.rel_path,
+        )
+    ]
+
+
+def _active_plan_lifecycle_drift_findings(inventory: Inventory, plan: Surface, state_data: dict[str, object]) -> list[Finding]:
+    findings: list[Finding] = []
+    phase_status = str(state_data.get("phase_status") or "")
+    if not phase_status or phase_status not in PHASE_STATUS_VALUES:
+        return findings
+
+    if plan.frontmatter.has_frontmatter:
+        plan_status = str(plan.frontmatter.data.get("status") or "")
+        if plan_status and plan_status != phase_status and phase_status == "complete" and plan_status == "active":
+            findings.append(
+                Finding(
+                    "warn",
+                    "active-plan-lifecycle-drift",
+                    (
+                        "project-state phase_status is complete but active-plan frontmatter status is active; "
+                        "writeback --apply --phase-status complete synchronizes the derived active-plan status copy"
+                    ),
+                    plan.rel_path,
+                )
+            )
+
+    active_phase = str(state_data.get("active_phase") or "")
+    body_fact = active_plan_phase_body_status_fact(plan, active_phase)
+    if body_fact:
+        expected_body_status = canonical_phase_body_status(phase_status)
+        if body_fact.value != expected_body_status:
+            findings.append(
+                Finding(
+                    "warn",
+                    "active-plan-phase-body-drift",
+                    (
+                        f"project-state phase_status is {phase_status!r} but active-plan phase block {active_phase!r} "
+                        f"body status is {body_fact.value!r}; writeback --apply --phase-status {phase_status} "
+                        f"synchronizes that phase block to {expected_body_status!r}"
+                    ),
+                    body_fact.source,
+                    body_fact.line,
+                )
+            )
+
+    closeout_values = {field: fact.value for field, fact in state_writeback_facts(inventory.state).items()}
+    if (
+        state_data.get("plan_status") == "active"
+        and phase_status == "complete"
+        and closeout_values_are_complete(closeout_values)
+    ):
+        findings.append(
+            Finding(
+                "warn",
+                "active-plan-complete-not-archived",
+                (
+                    "project-state phase_status is complete and closeout facts are complete while the active plan is still open; "
+                    "writeback --apply --phase-status complete archives the default active plan through the lifecycle owner path"
+                ),
+                plan.rel_path,
+            )
+        )
+    return findings
+
+
+def _active_plan_docs_decision_findings(plan: Surface, state_data: dict[str, object]) -> list[Finding]:
+    if not plan.frontmatter.has_frontmatter or "docs_decision" not in plan.frontmatter.data:
+        return []
+    value = str(plan.frontmatter.data.get("docs_decision") or "")
+    if value not in DOCS_DECISION_VALUES:
+        return [
+            Finding(
+                "warn",
+                "active-plan-docs-decision-value",
+                f"active plan docs_decision is {value!r}; expected one of: not-needed, uncertain, updated",
+                plan.rel_path,
+            )
+        ]
+    if value == "uncertain" and str(state_data.get("phase_status") or "") == "complete":
+        return [
+            Finding(
+                "warn",
+                "active-plan-docs-decision-uncertain",
+                "active plan frontmatter docs_decision is uncertain while phase_status is complete; record updated/not-needed or keep closeout language provisional",
+                plan.rel_path,
+            )
+        ]
+    return []
+
+
+def _active_plan_writeback_drift_findings(inventory: Inventory, plan: Surface) -> list[Finding]:
+    facts = state_writeback_facts(inventory.state)
+    if not facts:
+        return []
+    findings: list[Finding] = []
+    if plan.frontmatter.has_frontmatter:
+        for field, fact in facts.items():
+            plan_value = plan.frontmatter.data.get(field)
+            if plan_value in (None, ""):
+                continue
+            if str(plan_value) != fact.value:
+                findings.append(
+                    Finding(
+                        "warn",
+                        "active-plan-writeback-drift",
+                        (
+                            f"active plan frontmatter {field} is {plan_value!r} but project-state MLH closeout "
+                            f"writeback records {fact.value!r}; writeback --apply synchronizes derived active-plan copies"
+                        ),
+                        plan.rel_path,
+                    )
+                )
+    body_facts = active_plan_body_facts(plan)
+    for field, fact in facts.items():
+        body_fact = body_facts.get(field)
+        if body_fact and body_fact.value != fact.value:
+            findings.append(
+                Finding(
+                    "warn",
+                    "active-plan-writeback-drift",
+                    (
+                        f"active plan body {field} is {body_fact.value!r} but project-state MLH closeout "
+                        f"writeback records {fact.value!r}; writeback --apply synchronizes derived active-plan copies"
+                    ),
+                    body_fact.source,
+                    body_fact.line,
+                )
+            )
     return findings
 
 
@@ -4499,6 +5059,298 @@ def _frontmatter_findings(inventory: Inventory) -> list[Finding]:
         if surface.role == "research" and surface.path.name.lower() != "readme.md" and not surface.frontmatter.has_frontmatter:
             findings.append(Finding("warn", "research-frontmatter", "research artifact has no frontmatter", surface.rel_path))
     return findings
+
+
+def _route_metadata_findings(inventory: Inventory) -> list[Finding]:
+    if inventory.root_kind != "live_operating_root":
+        return []
+
+    findings: list[Finding] = []
+    for surface in inventory.present_surfaces:
+        if surface.memory_route not in ROUTE_METADATA_VALIDATED_ROUTES or surface.path.suffix.lower() != ".md":
+            continue
+        if surface.frontmatter.errors:
+            for error in surface.frontmatter.errors:
+                findings.append(
+                    Finding(
+                        "warn",
+                        "route-metadata-frontmatter",
+                        f"route metadata frontmatter is malformed: {error}",
+                        surface.rel_path,
+                    )
+                )
+            continue
+        if not surface.frontmatter.has_frontmatter:
+            continue
+
+        findings.extend(_route_metadata_status_findings(surface))
+        for key, value in surface.frontmatter.data.items():
+            if not _is_route_metadata_path_field(key):
+                continue
+            values, field_findings = _route_metadata_path_values(surface, key, value)
+            findings.extend(field_findings)
+            for rel_path in values:
+                findings.extend(_route_metadata_path_findings(inventory, surface, key, rel_path))
+
+    if findings:
+        findings.append(
+            Finding(
+                "info",
+                "route-metadata-authority",
+                "route metadata diagnostics are advisory only and cannot approve mutation, repair, archive, closeout, commit, rollback, or lifecycle decisions",
+            )
+        )
+    return findings
+
+
+def _route_metadata_status_findings(surface: Surface) -> list[Finding]:
+    if "status" not in surface.frontmatter.data:
+        return []
+    value = surface.frontmatter.data.get("status")
+    if not isinstance(value, str) or not value.strip():
+        return [
+            Finding(
+                "warn",
+                "route-metadata-field",
+                f"{surface.rel_path} status must be a non-empty scalar string",
+                surface.rel_path,
+                _frontmatter_key_line(surface, "status"),
+            )
+        ]
+    normalized = value.strip().casefold()
+    if normalized not in ROUTE_METADATA_STATUS_VALUES:
+        return [
+            Finding(
+                "warn",
+                "route-metadata-status",
+                f"{surface.rel_path} status is {value!r}; expected a known lifecycle status",
+                surface.rel_path,
+                _frontmatter_key_line(surface, "status"),
+            )
+        ]
+    return []
+
+
+def _is_route_metadata_path_field(key: str) -> bool:
+    return key in ROUTE_METADATA_SCALAR_PATH_FIELDS or key in ROUTE_METADATA_FLEXIBLE_PATH_FIELDS or key.startswith("related_")
+
+
+def _route_metadata_path_values(surface: Surface, key: str, value: object) -> tuple[list[str], list[Finding]]:
+    line = _frontmatter_key_line(surface, key)
+    if key in ROUTE_METADATA_SCALAR_PATH_FIELDS:
+        if not isinstance(value, str) or not value.strip():
+            return [], [
+                Finding(
+                    "warn",
+                    "route-metadata-field",
+                    f"{surface.rel_path} {key} must be a non-empty scalar root-relative path",
+                    surface.rel_path,
+                    line,
+                )
+            ]
+        return [_normalize_route_metadata_path(value)], []
+
+    if isinstance(value, str):
+        if not value.strip():
+            return [], [
+                Finding(
+                    "warn",
+                    "route-metadata-field",
+                    f"{surface.rel_path} {key} must not be empty",
+                    surface.rel_path,
+                    line,
+                )
+            ]
+        return [_normalize_route_metadata_path(value)], []
+
+    if isinstance(value, list) and value and all(isinstance(item, str) and item.strip() for item in value):
+        return [_normalize_route_metadata_path(item) for item in value], []
+
+    return [], [
+        Finding(
+            "warn",
+            "route-metadata-field",
+            f"{surface.rel_path} {key} must be a non-empty scalar path or non-empty list of scalar paths",
+            surface.rel_path,
+            line,
+        )
+    ]
+
+
+def _route_metadata_path_findings(inventory: Inventory, surface: Surface, key: str, rel_path: str) -> list[Finding]:
+    findings: list[Finding] = []
+    line = _frontmatter_key_line(surface, key)
+    if _route_metadata_path_is_unsafe(rel_path):
+        return [
+            Finding(
+                "warn",
+                "route-metadata-path",
+                f"{surface.rel_path} {key} must be a root-relative path without absolute or parent-traversal segments: {rel_path}",
+                surface.rel_path,
+                line,
+            )
+        ]
+
+    target = inventory.root / rel_path
+    if _route_metadata_path_escapes_root(inventory.root, target):
+        return [
+            Finding(
+                "warn",
+                "route-metadata-path",
+                f"{surface.rel_path} {key} path escapes the target root: {rel_path}",
+                surface.rel_path,
+                line,
+            )
+        ]
+
+    path_conflict = _route_metadata_path_conflict(inventory.root, rel_path, target)
+    if path_conflict:
+        findings.append(Finding("warn", "route-metadata-path", f"{surface.rel_path} {key} {path_conflict}", surface.rel_path, line))
+    elif not target.exists():
+        findings.append(
+            Finding(
+                "warn",
+                "route-metadata-missing-target",
+                f"{surface.rel_path} {key} target is missing: {rel_path}",
+                surface.rel_path,
+                line,
+            )
+        )
+
+    destination = _route_metadata_destination_finding(surface, key, rel_path, line)
+    if destination:
+        findings.append(destination)
+    if target.exists() and not rel_path.startswith("project/archive/"):
+        stale = _route_metadata_stale_reference_finding(inventory, surface, key, rel_path, line)
+        if stale:
+            findings.append(stale)
+    return findings
+
+
+def _route_metadata_destination_finding(surface: Surface, key: str, rel_path: str, line: int | None) -> Finding | None:
+    if key == "archived_to":
+        if not rel_path.startswith("project/archive/reference/") or not rel_path.endswith(".md"):
+            return Finding(
+                "warn",
+                "route-metadata-destination",
+                f"{surface.rel_path} archived_to must point under project/archive/reference/**/*.md: {rel_path}",
+                surface.rel_path,
+                line,
+            )
+        return None
+
+    route_id = classify_memory_route(rel_path).route_id
+    if key == "promoted_to":
+        if rel_path.startswith("project/archive/") or route_id not in ROUTE_METADATA_PROMOTION_TARGET_ROUTES:
+            return Finding(
+                "warn",
+                "route-metadata-destination",
+                f"{surface.rel_path} promoted_to must point to an existing non-archive authority or product route: {rel_path}",
+                surface.rel_path,
+                line,
+            )
+        return None
+
+    allowed = _route_metadata_allowed_targets(surface, key)
+    if allowed is None:
+        return None
+    allowed_routes, allowed_archive_prefixes, label = allowed
+    if route_id in allowed_routes or any(rel_path.startswith(prefix) for prefix in allowed_archive_prefixes):
+        return None
+    return Finding(
+        "warn",
+        "route-metadata-destination",
+        f"{surface.rel_path} {key} must point to {label}: {rel_path}",
+        surface.rel_path,
+        line,
+    )
+
+
+def _route_metadata_allowed_targets(surface: Surface, key: str) -> tuple[set[str], tuple[str, ...], str] | None:
+    if key in {"source_research", "related_research"}:
+        return {"research"}, ("project/archive/reference/research/",), "a research route"
+    if key in {"source_incubation", "related_incubation"}:
+        return {"incubation"}, ("project/archive/reference/incubation/",), "an incubation route"
+    if key == "related_plan":
+        return {"active-plan"}, ("project/archive/plans/",), "an active or archived plan route"
+    if key in {"related_decision", "related_decisions"}:
+        return {"decisions"}, ("project/archive/reference/decisions/",), "a decision route"
+    if key in {"related_adr", "related_adrs"}:
+        return {"adrs"}, ("project/archive/reference/adrs/",), "an ADR route"
+    if key == "related_verification":
+        return {"verification"}, ("project/archive/reference/verification/",), "a verification route"
+    if key in {"related_spec", "related_specs"}:
+        return {"stable-specs"}, (), "a stable-spec route"
+    if key in {"related_doc", "related_docs"}:
+        return {"product-docs"}, (), "a product-docs route"
+    if key in {"supersedes", "superseded_by"}:
+        return {surface.memory_route}, (), f"the same {surface.memory_route} route"
+    return None
+
+
+def _route_metadata_stale_reference_finding(
+    inventory: Inventory,
+    surface: Surface,
+    key: str,
+    rel_path: str,
+    line: int | None,
+) -> Finding | None:
+    target_surface = inventory.surface_by_rel.get(rel_path)
+    if not target_surface or not target_surface.frontmatter.has_frontmatter:
+        return None
+    if target_surface.frontmatter.data.get("archived_to") in (None, ""):
+        return None
+    return Finding(
+        "warn",
+        "route-metadata-stale-reference",
+        f"{surface.rel_path} {key} points at active route {rel_path}, but that target already records archived_to",
+        surface.rel_path,
+        line,
+    )
+
+
+def _normalize_route_metadata_path(value: str) -> str:
+    return re.sub(r"/+", "/", value.strip().strip("<>").strip().replace("\\", "/"))
+
+
+def _route_metadata_path_is_unsafe(rel_path: str) -> bool:
+    if not rel_path or rel_path.startswith("/") or _is_absolute_path(rel_path):
+        return True
+    return any(part in {".", ".."} for part in rel_path.split("/"))
+
+
+def _route_metadata_path_conflict(root: Path, rel_path: str, target: Path) -> str | None:
+    for candidate in _root_relative_path_chain(root, rel_path):
+        candidate_rel = candidate.relative_to(root).as_posix()
+        if not candidate.exists():
+            continue
+        if candidate.is_symlink():
+            return f"path contains a symlink segment: {candidate_rel}"
+        if candidate != target and not candidate.is_dir():
+            return f"path contains a non-directory segment: {candidate_rel}"
+    if target.exists() and not target.is_file():
+        return f"target is not a regular file: {rel_path}"
+    return None
+
+
+def _route_metadata_path_escapes_root(root: Path, path: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return False
+    except ValueError:
+        return True
+
+
+def _frontmatter_key_line(surface: Surface, key: str) -> int | None:
+    lines = surface.content.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return None
+    for index, line in enumerate(lines[1:], start=2):
+        if line.strip() == "---":
+            return None
+        if re.match(rf"^{re.escape(key)}\s*:", line):
+            return index
+    return None
 
 
 def _docmap_findings(inventory: Inventory) -> list[Finding]:
@@ -4649,7 +5501,7 @@ def _start_path_surfaces(inventory: Inventory) -> list[Surface]:
         ".agents/docmap.yaml",
         ".codex/project-workflow.toml",
         "docs/README.md",
-        "docs/architecture/target-architecture.md",
+        "docs/architecture/product-architecture.md",
         "docs/architecture/layer-model.md",
         "docs/architecture/clean-room-carry-forward.md",
         "project/implementation-plan.md",
@@ -4716,23 +5568,6 @@ def _is_mylittleharness_product_context(inventory: Inventory) -> bool:
         or _same_path_value(data.get("product_source_root"), inventory.root)
         or _string_contains(inventory, "# MyLittleHarness")
     )
-
-
-def _has_no_switch_over_posture(inventory: Inventory) -> bool:
-    state = inventory.state
-    data = state.frontmatter.data if state and state.exists else {}
-    if data.get("plan_status") == "active" or data.get("active_plan") not in (None, ""):
-        return False
-    text = "\n".join(surface.content for surface in inventory.present_surfaces if surface.role != "package-mirror").lower()
-    signals = (
-        "no operational switch-over",
-        "stores fixture metadata only",
-        "does not switch operation",
-        "do not perform operational switch-over",
-        "no active implementation plan",
-        "no active plan",
-    )
-    return any(signal in text for signal in signals)
 
 
 def _iter_hygiene_paths(root: Path) -> list[tuple[Path, str]]:

@@ -5,6 +5,7 @@ from collections.abc import Iterable
 from .inventory import Inventory, Surface
 from .models import Finding
 from .evidence_cues import CLOSEOUT_FIELD_NAMES, closeout_field_cues, cue_findings, find_cues
+from .writeback import WritebackFact, state_writeback_facts
 
 
 ANCHOR_PATTERNS = (
@@ -59,7 +60,7 @@ def evidence_findings(inventory: Inventory) -> list[Finding]:
     findings.extend(_anchor_findings(active_plan, inventory))
     findings.extend(_identity_findings(active_plan))
     findings.extend(_closeout_findings(active_plan, inventory))
-    findings.extend(_quality_cue_findings(active_plan))
+    findings.extend(_quality_cue_findings(active_plan, inventory))
     findings.extend(_operator_required_findings(inventory))
     findings.extend(_line_group_findings(active_plan, "evidence-residual-risk", "residual risk", (r"residual risk", r"residual risks"), inventory))
     findings.extend(_line_group_findings(active_plan, "evidence-skip-rationale", "skip rationale", SKIP_RATIONALE_PATTERNS, inventory))
@@ -177,6 +178,7 @@ def _closeout_findings(active_plan: Surface | None, inventory: Inventory) -> lis
     findings: list[Finding] = []
     policy = inventory.manifest.get("policy", {}) if isinstance(inventory.manifest, dict) else {}
     closeout_commit = policy.get("closeout_commit")
+    facts = state_writeback_facts(inventory.state)
     if closeout_commit:
         findings.append(
             Finding(
@@ -187,7 +189,7 @@ def _closeout_findings(active_plan: Surface | None, inventory: Inventory) -> lis
             )
         )
 
-    if not active_plan:
+    if not active_plan and not facts:
         findings.append(
             Finding(
                 "info",
@@ -198,6 +200,19 @@ def _closeout_findings(active_plan: Surface | None, inventory: Inventory) -> lis
         return findings
 
     for field in CLOSEOUT_FIELD_NAMES:
+        fact = facts.get(field)
+        if fact:
+            findings.append(_writeback_fact_finding("evidence-closeout-candidate", f"{field} candidate", fact))
+            continue
+        if not active_plan:
+            findings.append(
+                Finding(
+                    "warn",
+                    "evidence-closeout-missing",
+                    f"missing: concrete closeout field candidate not found: {field}",
+                )
+            )
+            continue
         concrete, broad = closeout_field_cues(active_plan, field)
         if concrete:
             findings.extend(cue_findings("evidence-closeout-candidate", f"{field} candidate", concrete, limit=2))
@@ -215,8 +230,19 @@ def _closeout_findings(active_plan: Surface | None, inventory: Inventory) -> lis
     return findings
 
 
-def _quality_cue_findings(active_plan: Surface | None) -> list[Finding]:
-    if not active_plan:
+def _writeback_fact_finding(code: str, label: str, fact: WritebackFact) -> Finding:
+    return Finding(
+        "info",
+        code,
+        f"candidate: {label}: - {fact.field}: {fact.value}; source={fact.source}:{fact.line}",
+        fact.source,
+        fact.line,
+    )
+
+
+def _quality_cue_findings(active_plan: Surface | None, inventory: Inventory) -> list[Finding]:
+    facts = state_writeback_facts(inventory.state)
+    if not active_plan and not facts:
         return [
             Finding(
                 "info",
@@ -224,14 +250,19 @@ def _quality_cue_findings(active_plan: Surface | None) -> list[Finding]:
                 "quality cue scan skipped because no active plan is present; no quality-gate state was written",
             )
         ]
-    missing = [field for field in CLOSEOUT_FIELD_NAMES if not closeout_field_cues(active_plan, field)[0]]
+    missing = [
+        field
+        for field in CLOSEOUT_FIELD_NAMES
+        if field not in facts and (not active_plan or not closeout_field_cues(active_plan, field)[0])
+    ]
+    fact_source = active_plan.rel_path if active_plan else (inventory.state.rel_path if inventory.state and inventory.state.exists else None)
     if missing:
         return [
             Finding(
                 "warn",
                 "evidence-quality-cue",
-                f"report-only closeout readiness cue: concrete field evidence missing for {', '.join(missing)}; this does not approve or block lifecycle actions",
-                active_plan.rel_path,
+                f"report-only closeout readiness cue: concrete field evidence missing for {', '.join(missing)}; this does not approve or block lifecycle decisions",
+                fact_source,
             )
         ]
     return [
@@ -239,7 +270,7 @@ def _quality_cue_findings(active_plan: Surface | None) -> list[Finding]:
             "info",
             "evidence-quality-cue",
             "report-only closeout readiness cue: concrete closeout field evidence is present; operator decisions and observed verification remain required",
-            active_plan.rel_path,
+            fact_source,
         )
     ]
 
@@ -269,6 +300,10 @@ def _line_group_findings(
     patterns: Iterable[str],
     inventory: Inventory,
 ) -> list[Finding]:
+    fact_key = "residual_risk" if "residual" in label else "carry_forward" if "carry" in label else ""
+    fact = state_writeback_facts(inventory.state).get(fact_key) if fact_key else None
+    if fact:
+        return [_writeback_fact_finding(code, f"{label} candidate", fact)]
     if not active_plan:
         return [Finding("info", code, f"{label} scan skipped because no active plan is present")]
     cues = find_cues(active_plan, label.replace(" ", "-"), f"{label} candidate", patterns)

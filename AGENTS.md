@@ -38,7 +38,7 @@ There should be no active `project/implementation-plan.md` in this repository.
 - Keep `project/project-state.md` as fixture metadata only.
 - Keep stable fixture docs under `project/specs/workflow/**`.
 - Run docs routing only for mutating tasks with docs, contract, setup, rollout, terminology, or other user-visible impact.
-- Do not perform operational switch-over from this product tree without a separate explicit decision or plan.
+- Do not perform operational lifecycle decision from this product tree without a separate explicit decision or plan.
 - On closeout, use manual commit policy and record skipped commit decisions when this directory is not a git worktree.
 - If the compatibility fixture contract is missing or broken, report that it needs repair from the operating project root instead of silently installing or adopting workstation tooling.
 <!-- END workflow-core v1 -->

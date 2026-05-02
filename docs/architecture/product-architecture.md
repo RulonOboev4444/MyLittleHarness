@@ -1,4 +1,4 @@
-# MyLittleHarness Target Architecture
+# MyLittleHarness Product Architecture
 
 ## Thesis
 
@@ -12,13 +12,13 @@ The default product story is deliberately small:
 
 The visible utility should feel like a repo handle, not a command cockpit. The target top-level CLI is `init`, `check`, `repair`, and `detach`. Current implementation provides primary `init`, `check`, no-write `detach --dry-run`, and marker-only `detach --apply`, while keeping `attach`, `status`, `validate`, and advanced diagnostic commands as compatibility or progressive-disclosure surfaces with command-specific help.
 
-The current productization milestone is a local 1.0.0 release candidate at package version `1.0.0`. It validates the product boundary and verification baseline without declaring package-index publication, global installation, mutating workstation adoption, or standalone switch-over automation as part of the shipped runtime model.
+The current productization milestone is a local 1.0.0 release candidate at package version `1.0.0`. It validates the product boundary and verification baseline without declaring package-index publication, global installation, mutating workstation adoption, or standalone workstation mutation as part of the shipped runtime model.
 
 The supported distribution posture is deliberately local before publication. Source-checkout usage relies on the checked-out `src` tree; package verification relies on `bootstrap --package-smoke`, which installs from a temporary source copy into a temporary virtual environment with no network indexes and checks package metadata, import/version, and the console script. Adoption readiness relies on `bootstrap --inspect` as a read-only report over interpreter context, product package metadata when available, console-script declaration, PATH discovery, and future-gate decisions. Wheel or install artifacts are verification outputs only when created outside the product root; they do not become accepted truth, lifecycle authority, workstation adoption, or a required operating layer.
 
-The first-run path is source checkout first, package-smoke when the operator wants package evidence, and target-repository `init` / `check` / `repair` / `detach` after that. `bootstrap --inspect`, switch-over, publishing, global install, workstation adoption, semantic/provider setup, MCP clients, hooks, and CI are progressive-disclosure or future-contract surfaces, not prerequisites for first-contact correctness.
+The first-run path is source checkout first, package-smoke when the operator wants package evidence, and target-repository `init` / `check` / `repair` / `detach` after that. `bootstrap --inspect`, publishing, global install, workstation adoption, semantic/provider setup, MCP clients, hooks, and CI are progressive-disclosure or future-contract surfaces, not prerequisites for first-contact correctness.
 
-The default operating-root start pass is file and shell based: read `AGENTS.md`, `.codex/project-workflow.toml`, `project/project-state.md`, and the active plan only when `plan_status = "active"` or the operator asks about plan/phase/closeout; use `check` before mutation; use `.agents/docmap.yaml`, `audit-links`, and relevant specs as docs-routing inputs when user-facing meaning changes. No skill, IDE rule, MCP client, hook, CI job, or workstation adoption step is part of the correctness path.
+The default operating-root start pass is file and shell based: read `AGENTS.md`, `.codex/project-workflow.toml`, `project/project-state.md`, and the active plan only when `plan_status = "active"` or the operator asks about plan/phase/closeout; use `active_phase` and `phase_status` as the structured continuation pointers when present; use `check` before mutation; use `.agents/docmap.yaml`, `audit-links`, and relevant specs as docs-routing inputs when user-facing meaning changes. No skill, IDE rule, MCP client, hook, CI job, or workstation adoption step is part of the correctness path.
 
 The formula is:
 
@@ -28,7 +28,7 @@ Files hold authority; metadata routes; Git records durable history; generated pr
 
 - Authority before automation: automation may suggest, summarize, validate, report, or project, but accepted decisions live in repo-visible artifacts.
 - Repo-native recovery: the harness must remain understandable without installed skills, hooks, MCP clients, GitHub, browser state, IDE state, CI, SQLite, or hidden runtimes.
-- Portable docs decisions: behavior, CLI, config, setup, contract, permissions, output shape, UX/copy, terminology, rollout, migration, or other user-facing changes require an explicit `docs_decision` of `updated`, `not-needed`, or `uncertain`; `uncertain` prevents confident closeout wording.
+- Portable docs decisions: behavior, CLI, config, setup, contract, permissions, output shape, UX/copy, terminology, rollout, migration, or other user-facing changes require an explicit `docs_decision` of `updated`, `not-needed`, or `uncertain`; `uncertain` prevents confident closeout wording. The MLH-owned closeout writeback block in `project/project-state.md` is the current closeout fact authority, while active-plan frontmatter/body copies are derived diagnostics synchronized by `writeback --apply`.
 - Git-native evidence first: when a repository uses Git, durable closeout history should prefer commit metadata such as trailers over generated evidence files.
 - Markdown plus metadata, not metadata alone: human-readable Markdown carries meaning; YAML/JSON routing helps tools navigate it.
 - Progressive disclosure: first-contact docs and future top-level help should show only the small repo utility shape, with diagnostics available behind advanced modes or compatibility commands.
@@ -47,7 +47,7 @@ Files hold authority; metadata routes; Git records durable history; generated pr
 - Compatibility fixture files under `.codex/`, `.agents/`, and `project/` are subordinate fixtures for CLI/tests.
 - Product docs may name target CLI and roadmap surfaces, but docs alone do not implement unshipped commands.
 - Generated views, databases, caches, reports, helper logs, and adapter state cannot be the only copy of accepted decisions, active focus, plan status, carry-forward fates, or workflow authority.
-- Repair snapshots can preserve pre-repair bytes and metadata for inspection, but they cannot approve repair, closeout, archive, commit, switch-over, or lifecycle decisions.
+- Repair snapshots can preserve pre-repair bytes and metadata for inspection, but they cannot approve repair, closeout, archive, commit, lifecycle decisions.
 - Hooks, issue trackers, GitHub, CI, MCP clients, browser state, IDE state, and task runners cannot become mandatory correctness.
 - Persistent generated evidence manifests are rejected as the default durable history path; reintroducing them requires a later explicit plan that proves Git-native history cannot satisfy the need.
 
@@ -62,7 +62,7 @@ The target visible CLI is:
 
 `sync` is not a primary command. Disposable projection refresh, search, semantic readiness, adapter projection, and report assembly stay advanced unless a later slice proves that a visible refresh command reduces ceremony.
 
-Existing commands such as `doctor`, `preflight`, `context-budget`, `audit-links`, `intelligence`, `projection`, `semantic`, `evidence`, `closeout`, `snapshot`, `adapter`, `bootstrap`, and `tasks` may remain implemented. They should be documented and exposed as advanced diagnostics, compatibility surfaces, or transition tools rather than the product front door. `intelligence --query` is the read-only recovery-search convenience over existing exact/path/full-text source-verified modes, `repair` includes create-only AGENTS and stable spec fixture restoration, `bootstrap --package-smoke` is explicit local package verification from temporary locations outside the product root, and `bootstrap --inspect` is the no-write adoption readiness report. Top-level help foregrounds only `init`, `check`, `repair`, and `detach`; advanced and compatibility commands keep command-specific help and normal report stdout. `tasks --inspect`, `bootstrap --inspect`, and `bootstrap --package-smoke` remain transition/deprecation candidates because they preserve power-up-era cockpit language.
+Existing commands such as `doctor`, `preflight`, `context-budget`, `audit-links`, `intelligence`, `projection`, `semantic`, `evidence`, `closeout`, `writeback`, `snapshot`, `adapter`, `bootstrap`, and `tasks` may remain implemented. They should be documented and exposed as advanced diagnostics, compatibility surfaces, explicit writeback, or transition tools rather than the product front door. `intelligence --query` is the read-only recovery-search convenience over existing exact/path/full-text source-verified modes, `repair` includes create-only AGENTS and stable spec fixture restoration, `writeback --apply` is the hidden explicit closeout/state synchronization path for live operating roots, `bootstrap --package-smoke` is explicit local package verification from temporary locations outside the product root, and `bootstrap --inspect` is the no-write adoption readiness report. Top-level help foregrounds only `init`, `check`, `repair`, and `detach`; advanced and compatibility commands keep command-specific help and normal report stdout. `tasks --inspect`, `bootstrap --inspect`, and `bootstrap --package-smoke` remain transition/deprecation candidates because they preserve power-up-era cockpit language.
 
 Compatibility preservation must not ossify overload. New primary commands should be introduced with compatibility tests for old commands and exit semantics. Deprecation starts in docs and help before normal stdout warnings or removals.
 
@@ -99,7 +99,7 @@ Rejected default directions:
 - MCP or adapter mutation tools
 - hook/CI installation as required correctness
 - semantic/vector-first expansion before source-first search and CLI clarity
-- standalone `bootstrap --apply`, publishing, mutating workstation adoption, or standalone switch-over automation as product surfaces
+- standalone `bootstrap --apply`, publishing, mutating workstation adoption, or standalone workstation mutation as product surfaces
 
 Scoped future capabilities may still ship when their contract names source of truth, generated-output or adapter boundary, dependency decision, degraded/offline behavior, rebuild/delete or disable story, verification method, and non-authority wording.
 
@@ -109,9 +109,9 @@ A product-ready MyLittleHarness release candidate requires a coherent small oper
 
 The product source checkout must stay free of active operating memory, plans, research intake, archives, generated validation reports, logs, caches, package debris, local databases, pycache, and repair snapshots.
 
-The dependency baseline is a stdlib core. Any optional dependency, provider, runtime, package extra, publishing helper, or mutating workstation helper requires a product policy that names the install path, fallback mode, provenance checks, and cleanup or non-adoption posture. The accepted workstation adoption surface is read-only readiness evidence through `bootstrap --inspect`. Publication, global install, PATH/profile edits, and user-config mutation are outside the current release-candidate contract. Standalone `bootstrap --apply` and standalone switch-over automation are rejected as product surfaces.
+The dependency baseline is a stdlib core. Any optional dependency, provider, runtime, package extra, publishing helper, or mutating workstation helper requires a product policy that names the install path, fallback mode, provenance checks, and cleanup or non-adoption posture. The accepted workstation adoption surface is read-only readiness evidence through `bootstrap --inspect`. Publication, global install, PATH/profile edits, and user-config mutation are outside the current release-candidate contract. Standalone `bootstrap --apply` and standalone workstation mutation are rejected as product surfaces.
 
-Release evidence must include tests, smoke matrices, docs audits, product-root apply refusals, relevant package/adapter/semantic/hook/bootstrap/repair checks, hygiene scans, and operating-root closeout fields. Generated projections, semantic matches, evidence manifests, quality summaries, adapters, hooks, CI, VCS state, package artifacts, and repair snapshots are evidence inputs only; they cannot authorize mutation, closeout, archive, commit, rollback, switch-over, or lifecycle decisions.
+Release evidence must include tests, smoke matrices, docs audits, product-root apply refusals, relevant package/adapter/semantic/hook/bootstrap/repair checks, hygiene scans, and operating-root closeout fields. Generated projections, semantic matches, evidence manifests, quality summaries, adapters, hooks, CI, VCS state, package artifacts, and repair snapshots are evidence inputs only; they cannot authorize mutation, closeout, archive, commit, rollback, lifecycle decisions.
 
 ## Explicit Non-Goals
 
@@ -119,11 +119,10 @@ Release evidence must include tests, smoke matrices, docs audits, product-root a
 - Second mutable memory tree.
 - No SQLite or generated truth as canonical memory.
 - Generated evidence manifests as the default durable evidence path.
-- Semantic matches as mutation, repair, closeout, archive, commit, switch-over, or lifecycle authority.
+- Semantic matches as mutation, repair, closeout, archive, commit, lifecycle authority.
 - Mandatory adapters or hook-only correctness.
 - Issue-board or CI state as project authority.
 - Product-root contamination with plans, research, archives, logs, caches, generated reports, local databases, or demo residue.
 - Wholesale adoption of external candidate systems.
-- Operational switch-over from docs alone.
+- Operational boundary changes from docs alone.
 - Any extra operating layer, supervisor, evidence authority, or product runtime between MyLittleHarness and the target repository.
-

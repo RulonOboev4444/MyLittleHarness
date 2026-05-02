@@ -16,11 +16,11 @@ This spec is a stable rollout contract, not the active implementation plan itsel
 
 ## MyLittleHarness Core v0 Rollout Boundary
 
-MyLittleHarness Core v0 is a contract landing, not an operational switch-over. It lands the repo-native rules that make the harness readable from stable specs, README, project state, the artifact map, docmap, and any active or archived plan.
+MyLittleHarness Core v0 is a contract landing, not an operational lifecycle decision. It lands the repo-native rules that make the harness readable from stable specs, README, project state, the artifact map, docmap, and any active or archived plan.
 
 The Core v0 rollout may update live workflow specs, package-source mirrors for changed specs, and navigation surfaces. It does not regenerate package archives, rebuild attach/install machinery, redesign skills, redesign MCP, introduce hooks, run candidate tooling, create evidence IDs, add quality gates, or switch the operational harness.
 
-Switch-over readiness is a checklist result. Switch-over itself belongs to a later scoped lane after compatibility labels, projections, and validation evidence are explicit.
+Root-boundary readiness is evidence only. Any future operating-root change belongs to a later scoped plan after compatibility labels, projections, and validation evidence are explicit.
 
 ## Authoritative Inputs
 
@@ -166,7 +166,7 @@ The first Core v0 implementation pass begins with:
 2. making source-set and distillation output explicit in planning work
 3. making verification anchors explicit in active plans and closeout
 4. keeping package-source mirrors subordinate and resynced only after live spec edits
-5. recording switch-over readiness without executing switch-over
+5. recording readiness without executing lifecycle decision
 
 It should not begin with:
 
@@ -180,5 +180,4 @@ It should not begin with:
 ## Success Condition
 
 The rollout succeeds when the workflow becomes more trustworthy and scalable without becoming heavier, more opaque, or more scheduler-like.
-
 

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .parsing import Frontmatter, Heading, LinkRef, extract_headings, extract_path_refs, parse_frontmatter
+from .routes import classify_memory_route
 
 
 EXPECTED_SPEC_NAMES = (
@@ -42,6 +43,9 @@ class Surface:
     frontmatter: Frontmatter = field(default_factory=Frontmatter.empty)
     headings: list[Heading] = field(default_factory=list)
     links: list[LinkRef] = field(default_factory=list)
+    memory_route: str = ""
+    memory_route_target: str = ""
+    memory_route_authority: str = ""
 
     @property
     def line_count(self) -> int:
@@ -114,6 +118,10 @@ def load_inventory(root: Path | str) -> Inventory:
             existing.required = existing.required or required
             if existing.role == "optional":
                 existing.role = role
+                route = classify_memory_route(existing.rel_path, existing.role)
+                existing.memory_route = route.route_id
+                existing.memory_route_target = route.target
+                existing.memory_route_authority = route.authority
             return existing
         path = root_path / normalized
         surface = _read_surface(root_path, normalized, role, required, path)
@@ -147,9 +155,13 @@ def load_inventory(root: Path | str) -> Inventory:
     for name in EXPECTED_SPEC_NAMES:
         add(f"project/specs/workflow/{name}", "stable-spec", True)
 
+    _add_optional_glob(root_path, surfaces, "project/specs/**/*.md", "stable-spec")
     _add_optional_glob(root_path, surfaces, "docs/**/*.md", "product-doc")
+    _add_optional_glob(root_path, surfaces, "project/adrs/*.md", "adr")
+    _add_optional_glob(root_path, surfaces, "project/decisions/*.md", "decision")
     _add_optional_glob(root_path, surfaces, "project/plan-incubation/*.md", "incubation")
     _add_optional_glob(root_path, surfaces, "project/research/*.md", "research")
+    _add_optional_glob(root_path, surfaces, "project/verification/*.md", "verification")
     _add_optional_glob(root_path, surfaces, "specs/workflow/*.md", "package-mirror")
 
     ordered = sorted(surfaces.values(), key=lambda item: item.rel_path)
@@ -182,6 +194,7 @@ def _read_surface(root: Path, rel_path: str, role: str, required: bool, path: Pa
         frontmatter = _parse_project_state_assignments(content)
     headings = extract_headings(content) if path.suffix.lower() == ".md" else []
     links = extract_path_refs(content)
+    route = classify_memory_route(rel_path, role)
     return Surface(
         root=root,
         rel_path=rel_path,
@@ -194,6 +207,9 @@ def _read_surface(root: Path, rel_path: str, role: str, required: bool, path: Pa
         frontmatter=frontmatter,
         headings=headings,
         links=links,
+        memory_route=route.route_id,
+        memory_route_target=route.target,
+        memory_route_authority=route.authority,
     )
 
 
@@ -220,6 +236,8 @@ STATE_ASSIGNMENT_KEYS = {
     "operating_mode",
     "plan_status",
     "active_plan",
+    "active_phase",
+    "phase_status",
     "last_archived_plan",
     "operating_root",
     "canonical_source_evidence_root",
@@ -305,4 +323,3 @@ def _add_optional_glob(root: Path, surfaces: dict[str, Surface], pattern: str, r
         if rel_path in surfaces:
             continue
         surfaces[rel_path] = _read_surface(root, rel_path, role, False, path)
-

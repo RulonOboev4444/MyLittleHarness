@@ -388,7 +388,7 @@ def _evaluation_query_findings(
                     "semantic-evaluation-lifecycle-risk",
                     (
                         "lifecycle-risk query contains repair/closeout/archive/commit terms; matches are recovery hints only "
-                        "and cannot approve repair, closeout, archive, commit, switch-over, or lifecycle decisions"
+                        "and cannot approve repair, closeout, archive, commit, lifecycle decisions"
                     ),
                 )
             )
@@ -400,7 +400,7 @@ def _boundary_findings() -> list[Finding]:
         Finding(
             "info",
             "semantic-no-authority",
-            "semantic readiness output is advisory evidence only and cannot authorize accepted decisions, repair, closeout, archive, commit, switch-over, or lifecycle changes",
+            "semantic readiness output is advisory evidence only and cannot authorize accepted decisions, repair, closeout, archive, commit, lifecycle changes",
         ),
         Finding(
             "info",
@@ -465,7 +465,7 @@ def _evaluation_boundary_findings() -> list[Finding]:
         Finding(
             "info",
             "semantic-evaluation-no-authority",
-            "semantic evaluation output is advisory evidence only and cannot authorize accepted decisions, repair, closeout, archive, commit, switch-over, or lifecycle changes",
+            "semantic evaluation output is advisory evidence only and cannot authorize accepted decisions, repair, closeout, archive, commit, lifecycle changes",
         ),
         Finding(
             "info",

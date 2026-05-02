@@ -52,13 +52,13 @@ The default MyLittleHarness start pass is:
 
 The planner must not start with a broad scan of every markdown file in the repository.
 
-When reusable product work targets the product source checkout, planning still recovers operating context from the operating project root. Inspect the product checkout as source/test/product-doc evidence for the target change, not as the source of working memory. Any workflow-shaped files retained in the product checkout are product compatibility fixtures unless a later explicit switch-over plan says otherwise.
+When reusable product work targets the product source checkout, planning still recovers operating context from the operating project root. Inspect the product checkout as source/test/product-doc evidence for the target change, not as the source of working memory. Any workflow-shaped files retained in the product checkout are product compatibility fixtures unless a later explicit root-boundary plan says otherwise.
 
-When incubation artifacts enter planning intake, same-topic inputs follow `merge-before-create`: reuse or merge the current topic artifact before opening another temporary note unless the topic boundary is clearly different.
+When incubation artifacts enter planning intake, same-topic inputs follow `merge-before-create`: reuse or merge the current topic artifact before opening another temporary note unless the topic boundary is clearly different. A user request to record or incubate a new idea is enough to create or update the canonical same-topic note under `project/plan-incubation/*.md`; it should not fall back to `project-state` carry-forward bullets merely because no current topic note exists yet.
 
 If `plan_status = "active"` and the user asks to implement, continue, realize, or close the plan, treat the active canonical plan as the default workstream after the start pass. Ask for a different workstream only when `project-state` and the active plan still conflict after both are read.
 
-For plan work or material replans, the output must name the source set and intentional exclusions when those exclusions affect direction or confidence. Exclusions are especially important for enhancement-ledger items such as evidence IDs, quality gates, Context Ledger / Synapti, skills, MCP, hooks, candidate tooling, package/attach rebuilds, and operational switch-over.
+For plan work or material replans, the output must name the source set and intentional exclusions when those exclusions affect direction or confidence. Exclusions are especially important for enhancement-ledger items such as evidence IDs, quality gates, Context Ledger / Synapti, skills, MCP, hooks, candidate tooling, package/attach rebuilds, and operational lifecycle decision.
 
 ## Artifact Discovery Rules
 
@@ -329,5 +329,4 @@ The workflow must avoid:
 - copying canonical specs into temporary notes instead of linking them
 - creating new plan files just to preserve thought traces
 - letting a plan absorb every design decision that should have been promoted into a stable spec
-
 

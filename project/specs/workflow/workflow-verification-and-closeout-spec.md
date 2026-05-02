@@ -20,7 +20,7 @@ MyLittleHarness Core v0 completion is evidence-based and repo-visible. A phase, 
 
 Core v0 verification must remain valid without Git, GitHub, MCP, hooks, browser state, IDE state, candidate tooling, or external services. When the repository is not a git worktree, closeout records `commit_decision = skipped` with `non-git repo` or policy rationale instead of inventing commit evidence.
 
-Operational switch-over from a compatibility-labeled demo harness to MLH Core is not performed by ordinary contract closeout. A Core v0 plan may produce a switch-over readiness checklist, but any actual switch-over requires a later explicit decision or plan.
+Boundary change from a compatibility-labeled demo harness to MLH Core is not performed by ordinary contract closeout. A Core v0 plan may produce a readiness checklist, but any actual root-boundary change requires a later explicit decision or plan.
 
 For reusable product work, closeout writes working evidence, state writeback, plan archive, and carry-forward decisions in the operating project root, with the product checkout named only as the target root when source/tests/product docs changed there. Closeout must not create archived plans, research history, or workflow operation residue inside the product source tree.
 
@@ -231,7 +231,7 @@ Closeout ordering remains:
 
 If any required closeout gate is incomplete, the plan stays active.
 
-For MyLittleHarness Core v0 work, closeout must also name carry-forward destinations for deferred enhancement-ledger items, skills/MCP/hooks, package/attach compatibility, rename decisions, and switch-over. Naming a destination does not promote those lanes into core.
+For MyLittleHarness Core v0 work, closeout must also name carry-forward destinations for deferred enhancement-ledger items, skills/MCP/hooks, package/attach compatibility, rename decisions, and lifecycle mutation. Naming a destination does not promote those lanes into core.
 
 When manifest policy is `manual`, the commit decision is skipped even if the directory later becomes a git worktree. When the root is not a git worktree, `worktree_start_state` should record the failed git status fact rather than pretending the tree was clean.
 

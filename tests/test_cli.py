@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import nullcontext, redirect_stderr, redirect_stdout
+from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
@@ -17,6 +18,8 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from mylittleharness.cli import main
 from mylittleharness.inventory import EXPECTED_SPEC_NAMES
+from mylittleharness.projection_artifacts import ARTIFACT_DIR_REL
+from mylittleharness.projection_index import INDEX_REL_PATH
 from mylittleharness.vcs import VcsChangedPath, VcsPosture
 
 
@@ -32,6 +35,7 @@ class CliTests(unittest.TestCase):
             for heading in ("Root", "Result", "Sources", "Findings", "Suggestions"):
                 self.assertIn(heading, rendered)
             self.assertIn("MyLittleHarness status", rendered)
+            self.assertNotIn("lifecycle-route-table", rendered)
 
     def test_check_composes_status_and_validate_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -50,6 +54,105 @@ class CliTests(unittest.TestCase):
             self.assertIn("check-drift-ok", rendered)
             self.assertIn("fixture-status", rendered)
             self.assertIn("state-field", rendered)
+            self.assertNotIn("lifecycle-route-table", rendered)
+
+    def test_live_status_and_check_report_full_route_table_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            before = snapshot_tree(root)
+            reports = []
+            for command in (["status"], ["check"]):
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    code = main(["--root", str(root), *command])
+                self.assertEqual(code, 0)
+                self.assertEqual(before, snapshot_tree(root))
+                reports.append(output.getvalue())
+
+            for rendered in reports:
+                self.assertIn("lifecycle-route-table", rendered)
+                self.assertIn("advisory only and cannot approve mutation, repair, closeout, archive, commit, or lifecycle decisions", rendered)
+                for expected in (
+                    "state: project/project-state.md",
+                    "active-plan: project/implementation-plan.md",
+                    "incubation: project/plan-incubation/*.md",
+                    "research: project/research/*.md",
+                    "stable-specs: project/specs/**/*.md",
+                    "decisions: project/decisions/*.md",
+                    "verification: active-plan verification block",
+                    "closeout-writeback: project/project-state.md MLH closeout writeback block",
+                    "archive: project/archive/plans/*.md; project/archive/reference/**",
+                    "docs-routing: .agents/docmap.yaml",
+                    "future-optional: project/verification/*.md; project/adrs/*.md; reusable procedural surfaces",
+                ):
+                    self.assertIn(expected, rendered)
+
+    def test_check_and_validate_report_route_metadata_warnings_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            (root / "project/research").mkdir()
+            (root / "project/research/bad.md").write_text(
+                "---\n"
+                'status: "teleported"\n'
+                'archived_to: "project/archive/reference/research/missing.md"\n'
+                "---\n"
+                "# Bad\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+            for command in (["validate"], ["check"], ["check", "--focus", "validation"]):
+                with self.subTest(command=command):
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        code = main(["--root", str(root), *command])
+                    rendered = output.getvalue()
+                    self.assertEqual(code, 0)
+                    self.assertEqual(before, snapshot_tree(root))
+                    self.assertIn("route-metadata-status", rendered)
+                    self.assertIn("route-metadata-missing-target", rendered)
+                    self.assertIn("route-metadata-authority", rendered)
+
+    def test_completed_active_phase_reports_next_lifecycle_action_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="complete")
+            (root / "project/implementation-plan.md").write_text(
+                "---\n"
+                'title: "Plan"\n'
+                'status: "active"\n'
+                "---\n"
+                "# Plan\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+            reports = []
+            for command in (["status"], ["check"]):
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    code = main(["--root", str(root), *command])
+                self.assertEqual(code, 0)
+                self.assertEqual(before, snapshot_tree(root))
+                reports.append(output.getvalue())
+
+            for rendered in reports:
+                self.assertIn("lifecycle-summary", rendered)
+                self.assertIn("implementation work is not pending", rendered)
+                self.assertIn("next action is explicit closeout/writeback, archive, or manual commit per policy", rendered)
+            self.assertIn("active-plan-lifecycle-drift", reports[1])
+            self.assertIn("phase_status is complete but active-plan frontmatter status is active", reports[1])
+
+    def test_product_fixture_status_and_check_do_not_emit_live_route_table(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=True)
+            for command in (["status"], ["check"]):
+                with self.subTest(command=command):
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        code = main(["--root", str(root), *command])
+                    rendered = output.getvalue()
+                    self.assertEqual(code, 0)
+                    self.assertIn("product-source", rendered)
+                    self.assertNotIn("lifecycle-route-table", rendered)
+                    self.assertNotIn("[INFO] lifecycle-route", rendered)
 
     def test_check_reports_docmap_and_root_pointer_drift_without_failing_or_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -102,6 +205,82 @@ class CliTests(unittest.TestCase):
             self.assertIn("missing-stable-spec", rendered)
             self.assertIn("check found validation errors", rendered)
 
+    def test_check_deep_includes_links_context_and_hygiene_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            before = snapshot_tree(root)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "check", "--deep"])
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("MyLittleHarness check --deep", rendered)
+            for heading in ("Status", "Validation", "Drift", "Links", "Context", "Hygiene", "Boundary"):
+                self.assertIn(heading, rendered)
+            self.assertIn("check-deep-read-only", rendered)
+            self.assertIn("check --deep completed as a read-only status, validation, drift, links, context, and hygiene report", rendered)
+
+    def test_check_deep_returns_one_on_included_validation_errors_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=True, mirrors=True)
+            (root / "project/specs/workflow" / EXPECTED_SPEC_NAMES[0]).unlink()
+            before = snapshot_tree(root)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "check", "--deep"])
+            rendered = output.getvalue()
+            self.assertEqual(code, 1)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("MyLittleHarness check --deep", rendered)
+            self.assertIn("missing-stable-spec", rendered)
+
+    def test_check_focus_modes_run_one_diagnostic_without_writes(self) -> None:
+        cases = (
+            ("validation", "Validation", "missing-stable-spec"),
+            ("links", "Links", "missing-link"),
+            ("context", "Context", "file-budget"),
+            ("hygiene", "Hygiene", "product-hygiene"),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=True, mirrors=True)
+            (root / "README.md").write_text("See `missing/path.md`.\n", encoding="utf-8")
+            (root / "project/specs/workflow" / EXPECTED_SPEC_NAMES[0]).unlink()
+            (root / "project/research").mkdir(parents=True)
+            (root / "project/research/debris.md").write_text("debris\n", encoding="utf-8")
+            before = snapshot_tree(root)
+            for focus, heading, expected in cases:
+                with self.subTest(focus=focus):
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        code = main(["--root", str(root), "check", "--focus", focus])
+                    rendered = output.getvalue()
+                    self.assertEqual(before, snapshot_tree(root))
+                    self.assertIn(f"MyLittleHarness check --focus {focus}", rendered)
+                    self.assertIn(heading, rendered)
+                    self.assertIn("Boundary", rendered)
+                    self.assertIn("check-focus-read-only", rendered)
+                    self.assertIn(expected, rendered)
+                    if focus == "context":
+                        self.assertIn("check --focus context runs one compatibility diagnostic without writing files", rendered)
+                    if focus in {"validation", "hygiene"}:
+                        self.assertEqual(code, 1)
+                    else:
+                        self.assertEqual(code, 0)
+
+    def test_check_rejects_combined_or_unknown_modes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=True)
+            for command in (
+                ["check", "--deep", "--focus", "validation"],
+                ["check", "--focus", "unknown"],
+            ):
+                with self.subTest(command=command):
+                    output = io.StringIO()
+                    with redirect_stderr(output), self.assertRaises(SystemExit) as raised:
+                        main(["--root", str(root), *command])
+                    self.assertEqual(raised.exception.code, 2)
+
     def test_init_dry_run_routes_to_attach_behavior_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_root(Path(tmp), active=False, mirrors=False)
@@ -128,6 +307,68 @@ class CliTests(unittest.TestCase):
             self.assertEqual(before, snapshot_tree(root))
             self.assertIn("MyLittleHarness init --apply", rendered)
             self.assertIn("attach-refused", rendered)
+            self.assertFalse((root / INDEX_REL_PATH).exists())
+
+    def test_init_apply_builds_generated_projection_and_index_for_new_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "init", "--apply", "--project", "Demo"])
+            rendered = output.getvalue()
+
+            self.assertEqual(code, 0)
+            self.assertTrue((root / ARTIFACT_DIR_REL / "manifest.json").is_file())
+            self.assertTrue((root / INDEX_REL_PATH).is_file())
+            self.assertIn("attach-generated-projection-build", rendered)
+            self.assertIn("projection-artifact-build", rendered)
+            self.assertIn("projection-index-build", rendered)
+
+            intelligence_output = io.StringIO()
+            with redirect_stdout(intelligence_output):
+                intelligence_code = main(["--root", str(root), "intelligence", "--focus", "search", "--query", "Demo"])
+            self.assertEqual(intelligence_code, 0)
+            self.assertIn("projection-index-query-current", intelligence_output.getvalue())
+
+    def test_intelligence_focus_routes_reports_route_table_only_for_live_roots_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            before = snapshot_tree(root)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "intelligence", "--focus", "routes"])
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("Boundary", rendered)
+            self.assertIn("Lifecycle Routes", rendered)
+            self.assertIn("Discovered Routes", rendered)
+            self.assertIn("intelligence-routes-read-only", rendered)
+            self.assertIn("lifecycle-route-table", rendered)
+            self.assertIn("memory-route-inventory", rendered)
+            self.assertIn("project/project-state.md -> state", rendered)
+            self.assertIn(".codex/project-workflow.toml -> operating-guardrails", rendered)
+            self.assertIn("decisions: project/decisions/*.md", rendered)
+            self.assertIn("future-optional: project/verification/*.md; project/adrs/*.md; reusable procedural surfaces", rendered)
+            self.assertNotIn("Repo Map", rendered)
+            self.assertNotIn("Search", rendered)
+
+    def test_intelligence_focus_routes_keeps_product_fixtures_out_of_live_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=True)
+            before = snapshot_tree(root)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "intelligence", "--focus", "routes"])
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("route-table-scope", rendered)
+            self.assertIn("product-source fixtures remain product/fixture context", rendered)
+            self.assertNotIn("lifecycle-route-table", rendered)
+            self.assertNotIn("[INFO] lifecycle-route", rendered)
+            self.assertNotIn("Discovered Routes", rendered)
+            self.assertNotIn("memory-route-surface", rendered)
 
     def test_detach_dry_run_product_fixture_reports_preservation_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -426,6 +667,10 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("intelligence", rendered)
         self.assertNotIn("projection", rendered)
         self.assertNotIn("snapshot", rendered)
+        self.assertNotIn("writeback", rendered)
+        self.assertNotIn("incubate", rendered)
+        self.assertNotIn("plan", rendered)
+        self.assertNotIn("memory-hygiene", rendered)
         self.assertNotIn("preflight", rendered)
         self.assertNotIn("attach", rendered)
         self.assertNotIn("Inspect operator task groups", rendered)
@@ -440,6 +685,10 @@ class CliTests(unittest.TestCase):
             (["intelligence", "--help"], "Advanced diagnostic: report read-only repo intelligence"),
             (["projection", "--help"], "Advanced diagnostic: build, inspect, delete"),
             (["snapshot", "--help"], "Advanced diagnostic: inspect repair snapshots"),
+            (["writeback", "--help"], "Advanced mutating command: apply explicit closeout/state writeback"),
+            (["incubate", "--help"], "Advanced mutating command: create or append explicit future-idea incubation"),
+            (["plan", "--help"], "Advanced mutating command: create or replace a deterministic active"),
+            (["memory-hygiene", "--help"], "Advanced mutating command: apply explicit research/incubation lifecycle"),
             (["adapter", "--help"], "Advanced diagnostic: inspect or serve optional adapter"),
             (["attach", "--help"], "Compatibility command: preview or apply workflow scaffold attachment"),
         )
@@ -450,6 +699,16 @@ class CliTests(unittest.TestCase):
                     main(command)
                 self.assertEqual(raised.exception.code, 0)
                 self.assertIn(expected, output.getvalue())
+
+    def test_check_help_documents_deep_and_focus_modes(self) -> None:
+        output = io.StringIO()
+        with redirect_stdout(output), self.assertRaises(SystemExit) as raised:
+            main(["check", "--help"])
+        self.assertEqual(raised.exception.code, 0)
+        rendered = output.getvalue()
+        self.assertIn("--deep", rendered)
+        self.assertIn("--focus", rendered)
+        self.assertIn("validation,links,context,hygiene", rendered)
 
     def test_representative_existing_commands_still_parse(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -466,6 +725,8 @@ class CliTests(unittest.TestCase):
                 (["semantic", "--evaluate"], 0),
                 (["attach", "--dry-run"], 0),
                 (["repair", "--dry-run"], 0),
+                (["incubate", "--dry-run", "--topic", "Future CLI rail", "--note", "Capture explicit future ideas."], 0),
+                (["plan", "--dry-run", "--title", "Generated Plan", "--objective", "Create a deterministic active plan."], 0),
             )
             for command, expected_code in cases:
                 with self.subTest(command=command):
@@ -492,7 +753,6 @@ class CliTests(unittest.TestCase):
                 "Summary",
                 "Package Smoke",
                 "Bootstrap Apply",
-                "Switch-Over",
                 "Publishing",
                 "Workstation Adoption",
                 "Boundary",
@@ -505,8 +765,6 @@ class CliTests(unittest.TestCase):
                 "bootstrap-package-metadata",
                 "bootstrap-apply-rejected",
                 "bootstrap-apply-gate",
-                "bootstrap-switch-over-rejected",
-                "bootstrap-switch-over-gate",
                 "bootstrap-publishing-out-of-scope",
                 "bootstrap-workstation-readiness",
                 "bootstrap-path-discovery",
@@ -519,9 +777,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("console script declaration: mylittleharness = mylittleharness.cli:main", rendered)
             self.assertIn("fate=ship now as no-write readiness evidence only", rendered)
             self.assertIn("fate=rejected as standalone product surface; bootstrap apply is not implemented", rendered)
-            self.assertIn("fate=rejected as standalone product surface; operating-root switch-over automation is not implemented", rendered)
             self.assertIn("later scoped contract with its own command ownership", rendered)
-            self.assertIn("future migration or adoption checklist must use a separate scoped contract", rendered)
             self.assertIn("exact target root, exact write set, dry-run shape, refusal cases, validation gate", rendered)
             self.assertIn("starts no background runtime", rendered)
 
@@ -669,6 +925,30 @@ class CliTests(unittest.TestCase):
             self.assertIn("product source checkout contains compatibility fixtures only", rendered)
             self.assertIn("no active plan is required by current state", rendered)
             self.assertNotIn("[WARN]", rendered)
+
+    def test_evidence_quality_cues_can_use_state_writeback_without_active_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            state = root / "project/project-state.md"
+            state.write_text(
+                state.read_text(encoding="utf-8")
+                + "\n## MLH Closeout Writeback\n\n"
+                "<!-- BEGIN mylittleharness-closeout-writeback v1 -->\n"
+                "- docs_decision: not-needed\n"
+                "- state_writeback: complete\n"
+                "- verification: validation passed\n"
+                "- commit_decision: skipped because no commit requested\n"
+                "<!-- END mylittleharness-closeout-writeback v1 -->\n",
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "evidence"])
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("candidate: docs_decision candidate: - docs_decision: not-needed", rendered)
+            self.assertIn("report-only closeout readiness cue: concrete closeout field evidence is present", rendered)
+            self.assertNotIn("AttributeError", rendered)
 
     def test_evidence_active_plan_reports_candidates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1038,7 +1318,7 @@ class CliTests(unittest.TestCase):
             root = make_root(Path(tmp), active=True, mirrors=True)
             (root / "project/implementation-plan.md").write_text(
                 "# Plan\n\n"
-                "Closeout helpers better assemble `state_writeback`, `verification`, and `commit_decision` without approving lifecycle actions.\n\n"
+                "Closeout helpers better assemble `state_writeback`, `verification`, and `commit_decision` without approving lifecycle decisions.\n\n"
                 "## Closeout Summary\n\n"
                 "- docs_decision: updated\n"
                 "- state_writeback: complete\n"
@@ -1068,6 +1348,1125 @@ class CliTests(unittest.TestCase):
             with redirect_stderr(output), self.assertRaises(SystemExit) as raised:
                 main(["--root", str(root), "closeout", "--apply"])
             self.assertEqual(raised.exception.code, 2)
+
+    def test_writeback_apply_synchronizes_docs_decision_split_brain(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="complete")
+            (root / "project/implementation-plan.md").write_text(
+                "---\n"
+                'title: "Plan"\n'
+                'docs_decision: "uncertain"\n'
+                'state_writeback: "pending"\n'
+                'verification: "pending"\n'
+                'commit_decision: "pending"\n'
+                'residual_risk: "unknown"\n'
+                'carry_forward: "unknown"\n'
+                "---\n"
+                "# Plan\n\n"
+                "## Closeout Summary\n\n"
+                "- docs_decision: uncertain\n"
+                "- state_writeback: pending\n"
+                "- verification: pending\n"
+                "- commit_decision: pending\n"
+                "- residual risk: unknown\n"
+                "- carry-forward: unknown\n",
+                encoding="utf-8",
+            )
+
+            check_before = io.StringIO()
+            with redirect_stdout(check_before):
+                self.assertEqual(main(["--root", str(root), "check"]), 0)
+            self.assertIn("active-plan-docs-decision-uncertain", check_before.getvalue())
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "writeback",
+                        "--apply",
+                        "--docs-decision",
+                        "updated",
+                        "--state-writeback",
+                        "complete",
+                        "--verification",
+                        "unit suite passed",
+                        "--commit-decision",
+                        "skipped because policy is manual",
+                        "--residual-risk",
+                        "none known",
+                        "--carry-forward",
+                        "no follow-up",
+                        "--phase-status",
+                        "complete",
+                    ]
+                )
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("writeback-auto-archive-active-plan", rendered)
+            self.assertIn("writeback-active-plan-archived", rendered)
+            self.assertIn("writeback-state-updated", rendered)
+            self.assertIn("writeback-active-plan-frontmatter-updated", rendered)
+            self.assertIn("writeback-active-plan-body-updated", rendered)
+
+            state_text = (root / "project/project-state.md").read_text(encoding="utf-8")
+            self.assertIn("<!-- BEGIN mylittleharness-closeout-writeback v1 -->", state_text)
+            self.assertIn("- docs_decision: updated", state_text)
+            self.assertIn('phase_status: "complete"', state_text)
+            self.assertIn('plan_status: "none"', state_text)
+            self.assertIn('active_plan: ""', state_text)
+
+            self.assertFalse((root / "project/implementation-plan.md").exists())
+            archived_paths = list((root / "project/archive/plans").glob("*-plan.md"))
+            self.assertEqual(1, len(archived_paths))
+            archived_rel = archived_paths[0].relative_to(root).as_posix()
+            self.assertIn(f'last_archived_plan: "{archived_rel}"', state_text)
+            plan_text = archived_paths[0].read_text(encoding="utf-8")
+            self.assertIn('docs_decision: "updated"', plan_text)
+            self.assertIn('state_writeback: "complete"', plan_text)
+            self.assertIn('verification: "unit suite passed"', plan_text)
+            self.assertIn('commit_decision: "skipped because policy is manual"', plan_text)
+            self.assertIn("- docs_decision: updated", plan_text)
+            self.assertIn("- state_writeback: complete", plan_text)
+            self.assertIn("- verification: unit suite passed", plan_text)
+            self.assertIn("- commit_decision: skipped because policy is manual", plan_text)
+            self.assertIn("- residual risk: none known", plan_text)
+            self.assertIn("- carry-forward: no follow-up", plan_text)
+
+            check_after = io.StringIO()
+            with redirect_stdout(check_after):
+                self.assertEqual(main(["--root", str(root), "check"]), 0)
+            rendered_after = check_after.getvalue()
+            self.assertIn("no active implementation plan is open", rendered_after)
+            self.assertNotIn("active-plan-docs-decision-uncertain", rendered_after)
+            self.assertNotIn("active-plan-writeback-drift", rendered_after)
+
+    def test_writeback_phase_status_synchronizes_active_plan_status_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="complete")
+            (root / "project/implementation-plan.md").write_text(
+                "---\n"
+                'title: "Plan"\n'
+                'status: "active"\n'
+                "---\n"
+                "# Plan\n",
+                encoding="utf-8",
+            )
+
+            check_before = io.StringIO()
+            with redirect_stdout(check_before):
+                self.assertEqual(main(["--root", str(root), "check"]), 0)
+            self.assertIn("active-plan-lifecycle-drift", check_before.getvalue())
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "writeback", "--apply", "--phase-status", "complete"])
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("writeback-active-plan-frontmatter-updated", rendered)
+
+            plan_text = (root / "project/implementation-plan.md").read_text(encoding="utf-8")
+            self.assertIn('status: "complete"', plan_text)
+
+            check_after = io.StringIO()
+            with redirect_stdout(check_after):
+                self.assertEqual(main(["--root", str(root), "check"]), 0)
+            self.assertNotIn("active-plan-lifecycle-drift", check_after.getvalue())
+
+    def test_writeback_phase_status_synchronizes_only_active_phase_body_block(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="in_progress")
+            state = root / "project/project-state.md"
+            state.write_text(
+                state.read_text(encoding="utf-8").replace(
+                    'active_phase: "Phase 4 - Validation And Closeout"',
+                    'active_phase: "phase-2-verify"',
+                ),
+                encoding="utf-8",
+            )
+            plan_path = root / "project/implementation-plan.md"
+            plan_path.write_text(
+                "---\n"
+                'title: "Plan"\n'
+                'status: "active"\n'
+                'active_phase: "phase-2-verify"\n'
+                'phase_status: "in_progress"\n'
+                "---\n"
+                "# Plan\n\n"
+                "## Phases\n\n"
+                "### Phase 1: Setup\n\n"
+                "- id: `phase-1-setup`\n"
+                "- status: `pending`\n\n"
+                "### Phase 2: Verify\n\n"
+                "- id: `phase-2-verify`\n"
+                "- status: `in_progress`\n\n"
+                "### Phase 3: Followup\n\n"
+                "- id: `phase-3-followup`\n"
+                "- status: `pending`\n",
+                encoding="utf-8",
+            )
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "writeback", "--apply", "--phase-status", "complete"])
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("writeback-active-plan-phase-block-updated", rendered)
+            self.assertNotIn("writeback-active-plan-archived", rendered)
+
+            plan_text = plan_path.read_text(encoding="utf-8")
+            self.assertIn("- id: `phase-1-setup`\n- status: `pending`", plan_text)
+            self.assertIn("- id: `phase-2-verify`\n- status: `done`", plan_text)
+            self.assertIn("- id: `phase-3-followup`\n- status: `pending`", plan_text)
+            self.assertIn('status: "complete"', plan_text)
+            self.assertIn('phase_status: "complete"', plan_text)
+
+    def test_writeback_active_phase_transition_synchronizes_current_focus(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="in_progress")
+            state = root / "project/project-state.md"
+            state.write_text(
+                state.read_text(encoding="utf-8").replace(
+                    'active_phase: "Phase 4 - Validation And Closeout"',
+                    'active_phase: "phase-2-verify"',
+                ),
+                encoding="utf-8",
+            )
+            plan_path = root / "project/implementation-plan.md"
+            plan_path.write_text(
+                "---\n"
+                'title: "Plan"\n'
+                'status: "in_progress"\n'
+                'active_phase: "phase-2-verify"\n'
+                'phase_status: "in_progress"\n'
+                "---\n"
+                "# Plan\n\n"
+                "## Phases\n\n"
+                "### Phase 2: Verify\n\n"
+                "- id: `phase-2-verify`\n"
+                "- status: `done`\n\n"
+                "### Phase 3: Followup\n\n"
+                "- id: `phase-3-followup`\n"
+                "- status: `pending`\n",
+                encoding="utf-8",
+            )
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "writeback",
+                        "--apply",
+                        "--active-phase",
+                        "phase-3-followup",
+                        "--phase-status",
+                        "active",
+                    ]
+                )
+            self.assertEqual(code, 0)
+            rendered = output.getvalue()
+            self.assertIn("writeback-active-plan-phase-block-updated", rendered)
+
+            state_text = state.read_text(encoding="utf-8")
+            self.assertIn('active_phase: "phase-3-followup"', state_text)
+            self.assertIn('phase_status: "active"', state_text)
+            self.assertIn("<!-- BEGIN mylittleharness-current-focus v1 -->", state_text)
+            self.assertIn("Continue from active_phase `phase-3-followup` with phase_status `active`.", state_text)
+            self.assertNotIn("Continue from active_phase `phase-2-verify` with phase_status `in_progress`.", state_text)
+
+            plan_text = plan_path.read_text(encoding="utf-8")
+            self.assertIn('active_phase: "phase-3-followup"', plan_text)
+            self.assertIn('phase_status: "active"', plan_text)
+            self.assertIn("- id: `phase-3-followup`\n- status: `active`", plan_text)
+
+    def test_writeback_dry_run_reports_phase_block_sync_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="in_progress")
+            state = root / "project/project-state.md"
+            state.write_text(
+                state.read_text(encoding="utf-8").replace(
+                    'active_phase: "Phase 4 - Validation And Closeout"',
+                    'active_phase: "phase-2-verify"',
+                ),
+                encoding="utf-8",
+            )
+            (root / "project/implementation-plan.md").write_text(
+                "---\n"
+                'title: "Plan"\n'
+                'status: "active"\n'
+                "---\n"
+                "# Plan\n\n"
+                "## Phases\n\n"
+                "### Phase 1: Setup\n\n"
+                "- id: `phase-1-setup`\n"
+                "- status: `pending`\n\n"
+                "### Phase 2: Verify\n\n"
+                "- id: `phase-2-verify`\n"
+                "- status: `in_progress`\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "writeback", "--dry-run", "--phase-status", "complete"])
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("writeback-active-plan-phase-block-plan", rendered)
+            self.assertIn("would update active-plan phase block 'phase-2-verify' status body copy to 'done'", rendered)
+
+    def test_writeback_dry_run_and_read_only_commands_do_not_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="complete")
+            (root / "project/implementation-plan.md").write_text(
+                "---\n"
+                'title: "Plan"\n'
+                'docs_decision: "uncertain"\n'
+                "---\n"
+                "# Plan\n\n"
+                "- docs_decision: updated\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+            commands = (
+                ["check"],
+                ["validate"],
+                ["status"],
+                ["intelligence"],
+                ["evidence"],
+                ["closeout"],
+                ["audit-links"],
+                ["doctor"],
+                ["writeback", "--dry-run", "--docs-decision", "updated", "--phase-status", "complete"],
+            )
+            for command in commands:
+                with self.subTest(command=command):
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        code = main(["--root", str(root), *command])
+                    self.assertEqual(code, 0)
+                    self.assertEqual(before, snapshot_tree(root))
+
+    def test_incubate_dry_run_reports_create_posture_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            before = snapshot_tree(root)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "incubate",
+                        "--dry-run",
+                        "--topic",
+                        "Future Ideas Rail",
+                        "--note",
+                        "Capture explicitly formulated future ideas.",
+                    ]
+                )
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertFalse((root / "project/plan-incubation/future-ideas-rail.md").exists())
+            for expected in (
+                "incubate-dry-run",
+                "incubate-root-posture",
+                "root kind: live_operating_root",
+                "incubate-target-note",
+                "project/plan-incubation/future-ideas-rail.md",
+                "would create same-topic incubation note",
+                "normalized topic: Future Ideas Rail; slug: future-ideas-rail",
+                "incubate-validation-posture",
+            ):
+                self.assertIn(expected, rendered)
+
+    def test_incubate_apply_creates_note_in_live_operating_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "incubate",
+                        "--apply",
+                        "--topic",
+                        "Future Ideas Rail",
+                        "--note",
+                        "Capture explicitly formulated future ideas.",
+                    ]
+                )
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("created same-topic incubation note", rendered)
+            note_path = root / "project/plan-incubation/future-ideas-rail.md"
+            note_text = note_path.read_text(encoding="utf-8")
+            self.assertIn('topic: "Future Ideas Rail"', note_text)
+            self.assertIn('status: "incubating"', note_text)
+            self.assertIn('source: "incubate cli"', note_text)
+            self.assertIn("Non-authority note: incubation is temporary synthesis", note_text)
+            self.assertIn("Capture explicitly formulated future ideas.", note_text)
+
+    def test_incubate_apply_appends_same_topic_note_preserving_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            note_path = root / "project/plan-incubation/future-ideas-rail.md"
+            note_path.parent.mkdir(parents=True)
+            original = "# Existing Idea\n\nOriginal content stays.\n"
+            note_path.write_text(original, encoding="utf-8")
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "incubate",
+                        "--apply",
+                        "--topic",
+                        "Future Ideas Rail",
+                        "--note",
+                        "Second explicit entry.",
+                    ]
+                )
+            self.assertEqual(code, 0)
+            self.assertIn("appended to existing same-topic incubation note", output.getvalue())
+            note_text = note_path.read_text(encoding="utf-8")
+            self.assertTrue(note_text.startswith(original))
+            self.assertIn("Second explicit entry.", note_text)
+
+    def test_incubate_apply_refuses_product_fixture_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=False)
+            before = snapshot_tree(root)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "incubate",
+                        "--apply",
+                        "--topic",
+                        "Future Ideas Rail",
+                        "--note",
+                        "Do not write into product fixture.",
+                    ]
+                )
+            self.assertEqual(code, 2)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("product-source compatibility fixture", output.getvalue())
+
+    def test_incubate_refuses_unsafe_topic_and_path_conflict_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            before = snapshot_tree(root)
+            unsafe_output = io.StringIO()
+            with redirect_stdout(unsafe_output):
+                unsafe_code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "incubate",
+                        "--apply",
+                        "--topic",
+                        "../future.md",
+                        "--note",
+                        "No path topics.",
+                    ]
+                )
+            self.assertEqual(unsafe_code, 2)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("topic looks like a path", unsafe_output.getvalue())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            note_path = root / "project/plan-incubation/future-ideas-rail.md"
+            note_path.unlink() if note_path.exists() else None
+            note_path.mkdir(parents=True)
+            before = snapshot_tree(root)
+            conflict_output = io.StringIO()
+            with redirect_stdout(conflict_output):
+                conflict_code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "incubate",
+                        "--apply",
+                        "--topic",
+                        "Future Ideas Rail",
+                        "--note",
+                        "No directory overwrite.",
+                    ]
+                )
+            self.assertEqual(conflict_code, 2)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("target note path exists but is not a regular file", conflict_output.getvalue())
+
+    def test_incubate_apply_refuses_state_without_frontmatter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            before = snapshot_tree(root)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "incubate",
+                        "--apply",
+                        "--topic",
+                        "Future Ideas Rail",
+                        "--note",
+                        "State frontmatter is required.",
+                    ]
+                )
+            self.assertEqual(code, 2)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("project-state.md frontmatter is required", output.getvalue())
+
+    def test_plan_dry_run_reports_lifecycle_posture_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            before = snapshot_tree(root)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "plan",
+                        "--dry-run",
+                        "--title",
+                        "Plan Synthesis Rail",
+                        "--objective",
+                        "Create deterministic implementation plans.",
+                    ]
+                )
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertFalse((root / "project/implementation-plan.md").exists())
+            for expected in (
+                "plan-dry-run",
+                "plan-root-posture",
+                "root kind: live_operating_root",
+                "would write active plan: project/implementation-plan.md",
+                "would update project-state lifecycle frontmatter",
+                "plan-boundary",
+                "docs_decision='uncertain'",
+            ):
+                self.assertIn(expected, rendered)
+
+    def test_plan_apply_creates_active_plan_in_live_operating_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "plan",
+                        "--apply",
+                        "--title",
+                        "Plan Synthesis Rail",
+                        "--objective",
+                        "Create deterministic implementation plans.",
+                        "--task",
+                        "Use explicit task input only.",
+                    ]
+                )
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("plan-written", rendered)
+            self.assertIn("created active plan", rendered)
+
+            plan_text = (root / "project/implementation-plan.md").read_text(encoding="utf-8")
+            self.assertIn('title: "Plan Synthesis Rail"', plan_text)
+            self.assertIn('docs_decision: "uncertain"', plan_text)
+            self.assertIn("Use explicit task input only.", plan_text)
+            self.assertIn("## Refusal Conditions", plan_text)
+
+            state_text = (root / "project/project-state.md").read_text(encoding="utf-8")
+            self.assertIn('operating_mode: "plan"', state_text)
+            self.assertIn('plan_status: "active"', state_text)
+            self.assertIn('active_plan: "project/implementation-plan.md"', state_text)
+            self.assertIn('active_phase: "phase-1-implementation"', state_text)
+            self.assertIn('phase_status: "pending"', state_text)
+            self.assertIn("<!-- BEGIN mylittleharness-current-focus v1 -->", state_text)
+            self.assertIn("Current focus: active implementation plan is open at `project/implementation-plan.md`.", state_text)
+            self.assertIn("Continue from active_phase `phase-1-implementation` with phase_status `pending`.", state_text)
+
+            check_output = io.StringIO()
+            with redirect_stdout(check_output):
+                check_code = main(["--root", str(root), "check"])
+            self.assertEqual(check_code, 0)
+            self.assertIn("active plan present: project/implementation-plan.md", check_output.getvalue())
+            self.assertNotIn("[ERROR]", check_output.getvalue())
+
+    def test_plan_apply_refuses_product_fixture_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=False)
+            before = snapshot_tree(root)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "plan",
+                        "--apply",
+                        "--title",
+                        "Fixture Plan",
+                        "--objective",
+                        "Do not write into product fixtures.",
+                    ]
+                )
+            self.assertEqual(code, 2)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("product-source compatibility fixture", output.getvalue())
+
+    def test_plan_apply_refuses_existing_active_plan_without_update_active(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp))
+            before = snapshot_tree(root)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "plan",
+                        "--apply",
+                        "--title",
+                        "Replacement Plan",
+                        "--objective",
+                        "Replace the active scaffold only when requested.",
+                    ]
+                )
+            self.assertEqual(code, 2)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("pass --update-active", output.getvalue())
+
+    def test_plan_apply_update_active_replaces_generated_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp))
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "plan",
+                        "--apply",
+                        "--update-active",
+                        "--title",
+                        "Updated Active Plan",
+                        "--objective",
+                        "Refresh the deterministic scaffold.",
+                    ]
+                )
+            self.assertEqual(code, 0)
+            self.assertIn("updated existing active plan", output.getvalue())
+            plan_text = (root / "project/implementation-plan.md").read_text(encoding="utf-8")
+            self.assertIn("# Updated Active Plan", plan_text)
+            self.assertIn("Refresh the deterministic scaffold.", plan_text)
+            state_text = (root / "project/project-state.md").read_text(encoding="utf-8")
+            self.assertIn('active_phase: "phase-1-implementation"', state_text)
+            self.assertIn('phase_status: "pending"', state_text)
+            self.assertIn("Continue from active_phase `phase-1-implementation` with phase_status `pending`.", state_text)
+
+    def test_plan_apply_refuses_dangerous_task_input_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            before = snapshot_tree(root)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "plan",
+                        "--apply",
+                        "--title",
+                        "Unsafe Plan",
+                        "--objective",
+                        "Run git reset --hard before implementation.",
+                    ]
+                )
+            self.assertEqual(code, 2)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("destructive VCS recovery", output.getvalue())
+
+    def test_writeback_archive_active_plan_dry_run_reports_plan_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="complete")
+            (root / "project/implementation-plan.md").write_text(
+                "---\n"
+                'title: "Lifecycle Close"\n'
+                "---\n"
+                "# Lifecycle Close\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "writeback",
+                        "--dry-run",
+                        "--archive-active-plan",
+                        "--docs-decision",
+                        "updated",
+                    ]
+                )
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("writeback-archive-active-plan", rendered)
+            self.assertIn("active plan: project/implementation-plan.md", rendered)
+            self.assertIn("writeback-archive-target", rendered)
+            self.assertIn("project/archive/plans/", rendered)
+            self.assertIn("lifecycle-close.md", rendered)
+            self.assertIn("would update project-state lifecycle frontmatter: plan_status, active_plan, last_archived_plan", rendered)
+            self.assertIn("writeback-validation-posture", rendered)
+
+    def test_writeback_archive_active_plan_dry_run_reports_auto_compaction_posture_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="complete")
+            (root / "project/project-state.md").write_text(large_active_state_text(), encoding="utf-8")
+            (root / "project/implementation-plan.md").write_text(
+                "---\n"
+                'title: "Lifecycle Close"\n'
+                "---\n"
+                "# Lifecycle Close\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "writeback",
+                        "--dry-run",
+                        "--archive-active-plan",
+                        "--docs-decision",
+                        "updated",
+                    ]
+                )
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("state-auto-compaction-posture", rendered)
+            self.assertIn("auto-compaction would run", rendered)
+            self.assertIn("target archive path: project/archive/reference/project-state-history-", rendered)
+            self.assertIn("sections that would stay:", rendered)
+            self.assertIn("Current Focus, Repository Role Map, Notes", rendered)
+            self.assertIn("Ad Hoc Update - 2026-04-30 - Automatic Operating Memory Compaction", rendered)
+            self.assertIn("MLH Closeout Writeback", rendered)
+            self.assertIn("sections that would be archived:", rendered)
+            self.assertIn("Ad Hoc Update - 2026-04-01 - Old Work 1", rendered)
+            self.assertIn("state-auto-compaction-validation-posture", rendered)
+
+    def test_writeback_dry_run_reports_auto_compaction_for_closeout_only_writeback_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            (root / "project/project-state.md").write_text(large_inactive_state_text(), encoding="utf-8")
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "writeback",
+                        "--dry-run",
+                        "--docs-decision",
+                        "updated",
+                        "--state-writeback",
+                        "recorded closeout facts",
+                    ]
+                )
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("state-auto-compaction-posture", rendered)
+            self.assertIn("auto-compaction would run", rendered)
+            self.assertIn("target archive path: project/archive/reference/project-state-history-", rendered)
+
+    def test_writeback_apply_compacts_large_state_after_closeout_only_writeback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            state_path = root / "project/project-state.md"
+            state_path.write_text(large_inactive_state_text(), encoding="utf-8")
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "writeback",
+                        "--apply",
+                        "--docs-decision",
+                        "updated",
+                        "--state-writeback",
+                        "recorded closeout facts and compacted operating memory",
+                    ]
+                )
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("writeback-state-updated", rendered)
+            self.assertIn("auto-compaction ran", rendered)
+
+            state_text = state_path.read_text(encoding="utf-8")
+            self.assertLess(len(state_text.splitlines()), 250)
+            self.assertIn("- docs_decision: updated", state_text)
+            self.assertIn("- state_writeback: recorded closeout facts and compacted operating memory", state_text)
+            self.assertIn("## Archived State History", state_text)
+            self.assertNotIn("## Ad Hoc Update - 2026-04-01 - Old Work 1", state_text)
+            history_paths = list((root / "project/archive/reference").glob(f"project-state-history-{date.today().isoformat()}*.md"))
+            self.assertEqual(1, len(history_paths))
+            self.assertIn("## Ad Hoc Update - 2026-04-01 - Old Work 1", history_paths[0].read_text(encoding="utf-8"))
+
+    def test_writeback_archive_active_plan_apply_moves_plan_and_closes_lifecycle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="complete")
+            plan_path = root / "project/implementation-plan.md"
+            plan_path.write_text(
+                "---\n"
+                'title: "Lifecycle Close"\n'
+                "---\n"
+                "# Lifecycle Close\n\n"
+                "## Closeout Summary\n\n"
+                "- docs_decision: uncertain\n",
+                encoding="utf-8",
+            )
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "writeback",
+                        "--apply",
+                        "--archive-active-plan",
+                        "--docs-decision",
+                        "updated",
+                        "--state-writeback",
+                        "archived active plan",
+                    ]
+                )
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("writeback-active-plan-archived", rendered)
+            self.assertFalse(plan_path.exists())
+
+            archived_paths = list((root / "project/archive/plans").glob("*-lifecycle-close.md"))
+            self.assertEqual(1, len(archived_paths))
+            self.assertIn("# Lifecycle Close", archived_paths[0].read_text(encoding="utf-8"))
+
+            state_text = (root / "project/project-state.md").read_text(encoding="utf-8")
+            archived_rel = archived_paths[0].relative_to(root).as_posix()
+            self.assertIn('plan_status: "none"', state_text)
+            self.assertIn('active_plan: ""', state_text)
+            self.assertIn(f'last_archived_plan: "{archived_rel}"', state_text)
+            self.assertIn("Current focus: no active implementation plan is open.", state_text)
+            self.assertIn(f"Last archived plan: `{archived_rel}`.", state_text)
+            self.assertIn("- docs_decision: updated", state_text)
+            self.assertIn("- state_writeback: archived active plan", state_text)
+
+            check_output = io.StringIO()
+            with redirect_stdout(check_output):
+                self.assertEqual(main(["--root", str(root), "check"]), 0)
+            check_rendered = check_output.getvalue()
+            self.assertIn("no active implementation plan is open", check_rendered)
+            self.assertNotIn("stale-plan-file", check_rendered)
+
+            before_rerun = snapshot_tree(root)
+            rerun_output = io.StringIO()
+            with redirect_stdout(rerun_output):
+                rerun_code = main(["--root", str(root), "writeback", "--apply", "--archive-active-plan"])
+            self.assertEqual(rerun_code, 2)
+            self.assertEqual(before_rerun, snapshot_tree(root))
+            self.assertIn("archive-active-plan requires plan_status active", rerun_output.getvalue())
+
+    def test_writeback_archive_active_plan_apply_compacts_large_state_after_lifecycle_close(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="complete")
+            plan_path = root / "project/implementation-plan.md"
+            plan_path.write_text(
+                "---\n"
+                'title: "Lifecycle Close"\n'
+                "---\n"
+                "# Lifecycle Close\n",
+                encoding="utf-8",
+            )
+            (root / "project/project-state.md").write_text(large_active_state_text(), encoding="utf-8")
+            reference_dir = root / "project/archive/reference"
+            reference_dir.mkdir(parents=True, exist_ok=True)
+            base_history = reference_dir / f"project-state-history-{date.today().isoformat()}.md"
+            base_history.write_text("# Existing history\n", encoding="utf-8")
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "writeback",
+                        "--apply",
+                        "--archive-active-plan",
+                        "--docs-decision",
+                        "updated",
+                        "--state-writeback",
+                        "archived active plan and compacted operating memory",
+                    ]
+                )
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("writeback-active-plan-archived", rendered)
+            self.assertIn("auto-compaction ran", rendered)
+
+            state_text = (root / "project/project-state.md").read_text(encoding="utf-8")
+            self.assertLess(len(state_text.splitlines()), 250)
+            self.assertIn('plan_status: "none"', state_text)
+            self.assertIn('active_plan: ""', state_text)
+            self.assertIn("## Current Focus", state_text)
+            self.assertIn("## Repository Role Map", state_text)
+            self.assertIn("## Notes", state_text)
+            self.assertIn("## Ad Hoc Update - 2026-04-30 - Automatic Operating Memory Compaction", state_text)
+            self.assertIn("## MLH Closeout Writeback", state_text)
+            self.assertIn("- docs_decision: updated", state_text)
+            self.assertIn("- state_writeback: archived active plan and compacted operating memory", state_text)
+            self.assertIn("## Archived State History", state_text)
+            self.assertIn("project/archive/reference/project-state-history-", state_text)
+            self.assertNotIn("## Ad Hoc Update - 2026-04-01 - Old Work 1", state_text)
+
+            history_paths = sorted(reference_dir.glob(f"project-state-history-{date.today().isoformat()}*.md"))
+            self.assertEqual(2, len(history_paths))
+            self.assertEqual("# Existing history\n", base_history.read_text(encoding="utf-8"))
+            new_history = [path for path in history_paths if path != base_history][0]
+            history_text = new_history.read_text(encoding="utf-8")
+            self.assertIn("- Source state path: `project/project-state.md`", history_text)
+            self.assertIn(f"- Archive path: `{new_history.relative_to(root).as_posix()}`", history_text)
+            self.assertIn(f"- Reason: exceeded 250 line default", history_text)
+            self.assertIn("archived history is reference", history_text)
+            self.assertIn("## Ad Hoc Update - 2026-04-01 - Old Work 1", history_text)
+
+            check_output = io.StringIO()
+            with redirect_stdout(check_output):
+                self.assertEqual(main(["--root", str(root), "check"]), 0)
+            self.assertNotIn("rule-context-surface-large", check_output.getvalue())
+
+    def test_writeback_archive_active_plan_apply_reports_compaction_refusal_without_undoing_lifecycle_close(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="complete")
+            plan_path = root / "project/implementation-plan.md"
+            plan_path.write_text(
+                "---\n"
+                'title: "Lifecycle Close"\n'
+                "---\n"
+                "# Lifecycle Close\n",
+                encoding="utf-8",
+            )
+            (root / "project/project-state.md").write_text(large_active_state_text(loose_title_text=True), encoding="utf-8")
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "writeback", "--apply", "--archive-active-plan"])
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("writeback-active-plan-archived", rendered)
+            self.assertIn("auto-compaction refused", rendered)
+            self.assertIn("loose title text before the first section", rendered)
+            self.assertFalse(plan_path.exists())
+            self.assertFalse(list((root / "project/archive/reference").glob("project-state-history-*.md")))
+
+            state_text = (root / "project/project-state.md").read_text(encoding="utf-8")
+            self.assertIn('plan_status: "none"', state_text)
+            self.assertIn('active_plan: ""', state_text)
+            self.assertIn("Loose title paragraph makes section boundaries unclear.", state_text)
+            self.assertIn("## Ad Hoc Update - 2026-04-01 - Old Work 1", state_text)
+
+    def test_writeback_archive_active_plan_refuses_conflict_and_product_fixture_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="complete")
+            (root / "project/implementation-plan.md").write_text(
+                "---\n"
+                'title: "Lifecycle Close"\n'
+                "---\n"
+                "# Lifecycle Close\n",
+                encoding="utf-8",
+            )
+            archive_dir = root / "project/archive/plans"
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            (archive_dir / f"{date.today().isoformat()}-lifecycle-close.md").write_text(
+                "# Existing\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "writeback", "--apply", "--archive-active-plan"])
+            self.assertEqual(code, 2)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("archive target already exists", output.getvalue())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            product_root = make_root(Path(tmp), active=True, mirrors=False)
+            before_product = snapshot_tree(product_root)
+            product_output = io.StringIO()
+            with redirect_stdout(product_output):
+                product_code = main(["--root", str(product_root), "writeback", "--apply", "--archive-active-plan"])
+            self.assertEqual(product_code, 2)
+            self.assertEqual(before_product, snapshot_tree(product_root))
+            self.assertIn("product-source compatibility fixture", product_output.getvalue())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="in_progress")
+            (root / "project/implementation-plan.md").write_text(
+                "---\n"
+                'title: "Lifecycle Close"\n'
+                "---\n"
+                "# Lifecycle Close\n",
+                encoding="utf-8",
+            )
+            archive_dir = root / "project/archive/plans"
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            (archive_dir / f"{date.today().isoformat()}-lifecycle-close.md").write_text(
+                "# Existing\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "writeback",
+                        "--apply",
+                        "--docs-decision",
+                        "updated",
+                        "--state-writeback",
+                        "recorded completed lifecycle facts",
+                        "--verification",
+                        "targeted suite passed",
+                        "--commit-decision",
+                        "manual policy",
+                        "--phase-status",
+                        "complete",
+                    ]
+                )
+            self.assertEqual(code, 2)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("archive target already exists", output.getvalue())
+
+    def test_closeout_git_trailers_prefer_state_writeback_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="complete")
+            state = root / "project/project-state.md"
+            state.write_text(
+                state.read_text(encoding="utf-8")
+                + "\n## MLH Closeout Writeback\n\n"
+                "<!-- BEGIN mylittleharness-closeout-writeback v1 -->\n"
+                "- worktree_start_state: Git worktree clean\n"
+                "- task_scope: task_only\n"
+                "- docs_decision: updated\n"
+                "- state_writeback: complete\n"
+                "- verification: current validation passed\n"
+                "- commit_decision: skipped because policy is manual\n"
+                "- residual_risk: none known\n"
+                "- carry_forward: no follow-up\n"
+                "<!-- END mylittleharness-closeout-writeback v1 -->\n",
+                encoding="utf-8",
+            )
+            (root / "project/implementation-plan.md").write_text(
+                "# Plan\n\n"
+                "## Closeout Summary\n\n"
+                "- worktree_start_state: stale dirty state\n"
+                "- task_scope: stale mixed\n"
+                "- docs_decision: uncertain\n"
+                "- state_writeback: stale\n"
+                "- verification: stale validation\n"
+                "- commit_decision: stale commit decision\n"
+                "- residual risk: stale risk\n"
+                "- carry-forward: stale follow-up\n",
+                encoding="utf-8",
+            )
+            posture = VcsPosture(root=root, git_available=True, is_worktree=True, state="clean", top_level=str(root))
+            output = io.StringIO()
+            with patch("mylittleharness.closeout.probe_vcs", return_value=posture), redirect_stdout(output):
+                code = main(["--root", str(root), "closeout"])
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("suggestion: MLH-Docs-Decision: updated", rendered)
+            self.assertIn("suggestion: MLH-Verification: current validation passed", rendered)
+            self.assertIn("suggestion: MLH-Commit-Decision: skipped because policy is manual", rendered)
+            self.assertIn("suggestion: MLH-Carry-Forward: no follow-up", rendered)
+            self.assertNotIn("suggestion: MLH-Docs-Decision: uncertain", rendered)
+
+            check_output = io.StringIO()
+            with redirect_stdout(check_output):
+                self.assertEqual(main(["--root", str(root), "check"]), 0)
+            self.assertIn("active-plan-writeback-drift", check_output.getvalue())
+
+    def test_closeout_git_trailers_can_use_state_writeback_without_active_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            state = root / "project/project-state.md"
+            state.write_text(
+                state.read_text(encoding="utf-8")
+                + "\n## MLH Closeout Writeback\n\n"
+                "<!-- BEGIN mylittleharness-closeout-writeback v1 -->\n"
+                "- worktree_start_state: Git worktree clean\n"
+                "- task_scope: task_only\n"
+                "- docs_decision: not-needed\n"
+                "- state_writeback: complete\n"
+                "- verification: validation passed\n"
+                "- commit_decision: skipped because no commit requested\n"
+                "- residual_risk: none known\n"
+                "- carry_forward: no follow-up\n"
+                "<!-- END mylittleharness-closeout-writeback v1 -->\n",
+                encoding="utf-8",
+            )
+            posture = VcsPosture(root=root, git_available=True, is_worktree=True, state="clean", top_level=str(root))
+            output = io.StringIO()
+            with patch("mylittleharness.closeout.probe_vcs", return_value=posture), redirect_stdout(output):
+                code = main(["--root", str(root), "closeout"])
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("suggestion: MLH-Docs-Decision: not-needed", rendered)
+            self.assertIn("suggestion: MLH-State-Writeback: complete", rendered)
+            self.assertIn("suggestion: MLH-Verification: validation passed", rendered)
+            self.assertNotIn("closeout-git-evidence-skipped", rendered)
+
+    def test_writeback_apply_refuses_product_fixture_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=True, mirrors=False)
+            before = snapshot_tree(root)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "writeback", "--apply", "--docs-decision", "updated"])
+            self.assertEqual(code, 2)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("writeback-refused", output.getvalue())
 
     def test_preflight_product_fixture_no_active_plan_no_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1982,20 +3381,30 @@ class CliTests(unittest.TestCase):
             self.assertFalse((root / ".agents/docmap.yaml").exists())
             self.assertFalse((root / "project/implementation-plan.md").exists())
             self.assertEqual([], list((root / "project/specs/workflow").glob("*.md")))
+            self.assertTrue((root / ARTIFACT_DIR_REL / "manifest.json").is_file())
+            self.assertTrue((root / INDEX_REL_PATH).is_file())
+            self.assertIn("attach-generated-projection-build", rendered)
 
     def test_attach_apply_is_idempotent_and_preserves_contents(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             with redirect_stdout(io.StringIO()):
                 first_code = main(["--root", str(root), "attach", "--apply", "--project", "Demo"])
-            before = snapshot_tree(root)
+            preserved_paths = (
+                ".codex/project-workflow.toml",
+                "project/project-state.md",
+            )
+            before = {rel_path: (root / rel_path).read_text(encoding="utf-8") for rel_path in preserved_paths}
             output = io.StringIO()
             with redirect_stdout(output):
                 second_code = main(["--root", str(root), "attach", "--apply", "--project", "Demo"])
             self.assertEqual(first_code, 0)
             self.assertEqual(second_code, 0)
-            self.assertEqual(before, snapshot_tree(root))
+            self.assertEqual(before, {rel_path: (root / rel_path).read_text(encoding="utf-8") for rel_path in preserved_paths})
+            self.assertTrue((root / ARTIFACT_DIR_REL / "manifest.json").is_file())
+            self.assertTrue((root / INDEX_REL_PATH).is_file())
             self.assertIn("attach-unchanged", output.getvalue())
+            self.assertIn("attach-generated-projection-build", output.getvalue())
 
     def test_attach_apply_refuses_path_conflict_without_partial_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2008,6 +3417,51 @@ class CliTests(unittest.TestCase):
             self.assertTrue((root / ".codex").is_file())
             self.assertFalse((root / "project").exists())
             self.assertIn("attach-target-conflict", output.getvalue())
+
+    def test_attach_apply_refuses_generated_projection_boundary_conflict_without_partial_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".mylittleharness").write_text("not a directory\n", encoding="utf-8")
+            before = snapshot_tree(root)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "attach", "--apply", "--project", "Demo"])
+            rendered = output.getvalue()
+            self.assertEqual(code, 2)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertFalse((root / ".codex").exists())
+            self.assertFalse((root / "project").exists())
+            self.assertIn("attach-generated-projection-refused", rendered)
+            self.assertIn("non-directory segment", rendered)
+
+    def test_attach_apply_degrades_when_fts5_is_unavailable_without_index_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = io.StringIO()
+            with patch("mylittleharness.projection_index._fts5_is_available", return_value=False), redirect_stdout(output):
+                code = main(["--root", str(root), "attach", "--apply", "--project", "Demo"])
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertTrue((root / ARTIFACT_DIR_REL / "manifest.json").is_file())
+            self.assertFalse((root / INDEX_REL_PATH).exists())
+            self.assertIn("attach-generated-projection-unavailable", rendered)
+            self.assertIn("projection-index-fts5-unavailable", rendered)
+
+    def test_check_and_intelligence_do_not_create_missing_projection_index(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=False)
+            before = snapshot_tree_bytes(root)
+            check_output = io.StringIO()
+            with redirect_stdout(check_output):
+                check_code = main(["--root", str(root), "check"])
+            intelligence_output = io.StringIO()
+            with redirect_stdout(intelligence_output):
+                intelligence_code = main(["--root", str(root), "intelligence", "--focus", "search", "--query", "MyLittleHarness"])
+            self.assertEqual(check_code, 0)
+            self.assertEqual(intelligence_code, 0)
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            self.assertFalse((root / INDEX_REL_PATH).exists())
+            self.assertIn("projection-index-query-skipped", intelligence_output.getvalue())
 
     def test_init_attach_refuses_symlink_scaffold_conflict_without_partial_writes(self) -> None:
         for command in ("init", "attach"):
@@ -2310,6 +3764,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(before, snapshot_tree(root))
             self.assertIn("would create missing scaffold directory: .agents", rendered)
             self.assertIn("would create missing scaffold directory: project/research", rendered)
+            self.assertIn("would create missing scaffold directory: project/plan-incubation", rendered)
 
     def test_repair_dry_run_reports_state_frontmatter_plan_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2971,6 +4426,20 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("state-frontmatter", rendered)
             self.assertNotIn("stale-plan-file", rendered)
 
+    def test_validate_warns_when_incubation_route_is_hidden_or_legacy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            (root / "AGENTS.md").write_text("# Agents\n", encoding="utf-8")
+            (root / "project/incubator").mkdir(parents=True)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "validate"])
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("agents-incubation-contract-missing", rendered)
+            self.assertIn("incubation-legacy-path", rendered)
+            self.assertIn("project/plan-incubation/*.md", rendered)
+
     def test_status_reports_operating_root_active_plan_from_prose_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_operating_root(Path(tmp))
@@ -2980,8 +4449,14 @@ class CliTests(unittest.TestCase):
             rendered = output.getvalue()
             self.assertEqual(code, 0)
             self.assertIn("root kind: live_operating_root", rendered)
-            self.assertIn("plan_status: active", rendered)
-            self.assertIn("active plan present: project/implementation-plan.md", rendered)
+        self.assertIn("plan_status: active", rendered)
+        self.assertIn("active_phase: Phase 1", rendered)
+        self.assertIn("phase_status: in_progress", rendered)
+        self.assertIn("active plan present: project/implementation-plan.md", rendered)
+        self.assertIn("lifecycle-route-table", rendered)
+        self.assertIn("incubation: project/plan-incubation/*.md", rendered)
+        self.assertIn("decisions: project/decisions/*.md", rendered)
+        self.assertIn("future-optional", rendered)
 
     def test_repair_apply_snapshots_then_prepends_state_frontmatter_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3005,6 +4480,8 @@ class CliTests(unittest.TestCase):
             self.assertIn('operating_mode: "plan"', repaired_state)
             self.assertIn('plan_status: "active"', repaired_state)
             self.assertIn('active_plan: "project/implementation-plan.md"', repaired_state)
+            self.assertIn('active_phase: "Phase 1"', repaired_state)
+            self.assertIn('phase_status: "in_progress"', repaired_state)
             self.assertIn("historical_fallback_root:", repaired_state)
             self.assertTrue(repaired_state.endswith(original_state))
 
@@ -3139,8 +4616,9 @@ def make_root(root: Path, active: bool, mirrors: bool) -> Path:
     )
     plan_status = "active" if active else "none"
     active_plan = "project/implementation-plan.md" if active else ""
+    phase_fields = 'active_phase: "Phase 1"\nphase_status: "in_progress"\n' if active else ""
     (root / "project/project-state.md").write_text(
-        f'---\nproject: "MyLittleHarness"\nroot_role: "product-source"\nfixture_status: "product-compatibility-fixture"\nworkflow: "workflow-core"\noperating_mode: "plan"\nplan_status: "{plan_status}"\nactive_plan: "{active_plan}"\noperating_root: "{root.parent / "operator-root"}"\nproduct_source_root: "{root}"\nhistorical_fallback_root: "{root.parent / "legacy-root"}"\n---\n# State\n\nNo active implementation plan is open in this product tree.\nThis product tree stores fixture metadata only.\n',
+        f'---\nproject: "MyLittleHarness"\nroot_role: "product-source"\nfixture_status: "product-compatibility-fixture"\nworkflow: "workflow-core"\noperating_mode: "plan"\nplan_status: "{plan_status}"\nactive_plan: "{active_plan}"\n{phase_fields}operating_root: "{root.parent / "operator-root"}"\nproduct_source_root: "{root}"\nhistorical_fallback_root: "{root.parent / "legacy-root"}"\n---\n# State\n\nNo active implementation plan is open in this product tree.\nThis product tree stores fixture metadata only.\n',
         encoding="utf-8",
     )
     (root / "README.md").write_text("# Readme\nSee `.agents/docmap.yaml`.\n", encoding="utf-8")
@@ -3202,9 +4680,29 @@ def make_live_root(root: Path) -> Path:
         encoding="utf-8",
     )
     (root / "README.md").write_text("# Demo\n", encoding="utf-8")
-    (root / "AGENTS.md").write_text("# Agents\n", encoding="utf-8")
+    (root / "AGENTS.md").write_text("# Agents\nUse `project/plan-incubation/*.md` for incubation notes.\n", encoding="utf-8")
     for name in EXPECTED_SPEC_NAMES:
         (root / "project/specs/workflow" / name).write_text(f"# {name}\n", encoding="utf-8")
+    return root
+
+
+def make_active_live_root(root: Path, phase_status: str = "in_progress") -> Path:
+    make_live_root(root)
+    state_path = root / "project/project-state.md"
+    state_path.write_text(
+        state_path.read_text(encoding="utf-8").replace(
+            'operating_mode: "ad_hoc"\nplan_status: "none"\nactive_plan: ""',
+            (
+                'operating_mode: "plan"\n'
+                'plan_status: "active"\n'
+                'active_plan: "project/implementation-plan.md"\n'
+                'active_phase: "Phase 4 - Validation And Closeout"\n'
+                f'phase_status: "{phase_status}"'
+            ),
+        ),
+        encoding="utf-8",
+    )
+    (root / "project/implementation-plan.md").write_text("# Plan\n", encoding="utf-8")
     return root
 
 
@@ -3268,7 +4766,8 @@ def make_operating_root(root: Path) -> Path:
     )
     (root / "AGENTS.md").write_text(
         "# Operating Project Agents\n\n"
-        "Read `project/project-state.md` first. `.agents/docmap.yaml` is lazy.\n",
+        "Read `project/project-state.md` first. `.agents/docmap.yaml` is lazy.\n"
+        "Use `project/plan-incubation/*.md` for incubation notes.\n",
         encoding="utf-8",
     )
     (root / "project/project-state.md").write_text(
@@ -3277,6 +4776,8 @@ def make_operating_root(root: Path) -> Path:
         'plan_status = "active"\n\n'
         'operating_mode = "plan"\n\n'
         'active_plan = "project/implementation-plan.md"\n\n'
+        'active_phase = "Phase 1"\n\n'
+        'phase_status = "in_progress"\n\n'
         f'historical_fallback_root = "{root.parent / "legacy-root"}"\n\n'
         "## Current Focus\n\n"
         "This root remains the operating project root.\n",
@@ -3331,6 +4832,52 @@ def enable_lazy_docmap(root: Path) -> None:
     manifest_path.write_text(manifest, encoding="utf-8")
 
 
+def large_active_state_text(loose_title_text: bool = False) -> str:
+    title_intro = "Loose title paragraph makes section boundaries unclear.\n\n" if loose_title_text else ""
+    old_sections = []
+    for section_number in range(1, 8):
+        lines = "\n".join(f"- Old detail {section_number}.{line_number}: historical context." for line_number in range(1, 38))
+        old_sections.append(f"## Ad Hoc Update - 2026-04-0{section_number} - Old Work {section_number}\n\n{lines}\n")
+    return (
+        "---\n"
+        'project: "Demo"\n'
+        'workflow: "workflow-core"\n'
+        'operating_mode: "plan"\n'
+        'plan_status: "active"\n'
+        'active_plan: "project/implementation-plan.md"\n'
+        'active_phase: "Phase 4 - Validation And Closeout"\n'
+        'phase_status: "complete"\n'
+        "---\n"
+        "# Demo Project State\n\n"
+        f"{title_intro}"
+        "## Current Focus\n\n"
+        "Finish the current lifecycle close.\n\n"
+        "## Repository Role Map\n\n"
+        "- Operating root: this temporary test root.\n"
+        "- Product source: not used by this fixture.\n\n"
+        "## Notes\n\n"
+        "Short note stays in operating memory.\n\n"
+        f"{''.join(old_sections)}\n"
+        "## Ad Hoc Update - 2026-04-30 - Automatic Operating Memory Compaction\n\n"
+        "- Product target: clean product source.\n"
+        "- Result: compaction should keep this latest relevant update.\n\n"
+        "## MLH Closeout Writeback\n\n"
+        "<!-- BEGIN mylittleharness-closeout-writeback v1 -->\n"
+        "- docs_decision: uncertain\n"
+        "- state_writeback: pending\n"
+        "<!-- END mylittleharness-closeout-writeback v1 -->\n"
+    )
+
+
+def large_inactive_state_text() -> str:
+    return (
+        large_active_state_text()
+        .replace('operating_mode: "plan"\n', 'operating_mode: "ad_hoc"\n')
+        .replace('plan_status: "active"\n', 'plan_status: "none"\n')
+        .replace('active_plan: "project/implementation-plan.md"\n', 'active_plan: ""\n')
+    )
+
+
 def snapshot_tree(root: Path) -> dict[str, str]:
     snapshot: dict[str, str] = {}
     for path in sorted(root.rglob("*")):
@@ -3354,4 +4901,3 @@ def jsonrpc_lines(value: str) -> list[dict[str, object]]:
 
 if __name__ == "__main__":
     unittest.main()
-

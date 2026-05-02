@@ -79,7 +79,7 @@ It reads newline-delimited JSON-RPC from stdin, writes only JSON-RPC messages to
 Both modes fail open to repo files and the current in-memory projection when generated projection files are missing or stale.
 They return `0` for readable roots with info or warning findings; root-load failures remain exit `2`; missing required adapter modes, missing `--transport stdio` for serving, or unknown targets remain argparse usage failures.
 
-They must not install an MCP SDK, create an HTTP or network server, create adapter state, write generated reports, mutate files, approve repair, approve closeout, archive, commit, switch roots, store accepted decisions, or become the only recovery path.
+They must not install an MCP SDK, create an HTTP or network server, create adapter state, write generated reports, mutate files, approve repair, approve closeout, archive, commit, change target roots, store accepted decisions, or become the only recovery path.
 
 ## Implemented Preflight Warning Slice
 
@@ -98,14 +98,14 @@ It reports:
 The command returns `0` after a successful report even when findings include warnings or errors.
 Root-load failures and parser usage failures remain exit `2`.
 
-It must not install hooks, create CI/GitHub workflows, use network calls, write generated preflight reports, block by itself, repair files, archive, commit, switch roots, create lifecycle state, or store accepted decisions.
+It must not install hooks, create CI/GitHub workflows, use network calls, write generated preflight reports, block by itself, repair files, archive, commit, change target roots, create lifecycle state, or store accepted decisions.
 
 ## Explicit Rejects
 
 - Mandatory adapter correctness.
 - Issue-board authority.
 - CI-only completion truth.
-- VCS status as archive, commit, repair, switch-over, or lifecycle authority.
+- VCS status as archive, commit, repair, lifecycle authority.
 - Hidden hook repair.
 - Preflight-only correctness or hidden blocking policy.
 - Browser, IDE, MCP, GitHub, or plugin state as accepted decision storage.

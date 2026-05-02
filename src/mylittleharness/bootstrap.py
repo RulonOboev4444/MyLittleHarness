@@ -18,7 +18,6 @@ def bootstrap_sections(inventory: Inventory) -> list[tuple[str, list[Finding]]]:
         ("Summary", _summary_findings(inventory)),
         ("Package Smoke", _package_smoke_findings(inventory)),
         ("Bootstrap Apply", _bootstrap_apply_findings()),
-        ("Switch-Over", _switch_over_findings()),
         ("Publishing", _publishing_findings()),
         ("Workstation Adoption", _workstation_adoption_findings()),
         ("Boundary", _boundary_findings()),
@@ -42,7 +41,7 @@ def package_smoke_sections(inventory: Inventory) -> list[tuple[str, list[Finding
 
 def _summary_findings(inventory: Inventory) -> list[Finding]:
     return [
-        Finding("info", "bootstrap-summary", "bootstrap readiness report for package, setup, switch-over, publishing, and workstation adoption lanes"),
+        Finding("info", "bootstrap-summary", "bootstrap readiness report for package, setup, publishing, and workstation adoption lanes"),
         Finding("info", "bootstrap-root-kind", f"root kind: {inventory.root_kind}"),
         Finding("info", "bootstrap-python", f"current interpreter: {sys.executable}; version={sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"),
         Finding("info", "bootstrap-report", "bootstrap --inspect is terminal-only and read-only"),
@@ -209,7 +208,7 @@ def _package_smoke_summary_findings(inventory: Inventory, status: str) -> list[F
         Finding(
             "info",
             "package-smoke-no-authority",
-            "package smoke is verification evidence only and cannot publish, switch roots, approve lifecycle actions, or create package authority",
+            "package smoke is verification evidence only and cannot publish packages, approve lifecycle decisions, or create package authority",
         ),
     ]
 
@@ -301,7 +300,7 @@ def _package_smoke_boundary_findings() -> list[Finding]:
         Finding(
             "info",
             "package-smoke-no-lifecycle-authority",
-            "package smoke output cannot approve bootstrap apply, switch-over, closeout, archive, commit, repair, rollback, or lifecycle decisions",
+            "package smoke output cannot approve bootstrap apply, closeout, archive, commit, repair, rollback, or lifecycle decisions",
         ),
     ]
 
@@ -368,27 +367,7 @@ def _bootstrap_apply_findings() -> list[Finding]:
         Finding(
             "info",
             "bootstrap-apply-gate",
-            "future adoption, publication, or switch-over apply behavior must use a later scoped contract with its own command ownership, exact target root, exact write set, dry-run shape, refusal cases, validation gate, rollback posture, cleanup/non-adoption story, and non-authority wording",
-        ),
-    ]
-
-
-def _switch_over_findings() -> list[Finding]:
-    return [
-        Finding(
-            "warn",
-            "bootstrap-switch-over-rejected",
-            "fate=rejected as standalone product surface; operating-root switch-over automation is not implemented and normal correctness does not depend on it",
-        ),
-        Finding(
-            "info",
-            "bootstrap-switch-over-gate",
-            "any future migration or adoption checklist must use a separate scoped contract that defines source and destination roots, exact write set, start-pass recovery, validation evidence, rollback posture, closeout evidence, refusal cases, and non-authority wording before implementation",
-        ),
-        Finding(
-            "info",
-            "bootstrap-switch-over-non-authority",
-            "package smoke, docs, generated projections, adapter output, hooks, and CLI reports cannot declare switch-over status",
+            "future adoption or publication behavior must use a later scoped contract with its own command ownership, exact target root, exact write set, dry-run shape, refusal cases, validation gate, rollback posture, cleanup/non-adoption story, and non-authority wording",
         ),
     ]
 
@@ -441,7 +420,7 @@ def _boundary_findings() -> list[Finding]:
         Finding(
             "info",
             "bootstrap-no-authority",
-            "bootstrap readiness output cannot approve correctness, repair, closeout, archive, commit, publishing, switch-over, lifecycle decisions, or mutation",
+            "bootstrap readiness output cannot approve correctness, repair, closeout, archive, commit, publishing, lifecycle decisions, or mutation",
         ),
         Finding(
             "info",

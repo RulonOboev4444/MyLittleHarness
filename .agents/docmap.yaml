@@ -34,7 +34,6 @@ cross_cutting_surfaces:
       - "target root"
       - "operating root"
       - "memory root"
-      - "switch-over"
       - "product source checkout"
       - "package smoke"
       - "bootstrap"
@@ -112,6 +111,7 @@ cross_cutting_surfaces:
       - "intelligence"
       - "evidence"
       - "closeout"
+      - "plan"
       - "adapter"
       - "preflight"
       - "MCP read projection"
@@ -147,8 +147,8 @@ rules:
     related_docs:
       - "docs/specs/authority-and-memory.md"
       - "docs/specs/metadata-routing-and-evidence.md"
-      - "docs/specs/operating-root-and-switch-over.md"
-      - "docs/architecture/target-architecture.md"
+      - "docs/specs/operating-root.md"
+      - "docs/architecture/product-architecture.md"
       - "docs/architecture/layer-model.md"
       - ".agents/docmap.yaml"
     triggers:
@@ -174,6 +174,7 @@ rules:
       - "intelligence"
       - "evidence"
       - "closeout"
+      - "plan"
       - "VCS"
       - "Git"
       - "adapter"
@@ -213,8 +214,8 @@ rules:
         check:
           - "docs/specs/authority-and-memory.md"
           - "docs/specs/metadata-routing-and-evidence.md"
-          - "docs/specs/operating-root-and-switch-over.md"
-          - "docs/architecture/target-architecture.md"
+          - "docs/specs/operating-root.md"
+          - "docs/architecture/product-architecture.md"
           - "docs/architecture/layer-model.md"
           - "README.md"
           - "project/project-state.md"
@@ -253,7 +254,3 @@ rules:
           - ".agents/docmap.yaml"
           - "project/project-state.md"
         update_when: "product-source posture, fixture routing, or root-boundary wording would otherwise drift"
-
-
-
-

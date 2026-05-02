@@ -33,7 +33,7 @@ def _operator_task_findings() -> list[Finding]:
         ),
         Finding("info", "tasks-evidence-closeout", "evidence/closeout: evidence; closeout"),
         Finding("info", "tasks-generated-projection", "generated projection: projection --build|--inspect|--delete|--rebuild"),
-        Finding("info", "tasks-bootstrap-readiness", "package/bootstrap/switch-over readiness: bootstrap --inspect; bootstrap --package-smoke"),
+        Finding("info", "tasks-bootstrap-readiness", "package/bootstrap readiness: bootstrap --inspect; bootstrap --package-smoke"),
         Finding("info", "tasks-attach-repair", "attach/repair: attach --dry-run|--apply; repair --dry-run|--apply"),
     ]
 
@@ -56,7 +56,7 @@ def _boundary_findings() -> list[Finding]:
         Finding(
             "info",
             "tasks-no-authority",
-            "tasks --inspect cannot approve correctness, repair, closeout, archive, commit, switch-over, lifecycle decisions, or future power-ups",
+            "tasks --inspect cannot approve correctness, repair, closeout, archive, commit, lifecycle decisions, or future power-ups",
         ),
         Finding("info", "tasks-no-alias", "tasks --inspect is a task map and does not hide aliases, remove commands, or change defaults"),
     ]
@@ -66,5 +66,5 @@ def _future_power_up_findings() -> list[Finding]:
     return [
         Finding("info", "tasks-future-evidence", "future lane: evidence manifest and closeout hardening remain gated"),
         Finding("info", "tasks-future-semantic", "future lane: real semantic retrieval remains gated behind source verification beyond bounded no-runtime evaluation"),
-        Finding("info", "tasks-future-adapters", "future lane: additional adapters, hook/CI integrations, switch-over, publishing, and repair expansion remain gated; standalone bootstrap apply is rejected"),
+        Finding("info", "tasks-future-adapters", "future lane: additional adapters, hook/CI integrations, publishing, and repair expansion remain gated; standalone bootstrap apply is rejected"),
     ]

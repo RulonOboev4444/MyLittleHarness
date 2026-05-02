@@ -15,6 +15,7 @@ from .checks import (
     doctor_findings,
     flatten_sections,
     intelligence_sections,
+    intelligence_route_sections,
     load_for_root,
     detach_apply_sections,
     repair_apply_findings,
@@ -26,8 +27,15 @@ from .checks import (
 )
 from .closeout import closeout_sections
 from .evidence import evidence_findings
+from .incubate import incubate_apply_findings, incubate_dry_run_findings, make_incubate_request
 from .inventory import RootLoadError
+from .memory_hygiene import (
+    make_memory_hygiene_request,
+    memory_hygiene_apply_findings,
+    memory_hygiene_dry_run_findings,
+)
 from .models import Finding
+from .planning import make_plan_request, plan_apply_findings, plan_dry_run_findings
 from .projection_artifacts import (
     build_projection_artifacts,
     delete_projection_artifacts,
@@ -44,6 +52,7 @@ from .preflight import preflight_sections, render_git_pre_commit_template
 from .reporting import render_intelligence_report, render_report, render_sectioned_report
 from .semantic import semantic_evaluate_sections, semantic_inspect_sections
 from .tasks import tasks_sections
+from .writeback import make_writeback_request, writeback_apply_findings, writeback_dry_run_findings
 
 
 COMMANDS = (
@@ -63,6 +72,10 @@ COMMANDS = (
     "intelligence",
     "evidence",
     "closeout",
+    "incubate",
+    "plan",
+    "writeback",
+    "memory-hygiene",
     "projection",
     "snapshot",
     "attach",
@@ -83,7 +96,14 @@ def build_parser() -> argparse.ArgumentParser:
     init_mode.add_argument("--dry-run", action="store_true", help="Report the init proposal without writing files.")
     init_mode.add_argument("--apply", action="store_true", help="Create only allowed missing scaffold/template paths.")
     init.add_argument("--project", help="Project name to use when creating project/project-state.md.")
-    subparsers.add_parser("check", help="Run read-only status and validation checks without writing files.")
+    check = subparsers.add_parser("check", help="Run read-only status and validation checks without writing files.")
+    check_mode = check.add_mutually_exclusive_group()
+    check_mode.add_argument("--deep", action="store_true", help="Include links, context, and hygiene diagnostics in the read-only check report.")
+    check_mode.add_argument(
+        "--focus",
+        choices=("validation", "links", "context", "hygiene"),
+        help="Run one focused read-only diagnostic through check.",
+    )
     repair = subparsers.add_parser("repair", help="Preview or apply deterministic workflow contract repair.")
     repair_mode = repair.add_mutually_exclusive_group(required=True)
     repair_mode.add_argument("--dry-run", action="store_true", help="Report the repair proposal without writing files.")
@@ -94,6 +114,61 @@ def build_parser() -> argparse.ArgumentParser:
     detach_mode.add_argument("--apply", action="store_true", help="Create the marker-only detach evidence file in an eligible live operating root.")
     for command in ("status", "validate", "context-budget", "audit-links", "doctor", "evidence", "closeout"):
         subparsers.add_parser(command)
+    incubate = subparsers.add_parser(
+        "incubate",
+        help=argparse.SUPPRESS,
+        description="Advanced mutating command: create or append explicit future-idea incubation notes.",
+    )
+    incubate_mode = incubate.add_mutually_exclusive_group(required=True)
+    incubate_mode.add_argument("--dry-run", action="store_true", help="Preview the incubation note target without writing files.")
+    incubate_mode.add_argument("--apply", action="store_true", help="Create or append the same-topic incubation note in an eligible live operating root.")
+    incubate.add_argument("--topic", required=True, help="Plain future-idea topic used to derive the safe note slug.")
+    incubate.add_argument("--note", required=True, help="Explicit incubation note text to record.")
+    plan = subparsers.add_parser(
+        "plan",
+        help=argparse.SUPPRESS,
+        description="Advanced mutating command: create or replace a deterministic active implementation-plan scaffold.",
+    )
+    plan_mode = plan.add_mutually_exclusive_group(required=True)
+    plan_mode.add_argument("--dry-run", action="store_true", help="Preview deterministic implementation-plan synthesis without writing files.")
+    plan_mode.add_argument("--apply", action="store_true", help="Write the active implementation plan and lifecycle frontmatter in an eligible live operating root.")
+    plan.add_argument("--title", required=True, help="Implementation plan title to render into frontmatter and the first heading.")
+    plan.add_argument("--objective", required=True, help="Concrete objective to render into the generated implementation plan.")
+    plan.add_argument("--task", help="Optional explicit task input to preserve inside the generated plan.")
+    plan.add_argument("--update-active", action="store_true", help="Replace the current default active plan when project-state already has plan_status active.")
+    writeback = subparsers.add_parser(
+        "writeback",
+        help=argparse.SUPPRESS,
+        description="Advanced mutating command: apply explicit closeout/state writeback and synchronize derived active-plan copies.",
+    )
+    writeback_mode = writeback.add_mutually_exclusive_group(required=True)
+    writeback_mode.add_argument("--dry-run", action="store_true", help="Preview closeout/state writeback without writing files.")
+    writeback_mode.add_argument("--apply", action="store_true", help="Write the MLH-owned closeout/state writeback block and synchronized derived copies.")
+    writeback.add_argument("--worktree-start-state", dest="worktree_start_state", help="Closeout worktree_start_state value to record.")
+    writeback.add_argument("--task-scope", dest="task_scope", help="Closeout task_scope value to record.")
+    writeback.add_argument("--docs-decision", dest="docs_decision", help="Closeout docs_decision value: updated, not-needed, or uncertain.")
+    writeback.add_argument("--state-writeback", dest="state_writeback", help="Closeout state_writeback value to record.")
+    writeback.add_argument("--verification", help="Closeout verification value to record.")
+    writeback.add_argument("--commit-decision", dest="commit_decision", help="Closeout commit_decision value to record.")
+    writeback.add_argument("--residual-risk", dest="residual_risk", help="Optional closeout residual_risk value to record.")
+    writeback.add_argument("--carry-forward", dest="carry_forward", help="Optional closeout carry_forward value to record.")
+    writeback.add_argument("--active-phase", dest="active_phase", help="Lifecycle active_phase value to write to project-state frontmatter.")
+    writeback.add_argument("--phase-status", dest="phase_status", help="Lifecycle phase_status value to write to project-state frontmatter.")
+    writeback.add_argument("--last-archived-plan", dest="last_archived_plan", help="Lifecycle last_archived_plan value to write to project-state frontmatter.")
+    writeback.add_argument("--archive-active-plan", action="store_true", help="Move the active implementation plan to the canonical archive and close the active lifecycle pointer.")
+    memory_hygiene = subparsers.add_parser(
+        "memory-hygiene",
+        help=argparse.SUPPRESS,
+        description="Advanced mutating command: apply explicit research/incubation lifecycle hygiene.",
+    )
+    memory_hygiene_mode = memory_hygiene.add_mutually_exclusive_group(required=True)
+    memory_hygiene_mode.add_argument("--dry-run", action="store_true", help="Preview lifecycle hygiene without writing files.")
+    memory_hygiene_mode.add_argument("--apply", action="store_true", help="Write bounded lifecycle metadata, archive movement, and exact link repairs in an eligible live operating root.")
+    memory_hygiene.add_argument("--source", required=True, help="Root-relative MLH-owned research/incubation Markdown source to update.")
+    memory_hygiene.add_argument("--promoted-to", dest="promoted_to", help="Root-relative accepted destination recorded as promoted_to.")
+    memory_hygiene.add_argument("--status", help="Lifecycle status to write. Defaults to distilled when --promoted-to is supplied.")
+    memory_hygiene.add_argument("--archive-to", dest="archive_to", help="Explicit root-relative archive target under project/archive/reference/research or incubation.")
+    memory_hygiene.add_argument("--repair-links", action="store_true", help="Repair exact root-relative source path references to the archive path.")
     preflight = subparsers.add_parser(
         "preflight",
         help=argparse.SUPPRESS,
@@ -114,7 +189,7 @@ def build_parser() -> argparse.ArgumentParser:
     bootstrap = subparsers.add_parser(
         "bootstrap",
         help=argparse.SUPPRESS,
-        description="Advanced compatibility diagnostic: inspect bootstrap, switch-over, publishing, package, and workstation readiness without writing files.",
+        description="Advanced compatibility diagnostic: inspect bootstrap, publishing, package, and workstation readiness without writing files.",
     )
     bootstrap_mode = bootstrap.add_mutually_exclusive_group(required=True)
     bootstrap_mode.add_argument("--inspect", action="store_true", help="Inspect read-only bootstrap readiness lanes and deferred mutation boundaries.")
@@ -137,7 +212,7 @@ def build_parser() -> argparse.ArgumentParser:
     intelligence.add_argument("--path", help="Case-sensitive path fragment to search in inventory-discovered paths and references.")
     intelligence.add_argument("--full-text", help="Optional SQLite FTS/BM25 query over a current source-verified projection index.")
     intelligence.add_argument("--limit", type=_positive_int, default=10, help="Maximum full-text results to show. Defaults to 10.")
-    intelligence.add_argument("--focus", choices=("search", "warnings", "projection"), help="Render a focused intelligence report while keeping the command read-only.")
+    intelligence.add_argument("--focus", choices=("search", "warnings", "projection", "routes"), help="Render a focused intelligence report while keeping the command read-only.")
     projection = subparsers.add_parser(
         "projection",
         help=argparse.SUPPRESS,
@@ -181,6 +256,10 @@ def build_parser() -> argparse.ArgumentParser:
         "preflight",
         "semantic",
         "intelligence",
+        "incubate",
+        "plan",
+        "writeback",
+        "memory-hygiene",
         "projection",
         "snapshot",
         "adapter",
@@ -207,23 +286,11 @@ def main(argv: list[str] | None = None) -> int:
 
     command = args.command
     if command == "check":
-        status_section = status_findings(inventory)
-        validation_section = validation_findings(inventory)
-        drift_section = check_drift_findings(inventory)
-        boundary_section = [
-            Finding("info", "check-read-only", "check composes status, validate, and check-level drift signals without writing files"),
-            Finding("info", "check-no-deep-diagnostics", "advanced diagnostics remain available through compatibility commands"),
-        ]
-        sections = [
-            ("Status", status_section),
-            ("Validation", validation_section),
-            ("Drift", drift_section),
-            ("Boundary", boundary_section),
-        ]
+        report_name, sections = _check_report(args, inventory)
         findings = flatten_sections(sections)
         result = _result_for(findings)
-        print(render_sectioned_report("check", inventory.root, result, inventory.sources_for_report(), sections, _suggestions(command, findings)))
-        return 1 if any(finding.severity == "error" for finding in validation_section) else 0
+        print(render_sectioned_report(report_name, inventory.root, result, inventory.sources_for_report(), sections, _suggestions(command, findings)))
+        return 1 if any(finding.severity == "error" for finding in findings) else 0
     if command == "detach":
         report_name = "detach --dry-run"
         if args.apply:
@@ -298,7 +365,11 @@ def main(argv: list[str] | None = None) -> int:
         print(render_sectioned_report(report_name, inventory.root, result, inventory.sources_for_report(), sections, _suggestions(command, findings)))
         return 0
     if command == "intelligence":
-        sections = intelligence_sections(inventory, args.search, args.path, args.full_text, args.limit, args.query)
+        sections = (
+            intelligence_route_sections(inventory)
+            if args.focus == "routes"
+            else intelligence_sections(inventory, args.search, args.path, args.full_text, args.limit, args.query)
+        )
         findings = flatten_sections(sections)
         result = _result_for(findings)
         display_sections = _focused_intelligence_sections(sections, args.focus)
@@ -324,6 +395,47 @@ def main(argv: list[str] | None = None) -> int:
         result = _result_for(findings)
         print(render_sectioned_report("closeout", inventory.root, result, inventory.sources_for_report(), sections, _suggestions(command, findings)))
         return 0
+    if command == "writeback":
+        request = make_writeback_request(
+            archive_active_plan=args.archive_active_plan,
+            worktree_start_state=args.worktree_start_state,
+            task_scope=args.task_scope,
+            docs_decision=args.docs_decision,
+            state_writeback=args.state_writeback,
+            verification=args.verification,
+            commit_decision=args.commit_decision,
+            residual_risk=args.residual_risk,
+            carry_forward=args.carry_forward,
+            active_phase=args.active_phase,
+            phase_status=args.phase_status,
+            last_archived_plan=args.last_archived_plan,
+        )
+        report_name = "writeback --apply" if args.apply else "writeback --dry-run"
+        findings = writeback_apply_findings(inventory, request) if args.apply else writeback_dry_run_findings(inventory, request)
+        result = _result_for(findings)
+        print(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
+        return 2 if args.apply and result == "error" else 0
+    if command == "plan":
+        request = make_plan_request(args.title, args.objective, args.task, args.update_active)
+        report_name = "plan --apply" if args.apply else "plan --dry-run"
+        findings = plan_apply_findings(inventory, request) if args.apply else plan_dry_run_findings(inventory, request)
+        result = _result_for(findings)
+        print(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
+        return 2 if args.apply and result == "error" else 0
+    if command == "memory-hygiene":
+        request = make_memory_hygiene_request(args.source, args.promoted_to, args.status, args.archive_to, args.repair_links)
+        report_name = "memory-hygiene --apply" if args.apply else "memory-hygiene --dry-run"
+        findings = memory_hygiene_apply_findings(inventory, request) if args.apply else memory_hygiene_dry_run_findings(inventory, request)
+        result = _result_for(findings)
+        print(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
+        return 2 if args.apply and result == "error" else 0
+    if command == "incubate":
+        request = make_incubate_request(args.topic, args.note)
+        report_name = "incubate --apply" if args.apply else "incubate --dry-run"
+        findings = incubate_apply_findings(inventory, request) if args.apply else incubate_dry_run_findings(inventory, request)
+        result = _result_for(findings)
+        print(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
+        return 2 if args.apply and result == "error" else 0
     if command == "projection":
         report_name = f"projection --inspect --target {args.target}"
         if args.build:
@@ -385,6 +497,41 @@ def _result_for(findings) -> str:
     if any(finding.severity == "warn" for finding in findings):
         return "warn"
     return "ok"
+
+
+def _check_report(args: argparse.Namespace, inventory: object) -> tuple[str, list[tuple[str, list[Finding]]]]:
+    boundary_section = [
+        Finding("info", "check-read-only", "check diagnostics write no files, reports, caches, generated outputs, snapshots, Git state, hooks, package artifacts, adapter state, or workstation state"),
+    ]
+    if args.focus:
+        focus_sections = {
+            "validation": ("Validation", validation_findings(inventory)),
+            "links": ("Links", audit_link_findings(inventory)),
+            "context": ("Context", context_budget_findings(inventory)),
+            "hygiene": ("Hygiene", doctor_findings(inventory.root, inventory)),
+        }
+        section = focus_sections[args.focus]
+        boundary_section.append(Finding("info", "check-focus-read-only", f"check --focus {args.focus} runs one compatibility diagnostic without writing files"))
+        return f"check --focus {args.focus}", [section, ("Boundary", boundary_section)]
+
+    sections = [
+        ("Status", status_findings(inventory)),
+        ("Validation", validation_findings(inventory)),
+        ("Drift", check_drift_findings(inventory)),
+    ]
+    if args.deep:
+        sections.extend(
+            [
+                ("Links", audit_link_findings(inventory)),
+                ("Context", context_budget_findings(inventory)),
+                ("Hygiene", doctor_findings(inventory.root, inventory)),
+            ]
+        )
+        boundary_section.append(Finding("info", "check-deep-read-only", "check --deep composes links, context, and hygiene diagnostics without writing files"))
+        return "check --deep", [*sections, ("Boundary", boundary_section)]
+
+    boundary_section.append(Finding("info", "check-compatibility-diagnostics", "use check --deep or check --focus for consolidated links, context, and hygiene diagnostics; compatibility commands remain available"))
+    return "check", [*sections, ("Boundary", boundary_section)]
 
 
 def _positive_int(value: str) -> int:
@@ -451,6 +598,11 @@ def _suggestions(command: str, findings) -> list[str]:
     if command == "check":
         if errors:
             return ["check found validation errors; inspect the validation section before running repair."]
+        if any(finding.code == "check-deep-read-only" for finding in findings):
+            return ["check --deep completed as a read-only status, validation, drift, links, context, and hygiene report."]
+        focus_finding = next((finding for finding in findings if finding.code == "check-focus-read-only"), None)
+        if focus_finding:
+            return [f"{focus_finding.message}."]
         if warnings:
             return ["check completed as a read-only report with advisory findings; use advanced diagnostics only when needed."]
         return ["check completed as a read-only status plus validation report."]
@@ -477,7 +629,7 @@ def _suggestions(command: str, findings) -> list[str]:
     if command == "snapshot":
         if any(finding.severity == "warn" for finding in findings):
             return ["Use snapshot inspection as safety-evidence review only; manual rollback and source files remain operator decisions."]
-        return ["snapshot inspection completed as a terminal-only read-only report; it did not approve repair, rollback, cleanup, closeout, archive, commit, or switch-over."]
+        return ["snapshot inspection completed as a terminal-only read-only report; it did not approve repair, rollback, cleanup, closeout, archive, commit, or lifecycle decision."]
     if command == "evidence":
         if any(finding.severity == "warn" for finding in findings):
             return ["Use evidence findings as closeout assembly prompts; source files and observed verification remain authority."]
@@ -485,15 +637,39 @@ def _suggestions(command: str, findings) -> list[str]:
     if command == "closeout":
         if any(finding.severity == "warn" for finding in findings):
             return ["Use closeout findings as assembly inputs; operator decisions, source files, manifest policy, and observed verification remain authority."]
-        return ["closeout completed as a terminal-only read-only report; it did not approve archive, commit, repair, or lifecycle actions."]
+        return ["closeout completed as a terminal-only read-only report; it did not approve archive, commit, repair, or lifecycle decisions."]
+    if command == "writeback":
+        if any(finding.severity == "error" for finding in findings):
+            return ["writeback apply was refused before closeout/state writeback became authoritative."]
+        if any(finding.code == "writeback-dry-run" for finding in findings):
+            return ["writeback dry-run reported the planned closeout/state synchronization without writing files."]
+        return ["writeback apply synchronized project-state closeout facts and matching active-plan derived copies."]
+    if command == "incubate":
+        if any(finding.severity == "error" for finding in findings):
+            return ["incubate apply was refused before any incubation note was changed."]
+        if any(finding.code == "incubate-dry-run" for finding in findings):
+            return ["incubate dry-run reported the target note and create/append posture without writing files."]
+        return ["incubate apply updated the same-topic incubation note; promote accepted facts through research, specs, plans, or state later."]
+    if command == "plan":
+        if any(finding.severity == "error" for finding in findings):
+            return ["plan apply was refused before active-plan or lifecycle files were changed."]
+        if any(finding.code == "plan-dry-run" for finding in findings):
+            return ["plan dry-run reported deterministic plan synthesis and lifecycle update posture without writing files."]
+        return ["plan apply wrote the active implementation plan scaffold and project-state lifecycle pointers."]
+    if command == "memory-hygiene":
+        if any(finding.severity == "error" for finding in findings):
+            return ["memory-hygiene apply was refused before lifecycle source, archive, or link targets were changed."]
+        if any(finding.code == "memory-hygiene-dry-run" for finding in findings):
+            return ["memory-hygiene dry-run reported bounded research/incubation lifecycle hygiene without writing files."]
+        return ["memory-hygiene apply updated only declared lifecycle source, archive, and exact link targets."]
     if command == "adapter":
         if any(finding.severity == "warn" for finding in findings):
             return ["Use adapter findings as optional read/projection input; repo files and the generic CLI remain authoritative."]
-        return ["adapter inspection completed as a terminal-only read-only report; it did not install MCP tooling, write adapter state, or approve lifecycle actions."]
+        return ["adapter inspection completed as a terminal-only read-only report; it did not install MCP tooling, write adapter state, or approve lifecycle decisions."]
     if command == "preflight":
         if any(finding.severity in {"warn", "error"} for finding in findings):
             return ["Use preflight findings as optional warning inputs; source files, observed verification, and operator decisions remain authority."]
-        return ["preflight completed as a terminal-only optional report; it did not install hooks, add CI, write reports, or approve lifecycle actions."]
+        return ["preflight completed as a terminal-only optional report; it did not install hooks, add CI, write reports, or approve lifecycle decisions."]
     if command == "tasks":
         return ["tasks inspection completed as a terminal-only read-only task map; existing commands and repo files remain authoritative."]
     if command == "bootstrap":
@@ -502,12 +678,12 @@ def _suggestions(command: str, findings) -> list[str]:
         if any(finding.code.startswith("package-smoke-") and finding.severity == "error" for finding in findings):
             return ["package smoke failed before creating product-root package artifacts or workstation changes."]
         if any(finding.severity in {"warn", "error"} for finding in findings):
-            return ["Use bootstrap readiness findings as planning inputs; no-write workstation readiness is advisory, package smoke remains explicit verification, standalone bootstrap apply is rejected, and publishing or switch-over require separate scoped contracts."]
-        return ["bootstrap inspection completed as terminal-only read-only output; it did not install, publish, switch roots, write artifacts, or mutate workstation state."]
+            return ["Use bootstrap readiness findings as planning inputs; no-write workstation readiness is advisory, package smoke remains explicit verification, standalone bootstrap apply is rejected, and publishing requires a separate scoped contract."]
+        return ["bootstrap inspection completed as terminal-only read-only output; it did not install, publish, change target roots, write artifacts, or mutate workstation state."]
     if command == "semantic":
         if any(finding.severity in {"warn", "error"} for finding in findings):
             return ["Use semantic warnings as planning inputs; exact/path/full-text source-backed search and repo files remain authority."]
-        return ["semantic report completed as terminal-only read-only output; it did not install runtimes, write indexes, or approve lifecycle actions."]
+        return ["semantic report completed as terminal-only read-only output; it did not install runtimes, write indexes, or approve lifecycle decisions."]
     if any(finding.code in {"attach-refused", "attach-project-required", "attach-target-conflict"} for finding in errors):
         return ["attach apply was refused before any files were written."]
     if any(

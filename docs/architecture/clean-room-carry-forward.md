@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This is a portable field manual for keeping MyLittleHarness work in the target repository while the reusable product source remains separate. It is not an implementation plan, not switch-over approval, and not permission to copy legacy material into the product repository.
+This is a portable field manual for keeping MyLittleHarness work in the target repository while the reusable product source remains separate. It is not an implementation plan, not boundary approval, and not permission to copy legacy material into the product repository.
 
 The field guide carries forward reusable product invariants: file-first authority, one operating memory surface, generated-state subordination, and explicit boundaries between product source, target-repository memory, and legacy reference material.
 
@@ -28,18 +28,18 @@ Reusable MyLittleHarness behavior attaches to and services the target repository
 - SQLite is projection/cache/index only: SQLite may accelerate retrieval and analytics, but cannot become canonical memory.
 - Adapters fail open: skills, MCP, browser, IDE, Git/GitHub/CI, hooks, and task runners must remain optional for recovery.
 - Hooks are advisory only: hooks may warn or run visible preflight checks, but must not silently mutate, repair, commit, or decide correctness.
-- No switch-over from docs alone: product docs can describe gates, but operation moves only through an explicit verified setup plan.
+- No boundary changes from docs alone: product docs can describe gates, but operation moves only through an explicit verified setup plan.
 
 ## Risk Register
 
 | Risk | Known portable rule | Remains to design | Must not happen |
 | --- | --- | --- | --- |
-| Product/operating boundary | Product docs and source stay separate from operating memory unless an explicit switch-over plan changes that boundary. | Portable setup guidance for future operating-root changes. | Treating product docs or fixtures as live operating memory. |
+| Product/operating boundary | Product docs and source stay separate from operating memory unless an explicit product plan changes that boundary. | Portable setup guidance for future operating-root changes. | Treating product docs or fixtures as live operating memory. |
 | Product-root contamination | Product source excludes active plans, research/history/raw intake, archives, logs, caches, local databases, generated reports, and demo residue. | Hygiene checks for each operator setup. | Using product source as the place for operating research, reports, or runtime output. |
 | Adapter fail-open | Adapters can help, but correctness remains recoverable from repo files. | Adapter-specific test contracts and failure messages. | Making a skill, MCP server, browser session, IDE, GitHub state, or CI result mandatory for recovery. |
 | Generated state subordinate | Generated views are rebuildable, disposable, subordinate, inspectable, and fail open to files. | Storage paths, rebuild commands, and report retention boundaries. | Letting generated output become the only copy of decisions, focus, plan status, or carry-forward fate. |
 | Configurable roots/bootstrap | Local paths are operator evidence, not public product law. | Portable root config, platform differences, setup validation, and generated-output boundaries. | Hardcoding one workstation layout as reusable product contract. |
-| Operational switch-over | Any future root change requires an explicit plan proving start-pass recovery, memory placement, validation, hygiene, and rollback. | Exact switch-over criteria, operator checklist, failure handling, and rollback deadline. | Moving operation into a product checkout by implication or partial setup. |
+| Boundary change | Any future root change requires an explicit plan proving start-pass recovery, memory placement, validation, hygiene, and rollback. | Exact boundary criteria, operator checklist, failure handling, and rollback deadline. | Moving operation into a product checkout by implication or partial setup. |
 | Repair behavior if mutating | Analyzer and repair flows report before mutation unless a scoped plan owns mutation. | Mutation prompts, diff evidence, backups, idempotency, and post-repair validation. | Auto-repairing state, plans, docs, fixtures, or archives without an explicit mutation boundary. |
 
 ## What We Are Intentionally Not Carrying Forward

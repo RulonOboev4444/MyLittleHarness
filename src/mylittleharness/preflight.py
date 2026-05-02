@@ -139,7 +139,7 @@ def _boundary_findings() -> list[Finding]:
         Finding(
             "info",
             "preflight-no-authority",
-            "preflight output is advisory evidence only and cannot approve correctness, repair, closeout, archive, commit, switch-over, or lifecycle decisions",
+            "preflight output is advisory evidence only and cannot approve correctness, repair, closeout, archive, commit, lifecycle decisions",
         ),
         Finding(
             "info",
@@ -149,6 +149,6 @@ def _boundary_findings() -> list[Finding]:
         Finding(
             "info",
             "preflight-no-mutation",
-            "preflight does not format, repair, write reports, create generated artifacts, stage files, commit, archive, switch roots, or mutate workflow state",
+            "preflight does not format, repair, write reports, create generated artifacts, stage files, commit, archive, change target roots, or mutate workflow state",
         ),
     ]

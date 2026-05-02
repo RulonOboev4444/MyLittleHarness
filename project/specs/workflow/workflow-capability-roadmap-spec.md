@@ -21,7 +21,7 @@ Core v0 has landed the file-first harness contract in stable specs. MyLittleHarn
 The current capability posture is:
 - repo-native authority, one mutable project memory surface, artifact lifecycle, research-before-plan handoff, lazy one-plan execution, verification/closeout, docs routing, projection demotion, and non-git operation are `canonical-now`
 - package-source mirror parity for changed live specs is `canonical-now`
-- operational switch-over, package/archive regeneration, skills/MCP/hooks redesign, candidate tooling, evidence IDs, quality gates, task execution, backlog, bootstrap/cache/generated-state, and adapters are not Core v0; they remain deferred lanes unless a later plan promotes them
+- operational lifecycle decision, package/archive regeneration, skills/MCP/hooks redesign, candidate tooling, evidence IDs, quality gates, task execution, backlog, bootstrap/cache/generated-state, and adapters are not Core v0; they remain deferred lanes unless a later plan promotes them
 
 ## Status Vocabulary
 
@@ -126,7 +126,7 @@ Future bounded workflow-upgrade implementation plans should start from the Core 
 
 The workflow should not treat `later-extension` items as hidden commitments. They are useful extensions, not part of the first required scaffold.
 
-No later plan should treat skills, MCP, hooks, adapters, evidence IDs, quality gates, package/archive regeneration, or operational switch-over as already promoted by Core v0.
+No later plan should treat skills, MCP, hooks, adapters, evidence IDs, quality gates, package/archive regeneration, or operational lifecycle decision as already promoted by Core v0.
 
 ## Guardrail
 

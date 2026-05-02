@@ -50,7 +50,7 @@ class ProjectionIndexTests(unittest.TestCase):
             self.assertEqual("inventory-surface", row[5])
             self.assertIn(f"{row[0]}:{row[1]}", row[7])
             metadata_text = json.dumps(metadata, sort_keys=True)
-            for forbidden in ("plan_status", "active_plan", "repair approved", "closeout", "commit", "switch-over"):
+            for forbidden in ("plan_status", "active_plan", "repair approved", "closeout", "commit"):
                 self.assertNotIn(forbidden, metadata_text)
 
     def test_projection_target_default_artifacts_and_all_target(self) -> None:

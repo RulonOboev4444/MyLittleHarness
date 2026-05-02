@@ -30,7 +30,7 @@ Core v0 consists of the small repo-native contract that keeps agent work recover
 - helper and projection demotion unless a later lane promotes a surface explicitly
 - operation that remains valid when the repository is not a git worktree
 
-Core v0 does not include operational switch-over, package/archive regeneration, evidence IDs, quality gates, candidate tooling, hidden hooks, MCP, daemons, schedulers, dashboards, mandatory adapters, or a second mutable memory tree. Those ideas stay deferred enhancement or projection lanes unless a future plan promotes them through their gates.
+Core v0 does not include operational lifecycle decision, package/archive regeneration, evidence IDs, quality gates, candidate tooling, hidden hooks, MCP, daemons, schedulers, dashboards, mandatory adapters, or a second mutable memory tree. Those ideas stay deferred enhancement or projection lanes unless a future plan promotes them through their gates.
 
 ## Target And Product Boundary
 
@@ -61,6 +61,8 @@ Attach/install/repair should eagerly scaffold the canonical directory layout for
 Lazy creation remains file-level, not directory-level: `project/implementation-plan.md` and `.agents/docmap.yaml` may stay absent until the relevant workflow path is actually used.
 Adjacent helper surfaces may coexist around that structure, but they do not outrank the canonical artifact model defined here.
 The contract must remain understandable without installed skills, hooks, MCP servers, Git, GitHub, browser state, IDE state, or external services.
+
+CLI route-table output is a compact discovery view over this artifact model. `status`, `check`, and `intelligence --focus routes` may name the live-root routes for state, active plans, incubation, research, stable specs, verification, closeout/writeback, archive, docs routing, and future optional lanes, but the output is advisory only. It does not replace these repo-visible artifacts and does not authorize mutation, repair, closeout, archive, commit, or lifecycle decisions.
 
 ## Attention Tiers
 
@@ -485,6 +487,5 @@ The workflow must avoid:
 - using archive artifacts as default authority for current execution
 - copying stable rules into temporary notes instead of linking to canonical docs
 - introducing new hidden memory layers instead of improving the repo-native markdown surfaces
-
 
 

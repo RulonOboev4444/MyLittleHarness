@@ -48,6 +48,8 @@ Context budgets should favor:
 
 Sub-agents and background work are optional bounded helpers. They require explicit user authorization and must return compact results to the main context.
 
+The implemented live operating-memory hygiene threshold is intentionally narrow: after an explicit live-root writeback apply, `project/project-state.md` above 250 lines may be compacted by moving older history sections into `project/archive/reference/` while preserving current focus, repository role map, short notes, the latest relevant update, closeout writeback facts, and an archive pointer. Read-only context-budget warnings for product docs, specs, or reports remain advisory and do not write files.
+
 ## Future Product Gates
 
 Before implementing context or ceremony tooling, a later scoped plan must define:
@@ -81,11 +83,9 @@ Validation may include smoke scenarios for read-only explanation, small mutation
 
 - No new always-on router, scheduler, daemon, dashboard, or control plane.
 - No required background agents.
-- No hard token thresholds in this phase.
+- No broad token-budget enforcement beyond the narrow post-writeback 250-line live state compaction threshold.
 - No broad import of old research or archives.
 - No ceremony checklist that substitutes for verification.
 - No automatic thread renaming or user-global configuration changes.
 - No implementation of tooling from this spec without a later scoped plan.
-
-
 
