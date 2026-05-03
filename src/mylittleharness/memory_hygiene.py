@@ -84,6 +84,8 @@ class MemoryHygieneRequest:
     archive_to: str
     repair_links: bool = False
     scan: bool = False
+    archive_covered: bool = False
+    entry_coverage: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -97,6 +99,8 @@ class MemoryHygienePlan:
     archive_path: Path | None
     updated_source_text: str
     link_repairs: tuple[tuple[str, Path, str], ...]
+    entry_coverage_updates: tuple[EntryCoverage, ...] = ()
+    archive_covered: bool = False
 
 
 @dataclass(frozen=True)
@@ -121,17 +125,24 @@ def make_memory_hygiene_request(
     archive_to: str | None,
     repair_links: bool = False,
     scan: bool = False,
+    archive_covered: bool = False,
+    entry_coverage: tuple[str, ...] | list[str] = (),
 ) -> MemoryHygieneRequest:
+    source_rel = _normalize_rel(source)
     promoted = _normalize_rel(promoted_to)
     archive = _normalize_rel(archive_to)
+    if archive_covered and not archive and source_rel.startswith(f"{INCUBATION_DIR_REL}/"):
+        archive = _default_incubation_archive_rel(source_rel)
     normalized_status = _normalized_status(status, promoted, archive)
     return MemoryHygieneRequest(
-        source=_normalize_rel(source),
+        source=source_rel,
         promoted_to=promoted,
         status=normalized_status,
         archive_to=archive,
         repair_links=repair_links,
         scan=scan,
+        archive_covered=archive_covered,
+        entry_coverage=tuple(str(item or "").strip() for item in entry_coverage if str(item or "").strip()),
     )
 
 
@@ -258,6 +269,24 @@ def _memory_hygiene_plan(inventory: Inventory, request: MemoryHygieneRequest) ->
     except OSError as exc:
         return None, [Finding("error", "memory-hygiene-refused", f"source could not be read: {exc}", request.source)]
 
+    coverage_updates: tuple[EntryCoverage, ...] = ()
+    if request.entry_coverage:
+        source_text, coverage_updates, coverage_error = _source_text_with_entry_coverage(source_text, request.entry_coverage)
+        if coverage_error:
+            return None, [Finding("error", "memory-hygiene-refused", coverage_error, request.source)]
+
+    if request.archive_covered:
+        blockers = incubation_archive_blockers(source_text)
+        if blockers:
+            return None, [
+                Finding(
+                    "error",
+                    "memory-hygiene-refused",
+                    f"--archive-covered requires terminal Entry Coverage and no archive blockers: {', '.join(blockers)}",
+                    request.source,
+                )
+            ]
+
     updated_text, frontmatter_error = _source_text_with_lifecycle_frontmatter(source_text, request)
     if frontmatter_error:
         return None, [Finding("error", "memory-hygiene-refused", frontmatter_error, request.source)]
@@ -277,6 +306,8 @@ def _memory_hygiene_plan(inventory: Inventory, request: MemoryHygieneRequest) ->
             archive_path=archive_path,
             updated_source_text=updated_text,
             link_repairs=link_repairs,
+            entry_coverage_updates=coverage_updates,
+            archive_covered=request.archive_covered,
         ),
         [],
     )
@@ -292,12 +323,16 @@ def _request_errors(inventory: Inventory, request: MemoryHygieneRequest) -> list
         errors.append(Finding("error", "memory-hygiene-refused", f"target root kind is {inventory.root_kind}; memory-hygiene requires a live operating root"))
 
     if request.scan:
-        if request.source or request.promoted_to or request.archive_to or request.status or request.repair_links:
-            errors.append(Finding("error", "memory-hygiene-refused", "--scan cannot be combined with source, promotion, archive, status, or link-repair fields"))
+        if request.source or request.promoted_to or request.archive_to or request.status or request.repair_links or request.archive_covered or request.entry_coverage:
+            errors.append(Finding("error", "memory-hygiene-refused", "--scan cannot be combined with source, promotion, archive, status, link-repair, archive-covered, or entry-coverage fields"))
         return errors
 
     if not request.source:
         errors.append(Finding("error", "memory-hygiene-refused", "--source is required and cannot be empty"))
+    if request.archive_covered and not request.source.startswith(f"{INCUBATION_DIR_REL}/"):
+        errors.append(Finding("error", "memory-hygiene-refused", "--archive-covered requires an incubation source under project/plan-incubation/", request.source or None))
+    if request.archive_covered and request.promoted_to:
+        errors.append(Finding("error", "memory-hygiene-refused", "--archive-covered cannot be combined with --promoted-to", request.source or None))
     if not request.promoted_to and not request.archive_to:
         errors.append(Finding("error", "memory-hygiene-refused", "at least one of --promoted-to or --archive-to is required"))
     if request.status not in ALLOWED_STATUS_VALUES:
@@ -409,6 +444,40 @@ def _source_text_with_lifecycle_frontmatter(text: str, request: MemoryHygieneReq
     if missing:
         lines[closing_index:closing_index] = [f'{key}: "{_yaml_double_quoted_value(updates[key])}"\n' for key in missing]
     return "".join(lines), None
+
+
+def _source_text_with_entry_coverage(text: str, raw_records: tuple[str, ...]) -> tuple[str, tuple[EntryCoverage, ...], str | None]:
+    parsed_records: list[EntryCoverage] = []
+    for raw in raw_records:
+        parsed = _parse_entry_coverage_line(f"- {raw.strip()}", 0)
+        if parsed is None:
+            return text, (), "entry coverage value must be `<entry-id>: <status> <destination>`"
+        parsed_records.append(parsed)
+    if not parsed_records:
+        return text, (), None
+    report = incubation_entry_coverage_report(text)
+    entry_ids = {entry.entry_id for entry in report.entries}
+    for record in parsed_records:
+        if record.entry_id not in entry_ids:
+            return text, (), f"entry coverage references unknown entry {record.entry_id!r}"
+        blockers = _entry_coverage_record_blockers(record)
+        if blockers:
+            return text, (), "; ".join(blockers)
+
+    lines = text.splitlines(keepends=True)
+    section = _entry_coverage_section(text)
+    record_text = "".join(f"- `{record.entry_id}`: `{record.status}` {record.detail}\n" for record in parsed_records)
+    if section is None:
+        separator = "" if text.endswith(("\n", "\r")) else "\n"
+        return text + separator + "\n## Entry Coverage\n\n" + record_text, tuple(parsed_records), None
+
+    start, end = section
+    coverage_by_id = {record.entry_id: record for record in report.coverage}
+    for record in parsed_records:
+        coverage_by_id[record.entry_id] = record
+    ordered_ids = [entry.entry_id for entry in report.entries if entry.entry_id in coverage_by_id]
+    rendered = [f"- `{entry_id}`: `{coverage_by_id[entry_id].status}` {coverage_by_id[entry_id].detail}\n" for entry_id in ordered_ids]
+    return "".join(lines[:start] + rendered + lines[end:]), tuple(parsed_records), None
 
 
 def relationship_update_plan(
@@ -639,6 +708,17 @@ def _plan_findings(plan: MemoryHygienePlan, apply: bool, repair_links: bool) -> 
         findings.append(Finding("info", "memory-hygiene-promoted-to", f"{prefix}record promoted_to: {plan.promoted_to_rel}", plan.source_rel))
     if plan.archive_rel:
         findings.append(Finding("info", "memory-hygiene-archive-plan", f"{prefix}archive source to {plan.archive_rel}", plan.archive_rel))
+    if plan.entry_coverage_updates:
+        findings.append(
+            Finding(
+                "info",
+                "memory-hygiene-entry-coverage-plan",
+                f"{prefix}write terminal Entry Coverage for {len(plan.entry_coverage_updates)} entr{'y' if len(plan.entry_coverage_updates) == 1 else 'ies'}",
+                plan.source_rel,
+            )
+        )
+    if plan.archive_covered:
+        findings.append(Finding("info", "memory-hygiene-archive-covered", f"{prefix}archive source only after terminal Entry Coverage validation", plan.archive_rel or plan.source_rel))
     if repair_links:
         count = len(plan.link_repairs)
         findings.append(Finding("info", "memory-hygiene-link-plan", f"{prefix}repair exact links in {count} file(s)", plan.archive_rel or plan.source_rel))

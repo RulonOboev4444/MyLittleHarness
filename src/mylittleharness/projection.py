@@ -20,6 +20,13 @@ ROOT_RELATIVE_LINK_PREFIXES = (
     "tests/",
 )
 ROOT_RELATIVE_LINK_NAMES = {"README.md", "AGENTS.md", "pyproject.toml"}
+PRODUCT_TARGET_ARTIFACT_PREFIXES = (
+    "build_backend/",
+    "docs/",
+    "src/",
+    "tests/",
+)
+PRODUCT_TARGET_ARTIFACT_NAMES = {"AGENTS.md", "README.md", "pyproject.toml"}
 FRONTMATTER_RELATIONSHIP_FIELDS = {
     "archived_plan",
     "archived_to",
@@ -319,10 +326,18 @@ def _local_link_records(inventory: Inventory) -> list[ProjectionLinkRecord]:
             if resolution.kind in {"external", "anchor"}:
                 continue
             target = normalized_link_path(link.target)
+            product_target_reason = product_target_artifact_reason(inventory, surface, link.target, link.line)
             if resolution.kind == "unresolved":
                 status = "unresolved"
             elif resolution.kind == "pattern":
-                status = "pattern-present" if resolution.exists else "pattern-missing"
+                if resolution.exists:
+                    status = "pattern-present"
+                elif product_target_reason:
+                    status = "product-target"
+                else:
+                    status = "pattern-missing"
+            elif product_target_reason:
+                status = "product-target"
             elif resolution.exists:
                 status = "present"
             elif optional_missing_link_reason(inventory, link.target):
@@ -345,6 +360,8 @@ def _fan_in_records(inventory: Inventory, records: tuple[ProjectionLinkRecord, .
             status = "missing"
         elif "missing-optional" in statuses or "pattern-missing" in statuses:
             status = "missing-optional"
+        elif "product-target" in statuses:
+            status = "product-target"
         else:
             status = "present"
         fan_in.append(
@@ -452,7 +469,7 @@ def _relationship_edge(
     normalized = _normalized_relationship_target(target, relation)
     if not normalized:
         return None
-    status = _relationship_target_status(inventory, normalized, roadmap_item_ids)
+    status = _relationship_target_status(inventory, normalized, roadmap_item_ids, relation)
     return ProjectionRelationshipEdge(
         source=source,
         target=normalized,
@@ -472,7 +489,7 @@ def _normalized_relationship_target(target: str, relation: str) -> str:
     return normalized_link_path(clean) or clean
 
 
-def _relationship_target_status(inventory: Inventory, target: str, roadmap_item_ids: set[str]) -> str:
+def _relationship_target_status(inventory: Inventory, target: str, roadmap_item_ids: set[str], relation: str = "") -> str:
     if target.startswith("project/roadmap.md#"):
         item_id = target.split("#", 1)[1]
         return "present" if item_id in roadmap_item_ids else "missing"
@@ -482,11 +499,76 @@ def _relationship_target_status(inventory: Inventory, target: str, roadmap_item_
         rel_target = _root_relative_link_path(inventory, target)
         if rel_target is not None:
             target = rel_target
+    if relation == "target_artifacts" and _is_product_target_artifact_rel(target):
+        return "product-target"
     if target in inventory.surface_by_rel:
         return "present" if inventory.surface_by_rel[target].exists else "missing"
     if (inventory.root / target).exists():
         return "present"
     return "missing"
+
+
+def product_target_artifact_reason(inventory: Inventory, surface: Surface, target: str, line: int | None) -> str | None:
+    rel = normalized_link_path(target)
+    if not rel:
+        return None
+    root_rel = _root_relative_link_path(inventory, rel)
+    if root_rel is not None:
+        rel = root_rel
+
+    if inventory.root_kind != "live_operating_root" or not _is_product_target_artifact_rel(rel):
+        return None
+    if not _line_has_product_target_context(surface, line):
+        return None
+
+    product_root = _configured_product_root(inventory)
+    if product_root:
+        return (
+            f"{rel} is product-source target metadata; product files are not required inside this live operating root; "
+            f"configured product source root: {product_root}"
+        )
+    return f"{rel} is product-source target metadata; product files are not required inside this live operating root"
+
+
+def _is_product_target_artifact_rel(rel: str) -> bool:
+    normalized = normalized_link_path(rel).strip("/")
+    if normalized in PRODUCT_TARGET_ARTIFACT_NAMES:
+        return True
+    return any(normalized.startswith(prefix) for prefix in PRODUCT_TARGET_ARTIFACT_PREFIXES)
+
+
+def _line_has_product_target_context(surface: Surface, line: int | None) -> bool:
+    if line is None or line < 1:
+        return False
+    lines = surface.content.splitlines()
+    if line > len(lines):
+        return False
+    current = lines[line - 1].casefold()
+    if any(marker in current for marker in ("target_artifacts", "target artifact", "target-artifact", "product source", "product-source", "product root", "product-root")):
+        return True
+    return _frontmatter_key_for_line(lines, line) == "target_artifacts"
+
+
+def _frontmatter_key_for_line(lines: list[str], line: int) -> str:
+    if not lines or lines[0].strip() != "---":
+        return ""
+    key = ""
+    for index, raw_line in enumerate(lines[1:], start=2):
+        stripped = raw_line.strip()
+        if stripped == "---":
+            break
+        if index > line:
+            break
+        match = re.match(r"^([A-Za-z0-9_-]+):", raw_line)
+        if match:
+            key = match.group(1)
+    return key
+
+
+def _configured_product_root(inventory: Inventory) -> str:
+    state = inventory.state
+    state_data = state.frontmatter.data if state and state.exists else {}
+    return str(state_data.get("product_source_root") or state_data.get("projection_root") or "").strip()
 
 
 def _relationship_values(value: object) -> tuple[str, ...]:

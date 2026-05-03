@@ -133,6 +133,7 @@ def build_parser() -> argparse.ArgumentParser:
     incubate_note = incubate.add_mutually_exclusive_group(required=True)
     incubate_note.add_argument("--note", help="Explicit incubation note text to record.")
     incubate_note.add_argument("--note-file", dest="note_file", help="Read explicit incubation note text from a UTF-8 file; use - for stdin.")
+    incubate.add_argument("--fix-candidate", action="store_true", help="Prefix the note with [MLH-Fix-Candidate] if it is not already tagged.")
     plan = subparsers.add_parser(
         "plan",
         help=argparse.SUPPRESS,
@@ -166,6 +167,7 @@ def build_parser() -> argparse.ArgumentParser:
     writeback.add_argument("--active-phase", dest="active_phase", help="Lifecycle active_phase value to write to project-state frontmatter.")
     writeback.add_argument("--phase-status", dest="phase_status", help="Lifecycle phase_status value to write to project-state frontmatter.")
     writeback.add_argument("--last-archived-plan", dest="last_archived_plan", help="Lifecycle last_archived_plan value to write to project-state frontmatter.")
+    writeback.add_argument("--product-source-root", dest="product_source_root", help="Structured product_source_root value to write to project-state frontmatter.")
     writeback.add_argument("--archive-active-plan", action="store_true", help="Move the active implementation plan to the canonical archive and close the active lifecycle pointer.")
     writeback.add_argument("--from-active-plan", action="store_true", help="Harvest closeout facts from the active plan Closeout Summary/Facts/Fields section.")
     writeback.add_argument("--compact-only", action="store_true", help="Only preview or apply safe project-state history compaction.")
@@ -211,6 +213,8 @@ def build_parser() -> argparse.ArgumentParser:
     memory_hygiene.add_argument("--archive-to", dest="archive_to", help="Explicit root-relative archive target under project/archive/reference/research or incubation.")
     memory_hygiene.add_argument("--repair-links", action="store_true", help="Repair exact root-relative source path references to the archive path.")
     memory_hygiene.add_argument("--scan", action="store_true", help="Read-only relationship hygiene scan; valid with --dry-run.")
+    memory_hygiene.add_argument("--archive-covered", action="store_true", help="For incubation notes, derive an archive target and require terminal Entry Coverage before archive.")
+    memory_hygiene.add_argument("--entry-coverage", dest="entry_coverage", action="append", default=[], help="Terminal Entry Coverage bullet value `<entry-id>: <status> <destination>`; may be repeated.")
     roadmap = subparsers.add_parser(
         "roadmap",
         help=argparse.SUPPRESS,
@@ -487,6 +491,7 @@ def main(argv: list[str] | None = None) -> int:
             active_phase=args.active_phase,
             phase_status=args.phase_status,
             last_archived_plan=args.last_archived_plan,
+            product_source_root=args.product_source_root,
         )
         report_name = "writeback --apply" if args.apply else "writeback --dry-run"
         if args.compact_only:
@@ -509,7 +514,16 @@ def main(argv: list[str] | None = None) -> int:
         print(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
         return 2 if args.apply and result == "error" else 0
     if command == "memory-hygiene":
-        request = make_memory_hygiene_request(args.source, args.promoted_to, args.status, args.archive_to, args.repair_links, args.scan)
+        request = make_memory_hygiene_request(
+            args.source,
+            args.promoted_to,
+            args.status,
+            args.archive_to,
+            args.repair_links,
+            args.scan,
+            args.archive_covered,
+            tuple(args.entry_coverage),
+        )
         report_name = "memory-hygiene --apply" if args.apply else "memory-hygiene --dry-run"
         findings = memory_hygiene_apply_findings(inventory, request) if args.apply else memory_hygiene_dry_run_findings(inventory, request)
         result = _result_for(findings)
@@ -555,7 +569,7 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
             note_text = note_result[0]
             note_source = f"--note-file {args.note_file}"
-        request = make_incubate_request(args.topic, note_text, note_source)
+        request = make_incubate_request(args.topic, note_text, note_source, fix_candidate=args.fix_candidate)
         report_name = "incubate --apply" if args.apply else "incubate --dry-run"
         findings = incubate_apply_findings(inventory, request) if args.apply else incubate_dry_run_findings(inventory, request)
         result = _result_for(findings)

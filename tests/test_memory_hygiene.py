@@ -245,6 +245,64 @@ class MemoryHygieneTests(unittest.TestCase):
             self.assertIn("relationship-semantic-split-suggestion", rendered)
             self.assertIn("heuristic no-write suggestion", rendered)
 
+    def test_archive_covered_writes_entry_coverage_and_archives_in_one_apply(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            source = make_mixed_incubation_source(root)
+            archive_rel = f"project/archive/reference/incubation/{date.today().isoformat()}-mixed-idea.md"
+
+            dry_output = io.StringIO()
+            before = snapshot_tree(root)
+            with redirect_stdout(dry_output):
+                dry_code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "memory-hygiene",
+                        "--dry-run",
+                        "--source",
+                        "project/plan-incubation/mixed-idea.md",
+                        "--archive-covered",
+                        "--entry-coverage",
+                        "2026-05-01: implemented via project/archive/plans/first.md",
+                        "--entry-coverage",
+                        "2026-05-02: rejected out of scope",
+                        "--repair-links",
+                    ]
+                )
+            self.assertEqual(dry_code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("memory-hygiene-entry-coverage-plan", dry_output.getvalue())
+            self.assertIn("memory-hygiene-archive-covered", dry_output.getvalue())
+
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                apply_code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "memory-hygiene",
+                        "--apply",
+                        "--source",
+                        "project/plan-incubation/mixed-idea.md",
+                        "--archive-covered",
+                        "--entry-coverage",
+                        "2026-05-01: implemented via project/archive/plans/first.md",
+                        "--entry-coverage",
+                        "2026-05-02: rejected out of scope",
+                        "--repair-links",
+                    ]
+                )
+
+            self.assertEqual(apply_code, 0)
+            self.assertFalse(source.exists())
+            archived_text = (root / archive_rel).read_text(encoding="utf-8")
+            self.assertIn('status: "archived"', archived_text)
+            self.assertIn("## Entry Coverage", archived_text)
+            self.assertIn("- `2026-05-01`: `implemented` via project/archive/plans/first.md", archived_text)
+            self.assertIn("- `2026-05-02`: `rejected` out of scope", archived_text)
+            self.assertIn("memory-hygiene-archived", apply_output.getvalue())
+
     def test_writeback_archives_multi_entry_incubation_when_entry_coverage_is_terminal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_active_live_root(Path(tmp))

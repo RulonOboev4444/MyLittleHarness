@@ -34,6 +34,7 @@ class IncubateRequest:
     topic: str
     note: str
     note_source: str = "--note"
+    fix_candidate: bool = False
 
 
 @dataclass(frozen=True)
@@ -46,8 +47,16 @@ class IncubationTarget:
     path: Path
 
 
-def make_incubate_request(topic: str | None, note: str | None, note_source: str = "--note") -> IncubateRequest:
-    return IncubateRequest(topic=_normalized_text(topic), note=_normalized_note(note), note_source=note_source)
+def make_incubate_request(topic: str | None, note: str | None, note_source: str = "--note", fix_candidate: bool = False) -> IncubateRequest:
+    normalized_note = _normalized_note(note)
+    if fix_candidate:
+        normalized_note = _fix_candidate_note(normalized_note)
+    return IncubateRequest(
+        topic=_normalized_text(topic),
+        note=normalized_note,
+        note_source=note_source,
+        fix_candidate=fix_candidate,
+    )
 
 
 def incubate_dry_run_findings(inventory: Inventory, request: IncubateRequest) -> list[Finding]:
@@ -71,6 +80,8 @@ def incubate_dry_run_findings(inventory: Inventory, request: IncubateRequest) ->
         return findings
     assert target is not None
     findings.append(_note_body_finding(target))
+    if request.fix_candidate:
+        findings.append(Finding("info", "incubate-fix-candidate", "would record note with [MLH-Fix-Candidate] tag", target.rel_path))
     findings.append(_note_posture_finding(target, apply=False))
     findings.extend(_boundary_findings())
     findings.append(
@@ -107,6 +118,7 @@ def incubate_apply_findings(inventory: Inventory, request: IncubateRequest) -> l
         _root_posture_finding(inventory),
         *_target_findings(target, apply=True),
         _note_body_finding(target),
+        *([Finding("info", "incubate-fix-candidate", "recorded note with [MLH-Fix-Candidate] tag", target.rel_path)] if request.fix_candidate else []),
         _note_posture_finding(target, apply=True, existed=existed),
         *_boundary_findings(),
         Finding(
@@ -304,6 +316,12 @@ def _normalized_text(value: object) -> str:
 
 def _normalized_note(value: object) -> str:
     return str(value or "").strip()
+
+
+def _fix_candidate_note(note: str) -> str:
+    if note.lstrip().startswith("[MLH-Fix-Candidate]"):
+        return note
+    return f"[MLH-Fix-Candidate] {note}".strip()
 
 
 def _yaml_double_quoted_value(value: str) -> str:

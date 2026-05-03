@@ -5,15 +5,17 @@ import re
 
 CURRENT_FOCUS_BEGIN = "<!-- BEGIN mylittleharness-current-focus v1 -->"
 CURRENT_FOCUS_END = "<!-- END mylittleharness-current-focus v1 -->"
+MEMORY_ROADMAP_BEGIN = "<!-- BEGIN mylittleharness-memory-routing-roadmap v1 -->"
+MEMORY_ROADMAP_END = "<!-- END mylittleharness-memory-routing-roadmap v1 -->"
 DEFAULT_ACTIVE_PLAN_REL = "project/implementation-plan.md"
 
 
 def sync_current_focus_block(text: str) -> str:
-    block = _render_current_focus_block(_frontmatter_scalars(text))
+    fields = _frontmatter_scalars(text)
+    block = _render_current_focus_block(fields)
     replaced = _replace_existing_focus_block(text, block)
-    if replaced is not None:
-        return replaced
-    return _insert_focus_block(text, block)
+    updated = replaced if replaced is not None else _insert_focus_block(text, block)
+    return _sync_memory_routing_roadmap_block(updated, fields)
 
 
 def _render_current_focus_block(fields: dict[str, str]) -> str:
@@ -76,6 +78,53 @@ def _insert_focus_block(text: str, block: str) -> str:
 
     separator = "" if text.endswith(("\n", "\r")) else "\n"
     return text + separator + "\n## Current Focus\n\n" + block
+
+
+def _sync_memory_routing_roadmap_block(text: str, fields: dict[str, str]) -> str:
+    block = _render_memory_routing_roadmap_block(fields)
+    replaced = _replace_existing_memory_roadmap_block(text, block)
+    if replaced is not None:
+        return replaced
+    return _replace_memory_roadmap_section_body(text, block)
+
+
+def _render_memory_routing_roadmap_block(fields: dict[str, str]) -> str:
+    plan_status = fields.get("plan_status", "")
+    active_plan = fields.get("active_plan", "") or DEFAULT_ACTIVE_PLAN_REL
+    last_archived_plan = fields.get("last_archived_plan", "")
+    lines = [MEMORY_ROADMAP_BEGIN]
+    lines.append("Accepted-work sequencing lives in `project/roadmap.md`; use roadmap item metadata for queued, active, done, and archived status.")
+    if plan_status == "active":
+        lines.append(f"Current active-plan pointer: `{active_plan}`.")
+    elif last_archived_plan:
+        lines.append(f"Last archived plan pointer: `{last_archived_plan}`.")
+    else:
+        lines.append("No active-plan pointer is currently open.")
+    lines.append("Project-state lifecycle frontmatter remains the continuation authority; roadmap prose here is only a hot pointer.")
+    lines.append(MEMORY_ROADMAP_END)
+    return "\n".join(lines) + "\n"
+
+
+def _replace_existing_memory_roadmap_block(text: str, block: str) -> str | None:
+    begin_index = text.rfind(MEMORY_ROADMAP_BEGIN)
+    end_index = text.rfind(MEMORY_ROADMAP_END)
+    if begin_index == -1 or end_index == -1 or end_index <= begin_index:
+        return None
+    end_after = end_index + len(MEMORY_ROADMAP_END)
+    if end_after < len(text) and text[end_after : end_after + 2] == "\r\n":
+        end_after += 2
+    elif end_after < len(text) and text[end_after : end_after + 1] == "\n":
+        end_after += 1
+    return text[:begin_index] + block + text[end_after:]
+
+
+def _replace_memory_roadmap_section_body(text: str, block: str) -> str:
+    lines = text.splitlines(keepends=True)
+    heading_index = _heading_index(lines, "Memory Routing Roadmap", level=2)
+    if heading_index is None:
+        return text
+    section_end = _section_end_index(lines, heading_index, level=2)
+    return "".join(lines[: heading_index + 1] + ["\n", block, "\n"] + lines[section_end:])
 
 
 def _heading_index(lines: list[str], title: str, level: int) -> int | None:

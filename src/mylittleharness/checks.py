@@ -21,7 +21,7 @@ from .inventory import (
 )
 from .models import Finding
 from .memory_hygiene import relationship_hygiene_scan_findings
-from .projection import Projection, ProjectionLinkRecord, build_projection
+from .projection import Projection, ProjectionLinkRecord, build_projection, product_target_artifact_reason
 from .projection_artifacts import (
     ARTIFACT_DIR_REL,
     build_projection_artifacts,
@@ -131,6 +131,7 @@ EXPECTED_PRODUCT_NAME = "MyLittleHarness"
 EXPECTED_PRODUCT_ROOT_ROLE = "product-source"
 EXPECTED_PRODUCT_FIXTURE_STATUS = "product-compatibility-fixture"
 ROOT_RELATIVE_LINK_PREFIXES = (
+    ".mylittleharness/",
     ".agents/",
     ".codex/",
     "docs/",
@@ -768,6 +769,18 @@ def audit_link_findings(inventory: Inventory) -> list[Finding]:
                 continue
             if resolution.kind == "pattern":
                 if not resolution.exists:
+                    product_target_reason = product_target_artifact_reason(inventory, surface, link.target, link.line)
+                    if product_target_reason:
+                        findings.append(
+                            Finding(
+                                "info",
+                                "product-target-artifact",
+                                f"{link.target} is not present in the operating root; {product_target_reason}",
+                                surface.rel_path,
+                                link.line,
+                            )
+                        )
+                        continue
                     findings.append(
                         Finding(
                             "info",
@@ -779,6 +792,18 @@ def audit_link_findings(inventory: Inventory) -> list[Finding]:
                     )
                 continue
             if not resolution.exists:
+                product_target_reason = product_target_artifact_reason(inventory, surface, link.target, link.line)
+                if product_target_reason:
+                    findings.append(
+                        Finding(
+                            "info",
+                            "product-target-artifact",
+                            f"{link.target} is not present in the operating root; {product_target_reason}",
+                            surface.rel_path,
+                            link.line,
+                        )
+                    )
+                    continue
                 optional_reason = _optional_missing_link_reason(inventory, link.target)
                 if optional_reason:
                     findings.append(
@@ -5002,7 +5027,34 @@ def _state_findings(inventory: Inventory) -> list[Finding]:
     for key in ("project", "workflow", "operating_mode", "plan_status"):
         if not state.frontmatter.data.get(key):
             findings.append(Finding("error", "state-frontmatter-field", f"project-state.md missing frontmatter key: {key}", state.rel_path))
+    if inventory.root_kind == "live_operating_root":
+        findings.extend(_live_product_source_root_findings(inventory, state))
     return findings
+
+
+def _live_product_source_root_findings(inventory: Inventory, state: Surface) -> list[Finding]:
+    value = state.frontmatter.data.get("product_source_root")
+    if not value:
+        return []
+    text = _display_path_value(str(value)).strip()
+    try:
+        candidate = Path(text).expanduser()
+        if not candidate.is_absolute():
+            candidate = inventory.root / candidate
+        resolved = candidate.resolve()
+    except (OSError, RuntimeError) as exc:
+        return [Finding("warn", "product-source-root-invalid", f"product_source_root could not be resolved: {exc}", state.rel_path)]
+    try:
+        root_resolved = inventory.root.resolve()
+    except (OSError, RuntimeError):
+        root_resolved = inventory.root
+    if not resolved.exists():
+        return [Finding("warn", "product-source-root-missing", f"product_source_root does not exist: {text}", state.rel_path)]
+    if not resolved.is_dir():
+        return [Finding("warn", "product-source-root-invalid", f"product_source_root is not a directory: {text}", state.rel_path)]
+    if str(resolved).casefold() == str(root_resolved).casefold():
+        return [Finding("warn", "product-source-root-invalid", "product_source_root points at the operating root", state.rel_path)]
+    return [Finding("info", "product-source-root-ok", f"product_source_root exists: {resolved}", state.rel_path)]
 
 
 def _has_read_only_state_assignments(state: Surface) -> bool:
@@ -6305,6 +6357,8 @@ def _optional_missing_link_reason(inventory: Inventory, target: str) -> str | No
 
     if rel == DETACH_MARKER_REL_PATH:
         return "detach marker is created only in eligible live operating roots and is absent from the product source fixture"
+    if rel == ".mylittleharness/generated/projection" or rel.startswith(".mylittleharness/generated/projection/"):
+        return "generated projection artifacts are disposable navigation output and may be rebuilt when needed"
     if rel == "project/plan-incubation" or rel.startswith("project/plan-incubation/"):
         return "plan incubation surfaces are optional and only exist when a lane is open"
     if rel in {DOCMAP_REPAIR_COPY_REL, STATE_FRONTMATTER_COPY_REL}:

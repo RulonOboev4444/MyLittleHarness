@@ -287,6 +287,8 @@ class PackageMetadataTests(unittest.TestCase):
             "`check --deep` is read-only",
             "optional `project/roadmap.md` sequencing",
             "`check --focus validation|links|context|hygiene|grain` is read-only",
+            "product-source target artifact references",
+            "product-target-artifact",
             "report-only grain diagnostics",
             "`intelligence --focus routes` renders compact source inventory plus `Boundary` and `Lifecycle Routes` only",
             "auto-compaction posture",
@@ -294,11 +296,13 @@ class PackageMetadataTests(unittest.TestCase):
             "compact-only state-history compaction",
             "project/archive/reference/project-state-history-YYYY-MM-DD",
             "explicit ready-for-closeout `writeback --apply --phase-status complete`",
+            "`--product-source-root <path>`",
             "`writeback --dry-run --compact-only`",
             "`incubate --dry-run --topic <topic> --note <note>`",
             "`incubate --apply --topic <topic> --note <note>`",
             "`--note-file <path>`",
             "`--note-file -`",
+            "`--fix-candidate`",
             "`plan --dry-run --title <title> --objective <objective>`",
             "`plan --apply --title <title> --objective <objective>`",
             "--roadmap-item <id>",
@@ -320,6 +324,7 @@ class PackageMetadataTests(unittest.TestCase):
             "memory-hygiene --dry-run --source <rel>",
             "`memory-hygiene --apply`",
             "memory-hygiene --dry-run --scan",
+            "`--archive-covered --entry-coverage <entry-id: status destination>`",
             "roadmap --dry-run --action add --item-id <id>",
             "`roadmap --apply`",
             "reciprocal source-incubation",
@@ -343,10 +348,15 @@ class PackageMetadataTests(unittest.TestCase):
         self.assertIn("hidden bounded roadmap item mutation rail", pyproject["project"]["description"])
         self.assertIn("advisory execution-slice fields", pyproject["project"]["description"])
         self.assertIn("relationship hygiene scan diagnostics", pyproject["project"]["description"])
+        self.assertIn("product-target artifact status", pyproject["project"]["description"])
         self.assertIn("coverage-aware incubation auto-archive", pyproject["project"]["description"])
         self.assertIn("text audit and entry coverage suggestions", pyproject["project"]["description"])
         self.assertIn("reciprocal source-incubation metadata", pyproject["project"]["description"])
         self.assertIn("hidden plan/writeback roadmap relationship sync", pyproject["project"]["description"])
+        self.assertIn("project-state closeout authority fallback", pyproject["project"]["description"])
+        self.assertIn("product_source_root writeback", pyproject["project"]["description"])
+        self.assertIn("fix-candidate tagging", pyproject["project"]["description"])
+        self.assertIn("archive-covered Entry Coverage transactions", pyproject["project"]["description"])
         self.assertIn("plan-identity carry/replace guardrail", pyproject["project"]["description"])
         self.assertIn("post-writeback and compact-only state compaction", pyproject["project"]["description"])
         self.assertIn("optional proof/evidence route records", pyproject["project"]["description"])

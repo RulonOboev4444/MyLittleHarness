@@ -28,7 +28,7 @@ CLOSEOUT_WRITEBACK_FIELDS = (
     "carry_forward",
 )
 CLOSEOUT_IDENTITY_FIELDS = ("plan_id", "active_plan", "archived_plan")
-LIFECYCLE_WRITEBACK_FIELDS = ("active_phase", "phase_status", "last_archived_plan")
+LIFECYCLE_WRITEBACK_FIELDS = ("active_phase", "phase_status", "last_archived_plan", "product_source_root")
 DOCS_DECISION_VALUES = {"updated", "not-needed", "uncertain"}
 PHASE_STATUS_VALUES = {"pending", "active", "in_progress", "blocked", "complete", "skipped", "paused"}
 PHASE_BODY_COMPLETE_STATUS = "done"
@@ -550,6 +550,9 @@ def _writeback_preflight_errors(inventory: Inventory, request: WritebackRequest)
                 f"phase_status is {phase_status!r}; expected one of: active, blocked, complete, in_progress, paused, pending, skipped",
             )
         )
+    product_source_root = request.lifecycle.get("product_source_root")
+    if product_source_root:
+        errors.extend(_product_source_root_errors(inventory, product_source_root))
     errors.extend(_writeback_root_state_preflight_errors(inventory))
     if request.compact_only:
         return errors
@@ -582,29 +585,68 @@ def _writeback_request_with_active_plan_facts(
             Finding("error", "writeback-refused", "--from-active-plan requires a readable active plan", DEFAULT_PLAN_REL)
         ]
     facts = active_plan_body_facts(plan)
-    if not facts:
-        return request, [], [
-            Finding(
-                "error",
-                "writeback-refused",
-                "--from-active-plan found no closeout facts in an explicit Closeout Summary/Facts/Fields section",
-                source,
-            )
-        ]
-    harvested = {field: fact.value for field, fact in facts.items()}
+    state_fallback = False
+    finding_source = source
+    if facts:
+        harvested = {field: fact.value for field, fact in facts.items()}
+    else:
+        harvested, fallback_errors = _state_closeout_authority_facts(inventory)
+        if fallback_errors:
+            return request, [], fallback_errors
+        state_fallback = True
+        finding_source = inventory.state.rel_path if inventory.state else DEFAULT_STATE_REL
     merged = dict(harvested)
     merged.update(request.closeout)
     fields = ", ".join(field for field in CLOSEOUT_WRITEBACK_FIELDS if field in harvested)
     override_fields = ", ".join(field for field in CLOSEOUT_WRITEBACK_FIELDS if field in request.closeout and field in harvested)
     verb = "harvested" if apply else "would harvest"
-    message = f"{verb} closeout facts from active plan: {fields}"
+    origin = "project-state closeout authority" if state_fallback else "active plan"
+    message = f"{verb} closeout facts from {origin}: {fields}"
     if override_fields:
         message += f"; same-request fields override harvested values: {override_fields}"
     return (
         replace(request, closeout=_ordered_closeout_values(merged)),
-        [Finding("info", "writeback-from-active-plan", message, source)],
+        [Finding("info", "writeback-from-active-plan", message, finding_source)],
         [],
     )
+
+
+def _state_closeout_authority_facts(inventory: Inventory) -> tuple[dict[str, str], list[Finding]]:
+    facts = state_writeback_facts(inventory.state)
+    harvested = {field: fact.value for field, fact in facts.items()}
+    source = inventory.state.rel_path if inventory.state else DEFAULT_STATE_REL
+    if not harvested:
+        return {}, [
+            Finding(
+                "error",
+                "writeback-refused",
+                "--from-active-plan found no closeout facts in an explicit Closeout Summary/Facts/Fields section or the project-state closeout authority block",
+                source,
+            )
+        ]
+    if not closeout_values_are_complete(harvested):
+        return {}, [
+            Finding(
+                "error",
+                "writeback-refused",
+                "--from-active-plan fallback found incomplete project-state closeout facts; supply complete closeout facts explicitly",
+                source,
+            )
+        ]
+
+    existing_identity = _identity_from_facts(state_writeback_identity_facts(inventory.state))
+    current_identity = _current_closeout_identity(inventory, None)
+    if not _closeout_identity_matches(existing_identity, current_identity):
+        return {}, [
+            Finding(
+                "error",
+                "writeback-refused",
+                "--from-active-plan fallback refused project-state closeout facts because recorded identity "
+                f"{_closeout_identity_summary(existing_identity)} does not match current identity {_closeout_identity_summary(current_identity)}",
+                source,
+            )
+        ]
+    return harvested, []
 
 
 def _writeback_root_state_preflight_errors(inventory: Inventory) -> list[Finding]:
@@ -646,6 +688,28 @@ def _writeback_root_state_preflight_errors(inventory: Inventory) -> list[Finding
         errors.append(Finding("error", "writeback-refused", "project-state.md frontmatter is malformed", state.rel_path))
     elif not state.path.is_file():
         errors.append(Finding("error", "writeback-refused", "project-state.md is not a regular file", state.rel_path))
+    return errors
+
+
+def _product_source_root_errors(inventory: Inventory, value: str) -> list[Finding]:
+    errors: list[Finding] = []
+    if "\n" in value or "\r" in value:
+        errors.append(Finding("error", "writeback-refused", "--product-source-root must be a one-line path value"))
+        return errors
+    try:
+        candidate = Path(value).expanduser()
+        if not candidate.is_absolute():
+            candidate = inventory.root / candidate
+        resolved = candidate.resolve()
+    except (OSError, RuntimeError) as exc:
+        errors.append(Finding("error", "writeback-refused", f"--product-source-root could not be resolved: {exc}"))
+        return errors
+    if not resolved.exists():
+        errors.append(Finding("error", "writeback-refused", f"--product-source-root does not exist: {value}"))
+    elif not resolved.is_dir():
+        errors.append(Finding("error", "writeback-refused", f"--product-source-root is not a directory: {value}"))
+    elif str(resolved).casefold() == str(inventory.root.resolve()).casefold():
+        errors.append(Finding("error", "writeback-refused", "--product-source-root must not point at the operating root"))
     return errors
 
 

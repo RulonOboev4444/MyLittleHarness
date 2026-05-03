@@ -10,7 +10,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from mylittleharness.inventory import EXPECTED_SPEC_NAMES, load_inventory
 from mylittleharness.projection import build_projection
-from tests.test_cli import make_root, write_sample_roadmap
+from tests.test_cli import make_operating_root, make_root, write_sample_roadmap
 
 
 class ProjectionTests(unittest.TestCase):
@@ -76,6 +76,70 @@ class ProjectionTests(unittest.TestCase):
             )
             self.assertGreater(projection.summary.relationship_node_count, 0)
             self.assertGreater(projection.summary.relationship_edge_count, 0)
+
+    def test_projection_classifies_live_root_product_target_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            (root / "project/implementation-plan.md").write_text(
+                "---\n"
+                'plan_id: "cross-root"\n'
+                "target_artifacts:\n"
+                '  - "src/mylittleharness/checks.py"\n'
+                '  - "tests/test_cli.py"\n'
+                "---\n"
+                "# Plan\n\n"
+                "## Slice Contract\n\n"
+                "- target_artifacts: `src/mylittleharness/projection.py`\n",
+                encoding="utf-8",
+            )
+            (root / "project/roadmap.md").write_text(
+                "# Roadmap\n\n"
+                "## Items\n\n"
+                "### Product Target Diagnostics\n\n"
+                "- `id`: `product-target-diagnostics`\n"
+                "- `status`: `accepted`\n"
+                "- `target_artifacts`: `[\"src/mylittleharness/planning.py\", \"README.md\"]`\n",
+                encoding="utf-8",
+            )
+
+            projection = build_projection(load_inventory(root))
+            product_links = {
+                record.target: record.status
+                for record in projection.links
+                if record.target
+                in {
+                    "src/mylittleharness/checks.py",
+                    "tests/test_cli.py",
+                    "src/mylittleharness/projection.py",
+                    "src/mylittleharness/planning.py",
+                    "README.md",
+                }
+            }
+            self.assertEqual(
+                {
+                    "src/mylittleharness/checks.py": "product-target",
+                    "tests/test_cli.py": "product-target",
+                    "src/mylittleharness/projection.py": "product-target",
+                    "src/mylittleharness/planning.py": "product-target",
+                    "README.md": "product-target",
+                },
+                product_links,
+            )
+
+            target_edges = [
+                edge
+                for edge in projection.relationship_edges
+                if edge.relation == "target_artifacts"
+                and edge.target
+                in {
+                    "src/mylittleharness/checks.py",
+                    "tests/test_cli.py",
+                    "src/mylittleharness/planning.py",
+                    "README.md",
+                }
+            ]
+            self.assertTrue(target_edges)
+            self.assertEqual({"product-target"}, {edge.status for edge in target_edges})
 
     def test_projection_reports_missing_and_unreadable_source_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

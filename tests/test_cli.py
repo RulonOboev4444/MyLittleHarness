@@ -2379,6 +2379,30 @@ class CliTests(unittest.TestCase):
             self.assertIn("Non-authority note: incubation is temporary synthesis", note_text)
             self.assertIn("First paragraph.\n\nSecond paragraph with detail.\n\n- bullet one\n- bullet two", note_text)
 
+    def test_incubate_fix_candidate_adds_standard_tag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "incubate",
+                        "--apply",
+                        "--topic",
+                        "Atomic meta feedback capture",
+                        "--note",
+                        "Capture the awkward workaround.",
+                        "--fix-candidate",
+                    ]
+                )
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("incubate-fix-candidate", rendered)
+            note_text = (root / "project/plan-incubation/atomic-meta-feedback-capture.md").read_text(encoding="utf-8")
+            self.assertIn("[MLH-Fix-Candidate] Capture the awkward workaround.", note_text)
+
     def test_incubate_apply_appends_same_topic_note_preserving_multiline_content(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp))
@@ -3182,6 +3206,25 @@ class CliTests(unittest.TestCase):
             self.assertEqual(before, snapshot_tree(root))
             self.assertIn("destructive VCS recovery", output.getvalue())
 
+    def test_writeback_records_and_validates_product_source_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp))
+            product_root = root / "product-source"
+            product_root.mkdir()
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "writeback", "--apply", "--product-source-root", str(product_root)])
+            self.assertEqual(code, 0)
+            state_text = (root / "project/project-state.md").read_text(encoding="utf-8")
+            stored_root = str(product_root).replace("\\", "\\\\")
+            self.assertIn(f'product_source_root: "{stored_root}"', state_text)
+
+            check_output = io.StringIO()
+            with redirect_stdout(check_output):
+                self.assertEqual(main(["--root", str(root), "check"]), 0)
+            self.assertIn("product-source-root-ok", check_output.getvalue())
+
     def test_writeback_archive_active_plan_dry_run_reports_plan_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_active_live_root(Path(tmp), phase_status="complete")
@@ -3513,6 +3556,57 @@ class CliTests(unittest.TestCase):
             self.assertIn("- docs_decision: updated", state_text)
             self.assertIn("- verification: targeted harvest test passed", state_text)
             self.assertIn("- residual_risk: none known", state_text)
+
+    def test_writeback_from_active_plan_falls_back_to_state_closeout_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="complete")
+            plan_path = root / "project/implementation-plan.md"
+            plan_path.write_text(
+                "---\n"
+                'plan_id: "state-harvest"\n'
+                'title: "State Harvest"\n'
+                "---\n"
+                "# State Harvest\n\n"
+                "## Verification Strategy\n\n"
+                "- No explicit Closeout Summary section here.\n",
+                encoding="utf-8",
+            )
+            state_path = root / "project/project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8")
+                + "\n## MLH Closeout Writeback\n\n"
+                "<!-- BEGIN mylittleharness-closeout-writeback v1 -->\n"
+                "- plan_id: state-harvest\n"
+                "- active_plan: project/implementation-plan.md\n"
+                "- worktree_start_state: dirty fixture\n"
+                "- task_scope: archive using state authority facts\n"
+                "- docs_decision: updated\n"
+                "- state_writeback: state authority facts are current\n"
+                "- verification: state fallback test passed\n"
+                "- commit_decision: manual commit policy\n"
+                "- residual_risk: none known\n"
+                "- carry_forward: no carry forward\n"
+                "<!-- END mylittleharness-closeout-writeback v1 -->\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            dry_run_output = io.StringIO()
+            with redirect_stdout(dry_run_output):
+                dry_code = main(["--root", str(root), "writeback", "--dry-run", "--archive-active-plan", "--from-active-plan"])
+            self.assertEqual(dry_code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("would harvest closeout facts from project-state closeout authority", dry_run_output.getvalue())
+
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                apply_code = main(["--root", str(root), "writeback", "--apply", "--archive-active-plan", "--from-active-plan"])
+            self.assertEqual(apply_code, 0)
+            self.assertIn("harvested closeout facts from project-state closeout authority", apply_output.getvalue())
+            self.assertFalse(plan_path.exists())
+            state_text = state_path.read_text(encoding="utf-8")
+            self.assertIn("- task_scope: archive using state authority facts", state_text)
+            self.assertIn("- verification: state fallback test passed", state_text)
 
     def test_transition_apply_completes_archives_and_opens_next_plan_after_review(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4998,6 +5092,23 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertIn("missing-link", output.getvalue())
 
+    def test_audit_links_resolves_root_relative_generated_projection_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            generated = root / ".mylittleharness/generated/projection/relationships.json"
+            generated.parent.mkdir(parents=True)
+            generated.write_text("[]\n", encoding="utf-8")
+            (root / "project/specs/workflow/workflow-memory-routing-spec.md").write_text(
+                "Generated relationship graph: `.mylittleharness/generated/projection/relationships.json`.\n",
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "audit-links"])
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertNotIn("missing-link: .mylittleharness/generated/projection/relationships.json", rendered)
+
     def test_audit_links_keeps_user_global_missing_reference_as_warning(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_operating_root(Path(tmp))
@@ -5013,6 +5124,46 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertIn("[WARN] missing-link", rendered)
             self.assertIn("%USERPROFILE%", rendered)
+
+    def test_audit_links_classifies_product_target_artifacts_for_live_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            (root / "README.md").write_text("See `src/mylittleharness/user-missing.py`.\n", encoding="utf-8")
+            (root / "project/implementation-plan.md").write_text(
+                "---\n"
+                'plan_id: "cross-root"\n'
+                "target_artifacts:\n"
+                '  - "src/mylittleharness/checks.py"\n'
+                '  - "tests/test_cli.py"\n'
+                "---\n"
+                "# Plan\n\n"
+                "## Slice Contract\n\n"
+                "- target_artifacts: `src/mylittleharness/projection.py`\n",
+                encoding="utf-8",
+            )
+            (root / "project/roadmap.md").write_text(
+                "# Roadmap\n\n"
+                "## Items\n\n"
+                "### Product Target Diagnostics\n\n"
+                "- `id`: `product-target-diagnostics`\n"
+                "- `status`: `accepted`\n"
+                "- `target_artifacts`: `[\"src/mylittleharness/planning.py\", \"README.md\"]`\n",
+                encoding="utf-8",
+            )
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "check", "--focus", "links"])
+            rendered = output.getvalue()
+
+            self.assertEqual(code, 0)
+            self.assertIn("product-target-artifact", rendered)
+            self.assertIn("product-source target metadata", rendered)
+            self.assertNotIn("[WARN] missing-link: src/mylittleharness/checks.py", rendered)
+            self.assertNotIn("[WARN] missing-link: tests/test_cli.py", rendered)
+            self.assertNotIn("[WARN] missing-link: src/mylittleharness/projection.py", rendered)
+            self.assertNotIn("[WARN] missing-link: src/mylittleharness/planning.py", rendered)
+            self.assertIn("[WARN] missing-link: src/mylittleharness/user-missing.py", rendered)
 
     def test_audit_links_treats_inactive_plan_as_lazy_surface(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
