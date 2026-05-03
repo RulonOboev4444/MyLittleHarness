@@ -28,6 +28,13 @@ LIVE_LIFECYCLE_ROUTES: tuple[MemoryRoute, ...] = (
         "authority",
     ),
     MemoryRoute(
+        "roadmap",
+        "project/roadmap.md",
+        "optional sequencing surface for accepted work between incubation and one active implementation plan",
+        "when planning/sequencing",
+        "sequencing advisory",
+    ),
+    MemoryRoute(
         "incubation",
         "project/plan-incubation/*.md",
         "temporary same-topic synthesis before research, spec, or plan promotion",
@@ -56,16 +63,23 @@ LIVE_LIFECYCLE_ROUTES: tuple[MemoryRoute, ...] = (
         "authority when accepted",
     ),
     MemoryRoute(
+        "adrs",
+        "project/adrs/*.md",
+        "material architecture decision records",
+        "explicit need",
+        "authority when accepted",
+    ),
+    MemoryRoute(
         "verification",
-        "active-plan verification block",
-        "default verification evidence surface; separate project/verification/*.md is future optional",
+        "active-plan verification block; project/verification/*.md",
+        "default verification evidence surface plus optional durable proof/evidence records",
         "at verification or closeout",
         "evidence",
     ),
     MemoryRoute(
         "closeout-writeback",
         "project/project-state.md MLH closeout writeback block",
-        "current closeout fact authority; active-plan copies are synchronized derived metadata",
+        "current closeout fact authority; explicit closeout active-plan copies are derived metadata",
         "at closeout",
         "authority",
     ),
@@ -82,13 +96,6 @@ LIVE_LIFECYCLE_ROUTES: tuple[MemoryRoute, ...] = (
         "optional docs routing aid for product docs and impact checks; not authority by itself",
         "by task",
         "advisory",
-    ),
-    MemoryRoute(
-        "future-optional",
-        "project/verification/*.md; project/adrs/*.md; reusable procedural surfaces",
-        "optional future lanes beyond first-class decision records; no required procedure/checklist path in this slice",
-        "explicit need",
-        "future route",
     ),
 )
 
@@ -113,13 +120,6 @@ SUPPORT_ROUTES: tuple[MemoryRoute, ...] = (
         "reusable product documentation and product contracts",
         "by task",
         "authority for product behavior",
-    ),
-    MemoryRoute(
-        "adrs",
-        "project/adrs/*.md",
-        "material architecture decision records",
-        "explicit need",
-        "authority when accepted",
     ),
     MemoryRoute(
         "generated-cache",
@@ -159,6 +159,7 @@ ROLE_TO_ROUTE_ID = {
     "package-mirror": "package-mirror",
     "product-doc": "product-docs",
     "project-state": "state",
+    "roadmap": "roadmap",
     "research": "research",
     "stable-spec": "stable-specs",
     "verification": "verification",
@@ -184,6 +185,7 @@ def classify_memory_route(rel_path: str, role: str = "") -> MemoryRoute:
         "readme.md": "orientation",
         "project/implementation-plan.md": "active-plan",
         "project/project-state.md": "state",
+        "project/roadmap.md": "roadmap",
     }
     route_id = exact.get(lowered)
     if route_id:

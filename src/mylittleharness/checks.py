@@ -20,9 +20,16 @@ from .inventory import (
     load_inventory,
 )
 from .models import Finding
+from .memory_hygiene import relationship_hygiene_scan_findings
 from .projection import Projection, ProjectionLinkRecord, build_projection
-from .projection_artifacts import ARTIFACT_DIR_REL, build_projection_artifacts, inspect_projection_artifacts, projection_artifact_path_query_findings
-from .projection_index import INDEX_REL_PATH, build_projection_index, full_text_search_findings, inspect_projection_index
+from .projection_artifacts import (
+    ARTIFACT_DIR_REL,
+    build_projection_artifacts,
+    inspect_projection_artifacts,
+    projection_artifact_path_query_findings,
+    rebuild_projection_artifacts,
+)
+from .projection_index import INDEX_REL_PATH, build_projection_index, full_text_search_findings, inspect_projection_index, rebuild_projection_index
 from .routes import ROUTE_BY_ID, classify_memory_route, lifecycle_route_rows
 from .writeback import (
     active_plan_body_facts,
@@ -41,9 +48,20 @@ LARGE_AGGREGATE_LINES = 2500
 LARGE_AGGREGATE_CHARS = 125_000
 SEARCH_RESULT_LIMIT = 20
 FAN_IN_RESULT_LIMIT = 20
+CURRENT_PHASE_ONLY_POLICY = "current-phase-only"
+AUTO_CONTINUE_STOP_COVERAGE = (
+    ("verification", ("verification", "deterministic success", "success signal")),
+    ("authority", ("docs", "api", "lifecycle authority", "root classification")),
+    ("write_scope", ("write scope", "write-scope", "execution slice")),
+    ("source_reality", ("source reality", "future phase", "dependency", "schema")),
+    ("sensitive_action", ("destructive", "sensitive")),
+    ("closeout_boundary", ("closeout", "archive", "next-slice", "next slice")),
+)
 
 PRODUCT_HYGIENE_OPERATIONAL_PREFIXES = {
     "project/implementation-plan.md": "active implementation plans live in the operating root",
+    "project/roadmap.md": "roadmaps live in the operating root",
+    "project/adrs": "ADR records live in the operating root",
     "project/decisions": "decision and do-not-revisit records live in the operating root",
     "project/archive": "archives and historical memory live in the operating root",
     "project/incubator": "legacy incubator notes must use canonical project/plan-incubation in the operating root",
@@ -237,14 +255,16 @@ PHASE_STATUS_VALUES = {
     "paused",
 }
 DOCS_DECISION_VALUES = {"updated", "not-needed", "uncertain"}
-ROUTE_METADATA_VALIDATED_ROUTES = {"adrs", "decisions", "incubation", "research", "stable-specs", "verification"}
+ROUTE_METADATA_VALIDATED_ROUTES = {"adrs", "decisions", "incubation", "research", "roadmap", "stable-specs", "verification"}
 ROUTE_METADATA_STATUS_VALUES = {
     "accepted",
     "active",
     "archived",
     "blocked",
     "complete",
+    "deferred",
     "distilled",
+    "done",
     "draft",
     "failed",
     "implemented",
@@ -273,12 +293,21 @@ ROUTE_METADATA_FLEXIBLE_PATH_FIELDS = {
     "related_docs",
     "related_incubation",
     "related_plan",
+    "related_roadmap",
     "related_research",
     "related_spec",
     "related_specs",
     "related_verification",
+    "archived_plan",
     "source_incubation",
+    "source_roadmap",
     "source_research",
+    "implemented_by",
+    "merged_from",
+    "merged_into",
+    "rejected_by",
+    "split_from",
+    "split_to",
     "superseded_by",
     "supersedes",
 }
@@ -288,6 +317,7 @@ ROUTE_METADATA_PROMOTION_TARGET_ROUTES = {
     "decisions",
     "operating-guardrails",
     "product-docs",
+    "roadmap",
     "stable-specs",
     "state",
     "verification",
@@ -373,8 +403,8 @@ def lifecycle_summary_findings(inventory: Inventory) -> list[Finding]:
                     "info",
                     "lifecycle-summary",
                     (
-                        f"active plan phase is complete{phase_label}; implementation work is not pending; "
-                        "next action is explicit closeout/writeback, archive, or manual commit per policy"
+                        f"active plan phase is complete{phase_label}; implementation work is not pending and the active plan is ready for explicit closeout/writeback; "
+                        "phase completion alone does not approve auto-continue, archive, roadmap done-status, next-slice opening, or commit"
                     ),
                     source,
                 )
@@ -384,7 +414,10 @@ def lifecycle_summary_findings(inventory: Inventory) -> list[Finding]:
                 Finding(
                     "info",
                     "lifecycle-summary",
-                    f"active plan is in progress{phase_label}; continue from project-state active_phase and phase_status",
+                    (
+                        f"active plan is in progress{phase_label}; current-phase-only default continues from "
+                        "project-state active_phase and stops after repo-visible state/evidence unless explicit auto_continue is safe"
+                    ),
                     source,
                 )
             ]
@@ -410,7 +443,10 @@ def lifecycle_summary_findings(inventory: Inventory) -> list[Finding]:
             Finding(
                 "info",
                 "lifecycle-summary",
-                f"active plan is open at {active_plan}; phase_status is {phase_status or 'not recorded'}",
+                (
+                    f"active plan is open at {active_plan}; phase_status is {phase_status or 'not recorded'}; "
+                    "current-phase-only default requires an explicit lifecycle decision before any next phase"
+                ),
                 source,
             )
         ]
@@ -575,10 +611,7 @@ def rule_context_findings(inventory: Inventory, include_ok: bool = True) -> list
             Finding(
                 "warn",
                 "rule-context-surface-large",
-                (
-                    f"{surface.rel_path}: primary instruction surface is {surface.line_count} lines, "
-                    f"{surface.char_count} chars, label={label}; use context-budget for section detail"
-                ),
+                _large_rule_context_message(inventory, surface, label),
                 surface.rel_path,
             )
         )
@@ -586,6 +619,16 @@ def rule_context_findings(inventory: Inventory, include_ok: bool = True) -> list
     if findings or not include_ok:
         return findings
     return [Finding("info", "rule-context-ok", "primary instruction surfaces are within check-level size thresholds")]
+
+
+def _large_rule_context_message(inventory: Inventory, surface: Surface, label: str) -> str:
+    message = (
+        f"{surface.rel_path}: primary instruction surface is {surface.line_count} lines, "
+        f"{surface.char_count} chars, label={label}; use context-budget for section detail"
+    )
+    if inventory.root_kind == "live_operating_root" and surface.rel_path == "project/project-state.md":
+        message += "; preview safe state compaction with writeback --dry-run --compact-only"
+    return message
 
 
 def remainder_drift_findings(inventory: Inventory, include_ok: bool = True) -> list[Finding]:
@@ -643,6 +686,8 @@ def context_budget_findings(inventory: Inventory) -> list[Finding]:
     start_surfaces = _start_path_surfaces(inventory)
     total_lines = 0
     total_chars = 0
+    warning_lines = 0
+    warning_chars = 0
 
     for surface in start_surfaces:
         if not surface.exists:
@@ -651,9 +696,12 @@ def context_budget_findings(inventory: Inventory) -> list[Finding]:
         chars = surface.char_count
         total_lines += lines
         total_chars += chars
+        if _context_budget_surface_can_warn(surface):
+            warning_lines += lines
+            warning_chars += chars
         token_estimate = max(1, chars // 4) if chars else 0
         label = _budget_label(lines, chars)
-        severity = "warn" if label in {"large", "very-large"} else "info"
+        severity = "warn" if label in {"large", "very-large"} and _context_budget_surface_can_warn(surface) else "info"
         findings.append(
             Finding(
                 severity,
@@ -674,7 +722,10 @@ def context_budget_findings(inventory: Inventory) -> list[Finding]:
             )
 
     aggregate_label = "large" if total_lines > LARGE_AGGREGATE_LINES or total_chars > LARGE_AGGREGATE_CHARS else "normal"
-    severity = "warn" if aggregate_label == "large" else "info"
+    warning_aggregate_label = (
+        "large" if warning_lines > LARGE_AGGREGATE_LINES or warning_chars > LARGE_AGGREGATE_CHARS else "normal"
+    )
+    severity = "warn" if warning_aggregate_label == "large" else "info"
     findings.insert(
         0,
         Finding(
@@ -684,6 +735,10 @@ def context_budget_findings(inventory: Inventory) -> list[Finding]:
         ),
     )
     return findings
+
+
+def _context_budget_surface_can_warn(surface: Surface) -> bool:
+    return surface.role not in {"product-doc", "stable-spec", "package-mirror"}
 
 
 def audit_link_findings(inventory: Inventory) -> list[Finding]:
@@ -859,8 +914,13 @@ def _intelligence_boundary_findings(
     full_text: str | None,
 ) -> list[Finding]:
     present_count = len(inventory.present_surfaces)
+    cache_posture = (
+        f"path/full-text navigation may refresh disposable generated projection cache inside {ARTIFACT_DIR_REL}"
+        if path_text not in (None, "") or full_text not in (None, "")
+        else "no generated projection cache refresh is needed for this invocation"
+    )
     return [
-        Finding("info", "intelligence-boundary", "terminal-only read-only report; no files, caches, databases, hooks, or adapters are written"),
+        Finding("info", "intelligence-boundary", f"terminal-only report; {cache_posture}; lifecycle authority files, hooks, adapters, snapshots, repairs, archives, and commits are not written"),
         Finding("info", "intelligence-root-kind", f"root kind: {inventory.root_kind}"),
         Finding("info", "intelligence-corpus", f"inventory corpus: {present_count}/{len(inventory.surfaces)} discovered surfaces present"),
         Finding("info", "intelligence-search-mode", f"case-sensitive exact/path matching plus optional source-verified full-text; active queries: {_intelligence_query_label(search_text, path_text, full_text)}"),
@@ -1117,6 +1177,7 @@ def _search_findings(
                 "exact text search reads direct source content through the in-memory projection; projection artifacts do not store source bodies",
             )
         )
+    notes.extend(_navigation_cache_maintenance_findings(inventory, projection, path_text, full_text))
     notes.extend(projection_artifact_path_query_findings(inventory, projection, path_text))
     notes.extend(full_text_search_findings(inventory, projection, full_text, limit))
 
@@ -1178,6 +1239,100 @@ def _search_findings(
     return notes + findings
 
 
+def _navigation_cache_maintenance_findings(
+    inventory: Inventory,
+    projection: Projection,
+    path_text: str | None,
+    full_text: str | None,
+) -> list[Finding]:
+    findings: list[Finding] = []
+    if path_text not in (None, ""):
+        findings.extend(_ensure_projection_artifacts_for_navigation(inventory, projection))
+    if full_text not in (None, ""):
+        findings.extend(_ensure_projection_index_for_navigation(inventory, projection))
+    return findings
+
+
+def _ensure_projection_artifacts_for_navigation(inventory: Inventory, projection: Projection) -> list[Finding]:
+    inspect_findings = inspect_projection_artifacts(inventory, projection)
+    blocking = _projection_cache_blocking_findings(inspect_findings, {"projection-artifact-missing"})
+    if not blocking:
+        return [
+            Finding(
+                "info",
+                "navigation-cache-artifacts-current",
+                "projection artifacts are current for path/reference navigation",
+                ARTIFACT_DIR_REL,
+            )
+        ]
+    reason = blocking[0]
+    refresh = rebuild_projection_artifacts(inventory)
+    findings = [
+        Finding(
+            "info",
+            "navigation-cache-artifacts-refresh",
+            f"refreshed disposable projection artifacts for path/reference navigation because {reason.code}",
+            reason.source or ARTIFACT_DIR_REL,
+            reason.line,
+        )
+    ]
+    findings.extend(refresh)
+    if any(finding.severity in {"warn", "error"} for finding in refresh):
+        findings.append(
+            Finding(
+                "info",
+                "navigation-cache-artifacts-degraded",
+                "projection artifact refresh degraded; direct in-memory path search remains authoritative",
+                ARTIFACT_DIR_REL,
+            )
+        )
+    return findings
+
+
+def _ensure_projection_index_for_navigation(inventory: Inventory, projection: Projection) -> list[Finding]:
+    inspect_findings = inspect_projection_index(inventory, projection)
+    blocking = _projection_cache_blocking_findings(inspect_findings, {"projection-index-missing"})
+    if not blocking:
+        return [
+            Finding(
+                "info",
+                "navigation-cache-index-current",
+                "SQLite FTS/BM25 projection index is current for full-text navigation",
+                INDEX_REL_PATH,
+            )
+        ]
+    reason = blocking[0]
+    refresh = rebuild_projection_index(inventory)
+    findings = [
+        Finding(
+            "info",
+            "navigation-cache-index-refresh",
+            f"refreshed disposable SQLite FTS/BM25 projection index for full-text navigation because {reason.code}",
+            reason.source or INDEX_REL_PATH,
+            reason.line,
+        )
+    ]
+    findings.extend(refresh)
+    if any(finding.severity in {"warn", "error"} for finding in refresh):
+        findings.append(
+            Finding(
+                "info",
+                "navigation-cache-index-degraded",
+                "SQLite projection index refresh degraded; direct exact/path search remains authoritative",
+                INDEX_REL_PATH,
+            )
+        )
+    return findings
+
+
+def _projection_cache_blocking_findings(findings: list[Finding], missing_codes: set[str]) -> list[Finding]:
+    return [
+        finding
+        for finding in findings
+        if finding.severity in {"warn", "error"} or finding.code in missing_codes
+    ]
+
+
 def _fan_in_findings(inventory: Inventory, projection: Projection) -> list[Finding]:
     if not projection.links:
         return [Finding("info", "fan-in-empty", "no repo-local references are available for fan-in analysis")]
@@ -1231,7 +1386,11 @@ def _projection_findings(inventory: Inventory, projection: Projection) -> list[F
         Finding(
             "info",
             "projection-record-counts",
-            f"source_records={summary.source_count}; link_records={summary.link_record_count}; fan_in_records={summary.fan_in_record_count}",
+            (
+                f"source_records={summary.source_count}; link_records={summary.link_record_count}; "
+                f"fan_in_records={summary.fan_in_record_count}; relationship_nodes={summary.relationship_node_count}; "
+                f"relationship_edges={summary.relationship_edge_count}"
+            ),
         ),
     ]
     provenance = _projection_provenance(projection)
@@ -1274,12 +1433,15 @@ def _unique_sorted(values) -> list[str]:
 def doctor_findings(root: Path, inventory: Inventory) -> list[Finding]:
     hygiene = product_hygiene_findings(inventory)
     hygiene_warnings = [finding for finding in hygiene if finding.severity in {"warn", "error"}]
+    relationship_hygiene = relationship_hygiene_scan_findings(inventory)
+    relationship_warnings = [finding for finding in relationship_hygiene if finding.severity in {"warn", "error"}]
     findings: list[Finding] = [
         Finding("info", "python", f"python: {sys.version.split()[0]}"),
         Finding("info", "root", f"root exists: {root}"),
     ]
     findings.extend(_git_findings(root))
     findings.extend(hygiene)
+    findings.extend(relationship_hygiene)
     validation = validation_findings(inventory)
     link_warnings = [finding for finding in audit_link_findings(inventory) if finding.severity in {"warn", "error"}]
     context_warnings = [finding for finding in context_budget_findings(inventory) if finding.severity in {"warn", "error"}]
@@ -1297,6 +1459,13 @@ def doctor_findings(root: Path, inventory: Inventory) -> list[Finding]:
             "warn" if hygiene_warnings else "info",
             "product-hygiene-summary",
             f"product hygiene warnings/errors: {len(hygiene_warnings)}",
+        )
+    )
+    findings.append(
+        Finding(
+            "warn" if relationship_warnings else "info",
+            "relationship-hygiene-summary",
+            f"relationship hygiene warnings/errors: {len(relationship_warnings)}",
         )
     )
     findings.append(
@@ -1719,6 +1888,10 @@ def attach_dry_run_findings(inventory: Inventory, project_name: str | None = Non
         return findings
 
     normalized_project = _normalize_project_name(project_name)
+    if _is_attach_already_attached_live_root(inventory, normalized_project):
+        findings.extend(_attach_already_attached_dry_run_findings())
+        return findings
+
     state_path = inventory.root / ATTACH_STATE_REL_PATH
     if not state_path.exists() and normalized_project is None:
         findings.append(
@@ -1785,6 +1958,9 @@ def attach_apply_findings(inventory: Inventory, project_name: str | None) -> lis
         ]
 
     normalized_project = _normalize_project_name(project_name)
+    if _is_attach_already_attached_live_root(inventory, normalized_project):
+        return _attach_already_attached_apply_findings()
+
     state_path = inventory.root / ATTACH_STATE_REL_PATH
     if not state_path.exists() and normalized_project is None:
         return [
@@ -1937,8 +2113,116 @@ def _attach_generated_projection_preflight_errors(inventory: Inventory) -> list[
     return errors
 
 
-def _attach_apply_preflight_errors(inventory: Inventory, project_name: str | None) -> list[Finding]:
+def _attach_already_attached_dry_run_findings() -> list[Finding]:
+    return [
+        Finding(
+            "info",
+            "attach-already-attached",
+            "already-attached live operating root: default workflow manifest and project-state authority are readable; no create-only attach changes are proposed",
+            ATTACH_STATE_REL_PATH,
+        ),
+        Finding("info", "attach-existing", f"existing workflow manifest authority: {ATTACH_MANIFEST_REL_PATH}", ATTACH_MANIFEST_REL_PATH),
+        Finding("info", "attach-existing", f"existing project-state authority: {ATTACH_STATE_REL_PATH}", ATTACH_STATE_REL_PATH),
+        Finding("info", "attach-proposal", "no-op: root is already attached; first-run template conflict checks and generated projection setup are skipped"),
+    ]
+
+
+def _attach_already_attached_apply_findings() -> list[Finding]:
+    return [
+        Finding(
+            "info",
+            "attach-already-attached",
+            "already-attached live operating root; attach --apply left repo-visible authority and generated projection output unchanged",
+            ATTACH_STATE_REL_PATH,
+        ),
+        Finding("info", "attach-existing", f"preserved workflow manifest authority: {ATTACH_MANIFEST_REL_PATH}", ATTACH_MANIFEST_REL_PATH),
+        Finding("info", "attach-existing", f"preserved project-state authority: {ATTACH_STATE_REL_PATH}", ATTACH_STATE_REL_PATH),
+        Finding("info", "attach-unchanged", "no file, directory, or generated projection changes were needed"),
+        Finding("info", "attach-apply-boundary", "already-attached apply is a true no-op; create-only template and attach-time generated projection writes were skipped"),
+    ]
+
+
+def _is_attach_already_attached_live_root(inventory: Inventory, project_name: str | None) -> bool:
+    if not _has_default_attach_authority(inventory):
+        return False
+    if _attach_apply_preflight_errors(inventory, project_name, allow_existing_template_content=True):
+        return False
+    if _attach_generated_projection_preflight_errors(inventory):
+        return False
+    return True
+
+
+def _has_default_attach_authority(inventory: Inventory) -> bool:
+    if inventory.root_kind != "live_operating_root":
+        return False
+
+    manifest = inventory.manifest_surface
+    if manifest is None or not manifest.exists or manifest.read_error or inventory.manifest_errors:
+        return False
+    if inventory.manifest.get("workflow") != "workflow-core":
+        return False
+
+    memory = inventory.manifest.get("memory", {}) if isinstance(inventory.manifest, dict) else {}
+    state_file = str(memory.get("state_file", ATTACH_STATE_REL_PATH)).replace("\\", "/")
+    plan_file = str(memory.get("plan_file", "project/implementation-plan.md")).replace("\\", "/")
+    if state_file != ATTACH_STATE_REL_PATH or plan_file != "project/implementation-plan.md":
+        return False
+
+    state = inventory.surface_by_rel.get(ATTACH_STATE_REL_PATH)
+    if state is None or not state.exists or state.read_error or state.frontmatter.errors:
+        return False
+    if state.frontmatter.has_frontmatter:
+        data = state.frontmatter.data
+        required = ("project", "workflow", "operating_mode", "plan_status")
+        return all(data.get(key) for key in required) and data.get("workflow") == "workflow-core"
+    return _has_read_only_state_assignments(state)
+
+
+def _attach_existing_authority_preflight_errors(inventory: Inventory) -> list[Finding]:
     errors: list[Finding] = []
+    manifest = inventory.manifest_surface
+    if manifest and manifest.exists:
+        if manifest.read_error:
+            errors.append(Finding("error", "attach-refused", f"workflow manifest is unreadable: {manifest.read_error}", manifest.rel_path))
+        for error in inventory.manifest_errors:
+            errors.append(Finding("error", "attach-refused", f"workflow manifest is malformed: {error}", manifest.rel_path))
+        if inventory.manifest and inventory.manifest.get("workflow") != "workflow-core":
+            errors.append(Finding("error", "attach-refused", "attach requires manifest workflow = workflow-core when a workflow manifest already exists", manifest.rel_path))
+        memory = inventory.manifest.get("memory", {}) if inventory.manifest else {}
+        state_file = str(memory.get("state_file", ATTACH_STATE_REL_PATH)).replace("\\", "/")
+        plan_file = str(memory.get("plan_file", "project/implementation-plan.md")).replace("\\", "/")
+        if state_file != ATTACH_STATE_REL_PATH:
+            errors.append(Finding("error", "attach-refused", f"non-default state_file is preserved and attach is refused: {state_file}", manifest.rel_path))
+        if plan_file != "project/implementation-plan.md":
+            errors.append(Finding("error", "attach-refused", f"non-default plan_file is preserved and attach is refused: {plan_file}", manifest.rel_path))
+
+    state = inventory.state
+    if state and state.exists:
+        if state.read_error:
+            errors.append(Finding("error", "attach-refused", f"project state is unreadable: {state.read_error}", state.rel_path))
+        for error in state.frontmatter.errors:
+            errors.append(Finding("error", "attach-refused", f"project state frontmatter is malformed: {error}", state.rel_path))
+    return errors
+
+
+def _attach_detach_marker_preflight_errors(inventory: Inventory) -> list[Finding]:
+    marker = inventory.surface_by_rel.get(DETACH_MARKER_REL_PATH)
+    if marker and marker.exists:
+        return [
+            Finding(
+                "error",
+                "attach-refused",
+                f"target has a detach disabled marker; remove {DETACH_MARKER_REL_PATH} manually before init/attach mutation",
+                DETACH_MARKER_REL_PATH,
+            )
+        ]
+    return []
+
+
+def _attach_apply_preflight_errors(inventory: Inventory, project_name: str | None, *, allow_existing_template_content: bool = False) -> list[Finding]:
+    errors: list[Finding] = []
+    errors.extend(_attach_existing_authority_preflight_errors(inventory))
+    errors.extend(_attach_detach_marker_preflight_errors(inventory))
     seen_directory_segments: set[str] = set()
     for rel_path in WORKFLOW_ATTACH_DIRECTORIES:
         for candidate in _root_relative_path_chain(inventory.root, rel_path):
@@ -2012,7 +2296,23 @@ def _attach_apply_preflight_errors(inventory: Inventory, project_name: str | Non
                 )
             )
             continue
-        if path.exists() and path.read_text(encoding="utf-8") != content:
+        if path.exists() and allow_existing_template_content:
+            continue
+        if path.exists():
+            try:
+                existing_content = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                errors.append(
+                    Finding(
+                        "error",
+                        "attach-target-conflict",
+                        f"cannot compare existing template file before attach: {rel_path}: {exc}",
+                        rel_path,
+                    )
+                )
+                continue
+            if existing_content == content:
+                continue
             errors.append(
                 Finding(
                     "error",
@@ -4873,8 +5173,9 @@ def _active_plan_findings(inventory: Inventory) -> list[Finding]:
             )
         if plan and plan.exists:
             findings.extend(_active_plan_generated_shape_findings(plan))
+            findings.extend(_active_plan_execution_policy_findings(plan, data))
             findings.extend(_active_plan_docs_decision_findings(plan, data))
-            findings.extend(_active_plan_writeback_drift_findings(inventory, plan))
+            findings.extend(_active_plan_writeback_drift_findings(inventory, plan, data))
             findings.extend(_active_plan_lifecycle_drift_findings(inventory, plan, data))
     elif plan and plan.exists:
         findings.append(Finding("warn", "stale-plan-file", "implementation plan exists while plan_status is not active", plan.rel_path))
@@ -4913,6 +5214,269 @@ def _active_plan_generated_shape_findings(plan: Surface) -> list[Finding]:
             plan.rel_path,
         )
     ]
+
+
+def _active_plan_execution_policy_findings(plan: Surface, state_data: dict[str, object]) -> list[Finding]:
+    active_phase = str(state_data.get("active_phase") or "")
+    phase_metadata = _active_phase_contract_metadata(plan, active_phase)
+    plan_data = plan.frontmatter.data if plan.frontmatter.has_frontmatter else {}
+    policy_raw, policy_line = _contract_entry("execution_policy", phase_metadata, plan_data)
+    auto_raw, auto_line = _contract_entry("auto_continue", phase_metadata, plan_data)
+    stop_raw, stop_line = _contract_entry("stop_conditions", phase_metadata, plan_data)
+    findings: list[Finding] = []
+
+    policy = _contract_text(policy_raw).casefold()
+    if not policy:
+        findings.append(
+            Finding(
+                "info",
+                "active-plan-execution-policy",
+                f"active plan has no execution_policy metadata; {CURRENT_PHASE_ONLY_POLICY} default applies to active_phase {active_phase or '<unset>'}",
+                plan.rel_path,
+            )
+        )
+    elif policy == CURRENT_PHASE_ONLY_POLICY:
+        findings.append(
+            Finding(
+                "info",
+                "active-plan-execution-policy",
+                f"active plan execution_policy is {CURRENT_PHASE_ONLY_POLICY}; continue only active_phase {active_phase or '<unset>'} until explicit lifecycle writeback",
+                plan.rel_path,
+                policy_line,
+            )
+        )
+    else:
+        findings.append(
+            Finding(
+                "warn",
+                "active-plan-execution-policy-value",
+                f"active plan execution_policy is {policy_raw!r}; expected {CURRENT_PHASE_ONLY_POLICY!r}; current-phase-only fallback applies",
+                plan.rel_path,
+                policy_line,
+            )
+        )
+
+    auto_continue = _contract_bool(auto_raw)
+    if auto_raw is None:
+        findings.append(
+            Finding(
+                "info",
+                "active-plan-auto-continue-stop",
+                "auto_continue metadata is absent; current-phase-only stop applies and no future phase is authorized",
+                plan.rel_path,
+            )
+        )
+    elif auto_continue is False:
+        findings.append(
+            Finding(
+                "info",
+                "active-plan-auto-continue-stop",
+                "auto_continue is false; current-phase-only stop applies and no future phase is authorized by verification success alone",
+                plan.rel_path,
+                auto_line,
+            )
+        )
+    elif auto_continue is None:
+        findings.append(
+            Finding(
+                "warn",
+                "active-plan-auto-continue-value",
+                f"auto_continue is {auto_raw!r}; expected true or false, so current-phase-only stop applies",
+                plan.rel_path,
+                auto_line,
+            )
+        )
+    else:
+        stop_conditions = _contract_list(stop_raw)
+        if not stop_conditions:
+            findings.append(
+                Finding(
+                    "warn",
+                    "active-plan-auto-continue-stop-conditions",
+                    "auto_continue is true but no stop_conditions metadata was found; automatic continuation is unsafe",
+                    plan.rel_path,
+                    stop_line or auto_line,
+                )
+            )
+        else:
+            missing = _missing_stop_condition_coverage(stop_conditions)
+            if missing:
+                findings.append(
+                    Finding(
+                        "warn",
+                        "active-plan-auto-continue-stop-conditions",
+                        f"auto_continue is true but stop_conditions miss coverage for: {', '.join(missing)}",
+                        plan.rel_path,
+                        stop_line or auto_line,
+                    )
+                )
+            else:
+                findings.append(
+                    Finding(
+                        "info",
+                        "active-plan-auto-continue-candidate",
+                        "auto_continue is explicit and stop_conditions cover verification, authority, write-scope, source-reality, sensitive-action, and closeout boundaries",
+                        plan.rel_path,
+                        auto_line,
+                    )
+                )
+
+    if stop_raw in (None, ""):
+        findings.append(
+            Finding(
+                "info",
+                "active-plan-stop-conditions",
+                "stop_conditions metadata is absent; current-phase-only remains the safe default stop",
+                plan.rel_path,
+            )
+        )
+    return findings
+
+
+def _contract_entry(
+    key: str,
+    phase_metadata: dict[str, tuple[object, int]],
+    plan_data: dict[str, object],
+) -> tuple[object | None, int | None]:
+    if key in phase_metadata:
+        value, line = phase_metadata[key]
+        return value, line
+    if key in plan_data:
+        return plan_data[key], None
+    return None, None
+
+
+def _active_phase_contract_metadata(plan: Surface, active_phase: str) -> dict[str, tuple[object, int]]:
+    block = _active_phase_block(plan.content, active_phase)
+    if block is None:
+        return {}
+    lines = plan.content.splitlines(keepends=True)
+    metadata: dict[str, tuple[object, int]] = {}
+    for index in range(block[0] + 1, block[1]):
+        match = re.match(
+            r"^\s*[-*]\s*(execution_policy|auto_continue|stop_conditions)\s*:\s*(.*?)\s*(?:\r?\n)?$",
+            lines[index],
+            re.IGNORECASE,
+        )
+        if not match:
+            continue
+        key = match.group(1).casefold()
+        raw_value = match.group(2).strip()
+        if key == "stop_conditions" and raw_value == "":
+            metadata[key] = (_phase_list_values(lines, index + 1, block[1]), index + 1)
+        else:
+            metadata[key] = (_contract_parse_scalar(raw_value), index + 1)
+    return metadata
+
+
+def _active_phase_block(text: str, active_phase: str) -> tuple[int, int] | None:
+    target = active_phase.strip()
+    if not target:
+        return None
+    lines = text.splitlines(keepends=True)
+    headings: list[tuple[int, int, str]] = []
+    for index, line in enumerate(lines):
+        match = re.match(r"^(#{2,6})\s+(.+?)\s*#*\s*(?:\r?\n)?$", line)
+        if match:
+            headings.append((index, len(match.group(1)), match.group(2).strip()))
+    candidates: list[tuple[int, int]] = []
+    for heading_index, (start, level, title) in enumerate(headings):
+        end = len(lines)
+        for next_start, next_level, _next_title in headings[heading_index + 1 :]:
+            if next_level <= level:
+                end = next_start
+                break
+        if _contract_heading_matches(title, target) or _phase_block_has_contract_id(lines, start, end, target):
+            candidates.append((start, end))
+    if not candidates:
+        return None
+    return min(candidates, key=lambda item: (item[1] - item[0], item[0]))
+
+
+def _contract_heading_matches(title: str, active_phase: str) -> bool:
+    normalized_title = _contract_text(title).casefold()
+    normalized_phase = active_phase.casefold()
+    return normalized_title == normalized_phase or normalized_phase in normalized_title
+
+
+def _phase_block_has_contract_id(lines: list[str], start: int, end: int, active_phase: str) -> bool:
+    for line in lines[start + 1 : end]:
+        match = re.match(r"^\s*[-*]\s*id\s*:\s*(.+?)\s*(?:\r?\n)?$", line, re.IGNORECASE)
+        if match and _contract_text(match.group(1)) == active_phase:
+            return True
+    return False
+
+
+def _phase_list_values(lines: list[str], start: int, end: int) -> list[str]:
+    values: list[str] = []
+    for index in range(start, end):
+        match = re.match(r"^\s+[-*]\s+(.+?)\s*(?:\r?\n)?$", lines[index])
+        if not match:
+            break
+        values.append(_contract_text(match.group(1)))
+    return values
+
+
+def _contract_parse_scalar(raw_value: str) -> object:
+    value = _contract_text(raw_value)
+    if value.startswith("[") and value.endswith("]"):
+        inner = value[1:-1].strip()
+        if not inner:
+            return []
+        return [_contract_parse_scalar(part.strip()) for part in inner.split(",")]
+    normalized = value.casefold()
+    if normalized == "true":
+        return True
+    if normalized == "false":
+        return False
+    return value
+
+
+def _contract_text(value: object) -> str:
+    text = str(value or "").strip()
+    if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")):
+        text = text[1:-1].strip()
+    if text.startswith("`") and text.endswith("`") and len(text) >= 2:
+        text = text[1:-1].strip()
+    return text
+
+
+def _contract_bool(value: object) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    normalized = _contract_text(value).casefold()
+    if normalized == "true":
+        return True
+    if normalized == "false":
+        return False
+    return None
+
+
+def _contract_list(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [_contract_text(item) for item in value if _contract_text(item)]
+    text = _contract_text(value)
+    if not text:
+        return []
+    if text.startswith("[") and text.endswith("]"):
+        inner = text[1:-1].strip()
+        if not inner:
+            return []
+        return [_contract_text(part) for part in inner.split(",") if _contract_text(part)]
+    return [text]
+
+
+def _missing_stop_condition_coverage(stop_conditions: list[str]) -> list[str]:
+    normalized = "\n".join(stop_conditions).casefold()
+    missing: list[str] = []
+    for label, markers in AUTO_CONTINUE_STOP_COVERAGE:
+        if not any(marker in normalized for marker in markers):
+            missing.append(label)
+    return missing
 
 
 def _active_plan_lifecycle_drift_findings(inventory: Inventory, plan: Surface, state_data: dict[str, object]) -> list[Finding]:
@@ -4963,11 +5527,11 @@ def _active_plan_lifecycle_drift_findings(inventory: Inventory, plan: Surface, s
     ):
         findings.append(
             Finding(
-                "warn",
-                "active-plan-complete-not-archived",
+                "info",
+                "active-plan-ready-for-closeout",
                 (
                     "project-state phase_status is complete and closeout facts are complete while the active plan is still open; "
-                    "writeback --apply --phase-status complete archives the default active plan through the lifecycle owner path"
+                    "this is a ready-for-closeout boundary, and writeback --apply --archive-active-plan is the explicit archive path"
                 ),
                 plan.rel_path,
             )
@@ -5000,7 +5564,9 @@ def _active_plan_docs_decision_findings(plan: Surface, state_data: dict[str, obj
     return []
 
 
-def _active_plan_writeback_drift_findings(inventory: Inventory, plan: Surface) -> list[Finding]:
+def _active_plan_writeback_drift_findings(inventory: Inventory, plan: Surface, state_data: dict[str, object]) -> list[Finding]:
+    if str(state_data.get("phase_status") or "") != "complete":
+        return []
     facts = state_writeback_facts(inventory.state)
     if not facts:
         return []
@@ -5161,10 +5727,17 @@ def _route_metadata_path_values(surface: Surface, key: str, value: object) -> tu
                     line,
                 )
             ]
-        return [_normalize_route_metadata_path(value)], []
+        normalized = _normalize_route_metadata_path(value)
+        if not _route_metadata_value_is_path_like(normalized):
+            return [], []
+        return [normalized], []
 
     if isinstance(value, list) and value and all(isinstance(item, str) and item.strip() for item in value):
-        return [_normalize_route_metadata_path(item) for item in value], []
+        return [
+            normalized
+            for item in value
+            if _route_metadata_value_is_path_like(normalized := _normalize_route_metadata_path(item))
+        ], []
 
     return [], [
         Finding(
@@ -5273,6 +5846,10 @@ def _route_metadata_allowed_targets(surface: Surface, key: str) -> tuple[set[str
         return {"incubation"}, ("project/archive/reference/incubation/",), "an incubation route"
     if key == "related_plan":
         return {"active-plan"}, ("project/archive/plans/",), "an active or archived plan route"
+    if key == "archived_plan":
+        return {"active-plan"}, ("project/archive/plans/",), "an active or archived plan route"
+    if key in {"related_roadmap", "source_roadmap"}:
+        return {"roadmap"}, (), "a roadmap route"
     if key in {"related_decision", "related_decisions"}:
         return {"decisions"}, ("project/archive/reference/decisions/",), "a decision route"
     if key in {"related_adr", "related_adrs"}:
@@ -5295,6 +5872,8 @@ def _route_metadata_stale_reference_finding(
     rel_path: str,
     line: int | None,
 ) -> Finding | None:
+    if key.startswith("source_"):
+        return None
     target_surface = inventory.surface_by_rel.get(rel_path)
     if not target_surface or not target_surface.frontmatter.has_frontmatter:
         return None
@@ -5311,6 +5890,18 @@ def _route_metadata_stale_reference_finding(
 
 def _normalize_route_metadata_path(value: str) -> str:
     return re.sub(r"/+", "/", value.strip().strip("<>").strip().replace("\\", "/"))
+
+
+def _route_metadata_value_is_path_like(value: str) -> bool:
+    if not value or any(separator in value for separator in (";", "|")):
+        return False
+    return (
+        "/" in value
+        or "\\" in value
+        or value.endswith((".md", ".toml", ".yaml", ".yml", ".json"))
+        or value.startswith((".", "~"))
+        or _is_absolute_path(value)
+    )
 
 
 def _route_metadata_path_is_unsafe(rel_path: str) -> bool:
@@ -5691,6 +6282,8 @@ def _optional_missing_link_reason(inventory: Inventory, target: str) -> str | No
             return "docmap is lazy for this live operating root"
         if rel == "README.md":
             return "root README.md is optional for live operating roots"
+        if rel == "project/roadmap.md":
+            return "project/roadmap.md is an optional live-root roadmap route"
 
     state = inventory.state
     state_data = state.frontmatter.data if state and state.exists else {}
@@ -5723,6 +6316,14 @@ def _optional_missing_link_reason(inventory: Inventory, target: str) -> str | No
         or state_data.get("fixture_status") == "product-compatibility-fixture"
     )
     if fixture_root:
+        if rel == "project/roadmap.md":
+            return "roadmap route examples belong in serviced live operating roots, not this product source fixture"
+        if rel == "project/adrs" or rel.startswith("project/adrs/"):
+            return "ADR route examples belong in serviced live operating roots, not this product source fixture"
+        if rel == "project/decisions" or rel.startswith("project/decisions/"):
+            return "decision route examples belong in serviced live operating roots, not this product source fixture"
+        if rel == "project/verification" or rel.startswith("project/verification/"):
+            return "verification route examples belong in serviced live operating roots, not this product source fixture"
         if (rel == "project/research" or rel.startswith("project/research/")) and rel != "project/research/README.md":
             return "source-root research artifacts are intentionally excluded from this product compatibility fixture"
         if rel == "research/README.md":

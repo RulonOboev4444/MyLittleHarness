@@ -7,6 +7,16 @@
 This spec records the full useful capability roadmap for the workflow-level upgrade so that important future improvements do not remain trapped in chat history, research notes, or the implementation plan of one nearby slice.
 The roadmap is for a repo-native workflow contract where the canonical behavior should remain inspectable and portable with the repository.
 
+For live operating roots, the first-class roadmap route is `project/roadmap.md`. That file is optional sequencing authority for accepted work between incubation and one active implementation plan; it is not part of the mandatory start path and cannot approve repair, closeout, archive, commit, rollback, or lifecycle decisions.
+
+The hidden `roadmap --dry-run|--apply` command is the bounded mutation rail for that live-root route. It may add or update one explicit managed item block in an existing `project/roadmap.md`, and when an explicit `source_incubation` is supplied it may write reciprocal source-note relationship frontmatter in the same operation. Roadmap item blocks may carry advisory slice metadata: `execution_slice`, `slice_goal`, `slice_members`, `slice_dependencies`, `slice_closeout_boundary`, `source_research`, `related_specs`, and `target_artifacts`. Hidden `plan --roadmap-item` / `writeback --roadmap-item` may reuse that boundary to sync explicit plan relationships, active-plan relationship metadata, same-request closeout summaries, structurally known source-incubation closeout links, and roadmap-slice or active-plan `covered_roadmap_items`. `plan --roadmap-item` may derive executable plan frontmatter such as `primary_roadmap_item`, `covered_roadmap_items`, `domain_context`, `target_artifacts`, `execution_policy`, and `closeout_boundary` from repo-visible roadmap fields. These rails do not infer priority, approve lifecycle decisions, or make roadmap output closeout authority.
+
+Bounded plan synthesis may also report advisory bundle/split rationale and pressure signals for roadmap-backed plans, including `target_artifact_pressure` and `phase_pressure`. The report makes execution grain visible but cannot calibrate a mandatory threshold, force a split, or authorize lifecycle, closeout, archive, repair, commit, rollback, or future mutation.
+
+The accepted relationship vocabulary is path/id based and human-readable: `source_incubation`, `source_research`, `related_roadmap`, `related_roadmap_item`, `primary_roadmap_item`, `covered_roadmap_items`, `related_plan`, `archived_plan`, `implemented_by`, `related_spec`, `related_decision`, `related_adr`, `related_verification`, `target_artifacts`, `verification_summary`, `docs_decision`, `carry_forward`, `archived_to`, `promoted_to`, `supersedes`, `superseded_by`, `merged_into`, `merged_from`, `split_from`, `split_to`, `rejected_by`, and `rejection_reason`. These fields are direct relationship metadata only; they are not a separate lifecycle index and cannot make generated reports authoritative. A generated `relationships.json` graph may project those repo-visible fields for navigation and impact lookup, but deleting it must not change lifecycle truth.
+
+Coverage-aware incubation auto-archive is allowed only after a requested closeout/archive operation produces structural proof: the roadmap item has the source incubation link, the item is closed with an archived plan, verification, and final docs decision, and the source note has no open-thread or unchecked-task markers. Single-entry notes can be covered by that structural chain. Mixed notes require a reviewable `## Entry Coverage` section with terminal bullets for every dated entry: `implemented`, `rejected`, `superseded`, `merged`, `split`, or `archived`, each with destination detail. The current archive lane for implemented incubation notes is `project/archive/reference/incubation/**`. Mixed notes without complete terminal coverage stay active and receive blocker findings plus heuristic split suggestions.
+
 It exists to:
 - capture the whole useful direction, not only the next implementation move
 - mark each capability as `canonical-now`, `required-next`, `optional-next`, `later-extension`, `incubation-only`, or `not-planned`
@@ -51,6 +61,7 @@ The current capability posture is:
 - explicit decision-doc lane for durable tradeoffs when needed -> `optional-next`
 - staged lifecycle `incubation -> research -> bounded plan decision -> carry-forward/closeout` -> `canonical-now`
 - incubation frontmatter and explicit lifecycle status vocabulary -> `canonical-now`
+- lifecycle relationship vocabulary, read-only relationship hygiene scan, generated relationship graph projection, CLI text-input audit posture, Entry Coverage diagnostics, heuristic split suggestions, reciprocal roadmap/source-incubation writeback, and coverage-aware incubation auto-archive -> `canonical-now`
 - one active incubation artifact per topic -> `canonical-now`
 - topic identity and `merge-before-create` discipline for incubation notes -> `canonical-now`
 - visible contradiction handling and explicit promotion target for incubation notes -> `canonical-now`
@@ -131,5 +142,3 @@ No later plan should treat skills, MCP, hooks, adapters, evidence IDs, quality g
 ## Guardrail
 
 No future implementation pass should claim roadmap coverage by landing only helper automation while leaving the underlying canonical rules implicit. The contract must stay readable from the stable specs even if no helper ever lands.
-
-

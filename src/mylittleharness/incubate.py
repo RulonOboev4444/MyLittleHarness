@@ -4,6 +4,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from datetime import date
+from hashlib import sha256
 from pathlib import Path
 
 from .inventory import Inventory
@@ -32,19 +33,21 @@ _RESERVED_SLUGS = {
 class IncubateRequest:
     topic: str
     note: str
+    note_source: str = "--note"
 
 
 @dataclass(frozen=True)
 class IncubationTarget:
     topic: str
     note: str
+    note_source: str
     slug: str
     rel_path: str
     path: Path
 
 
-def make_incubate_request(topic: str | None, note: str | None) -> IncubateRequest:
-    return IncubateRequest(topic=_normalized_text(topic), note=_normalized_note(note))
+def make_incubate_request(topic: str | None, note: str | None, note_source: str = "--note") -> IncubateRequest:
+    return IncubateRequest(topic=_normalized_text(topic), note=_normalized_note(note), note_source=note_source)
 
 
 def incubate_dry_run_findings(inventory: Inventory, request: IncubateRequest) -> list[Finding]:
@@ -67,6 +70,7 @@ def incubate_dry_run_findings(inventory: Inventory, request: IncubateRequest) ->
         )
         return findings
     assert target is not None
+    findings.append(_note_body_finding(target))
     findings.append(_note_posture_finding(target, apply=False))
     findings.extend(_boundary_findings())
     findings.append(
@@ -102,6 +106,7 @@ def incubate_apply_findings(inventory: Inventory, request: IncubateRequest) -> l
         Finding("info", "incubate-apply", "incubation note apply started"),
         _root_posture_finding(inventory),
         *_target_findings(target, apply=True),
+        _note_body_finding(target),
         _note_posture_finding(target, apply=True, existed=existed),
         *_boundary_findings(),
         Finding(
@@ -119,7 +124,14 @@ def _incubation_target(inventory: Inventory, request: IncubateRequest) -> Incuba
     if not slug:
         return None
     rel_path = f"{INCUBATION_DIR_REL}/{slug}.md"
-    return IncubationTarget(topic=request.topic, note=request.note, slug=slug, rel_path=rel_path, path=inventory.root / rel_path)
+    return IncubationTarget(
+        topic=request.topic,
+        note=request.note,
+        note_source=request.note_source,
+        slug=slug,
+        rel_path=rel_path,
+        path=inventory.root / rel_path,
+    )
 
 
 def _incubate_preflight_errors(
@@ -208,6 +220,17 @@ def _note_posture_finding(target: IncubationTarget, apply: bool, existed: bool |
     else:
         action = "would append to existing same-topic incubation note" if exists else "would create same-topic incubation note"
     return Finding("info", "incubate-note-posture", action, target.rel_path)
+
+
+def _note_body_finding(target: IncubationTarget) -> Finding:
+    digest = sha256(target.note.encode("utf-8")).hexdigest()[:16]
+    line_count = len(target.note.splitlines()) or 1
+    return Finding(
+        "info",
+        "incubate-note-body",
+        f"note input: {target.note_source}; lines={line_count}; chars={len(target.note)}; sha256={digest}",
+        target.rel_path,
+    )
 
 
 def _root_posture_finding(inventory: Inventory) -> Finding:

@@ -5,11 +5,14 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from datetime import date
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from mylittleharness import atomic_files
 from mylittleharness.cli import main
 
 
@@ -154,6 +157,362 @@ class MemoryHygieneTests(unittest.TestCase):
             self.assertTrue(source.is_file())
             self.assertIn("archive target already exists", output.getvalue())
 
+    def test_apply_rolls_back_archive_and_source_when_link_repair_replace_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            source = make_research_source(root)
+            lane = root / "project/plan-incubation/lane.md"
+            lane.write_text("Promoted from `project/research/raw-import.md`.\n", encoding="utf-8")
+            archive_rel = "project/archive/reference/research/2026-05-01-raw-import/raw-import.md"
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            failing_replace = fail_once_when_replace_targets(lane)
+            with patch("mylittleharness.atomic_files._replace_path", side_effect=failing_replace), redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "memory-hygiene",
+                        "--apply",
+                        "--source",
+                        "project/research/raw-import.md",
+                        "--promoted-to",
+                        "project/specs/workflow/workflow-memory-routing-spec.md",
+                        "--archive-to",
+                        archive_rel,
+                        "--repair-links",
+                    ]
+                )
+
+            self.assertEqual(code, 2)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertTrue(source.exists())
+            self.assertFalse((root / archive_rel).exists())
+            self.assertIn("rolled back completed target writes", output.getvalue())
+
+    def test_scan_reports_relationship_findings_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            source = make_incubation_source(root)
+            archived_plan = "project/archive/plans/2026-05-01-relation-test.md"
+            (root / archived_plan).parent.mkdir(parents=True)
+            (root / archived_plan).write_text("# Archived Plan\n", encoding="utf-8")
+            write_relationship_roadmap(
+                root,
+                source.relative_to(root).as_posix(),
+                status="done",
+                archived_plan=archived_plan,
+                verification_summary="focused verification passed",
+                docs_decision="updated",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "memory-hygiene", "--dry-run", "--scan"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("relationship-missing-reciprocal", rendered)
+            self.assertIn("relationship-auto-archive-candidate", rendered)
+            self.assertIn("relationship-scan-read-only", rendered)
+            self.assertIn("cli-text-audit-summary", rendered)
+
+    def test_scan_reports_entry_coverage_and_split_suggestions_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            make_mixed_incubation_source(
+                root,
+                coverage=(
+                    "## Entry Coverage\n\n"
+                    "- `2026-05-01`: `implemented` via `project/archive/plans/implemented.md`\n"
+                    "- `2026-05-02`: `incubating` still open\n"
+                ),
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "memory-hygiene", "--dry-run", "--scan"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("relationship-entry-coverage-needed", rendered)
+            self.assertIn("entry coverage 2026-05-02 is incubating", rendered)
+            self.assertIn("relationship-semantic-split-suggestion", rendered)
+            self.assertIn("heuristic no-write suggestion", rendered)
+
+    def test_writeback_archives_multi_entry_incubation_when_entry_coverage_is_terminal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp))
+            source = make_mixed_incubation_source(
+                root,
+                coverage=(
+                    "## Entry Coverage\n\n"
+                    "- `2026-05-01`: `implemented` via `project/archive/plans/first.md`\n"
+                    "- `2026-05-02`: `rejected` out of scope for this project\n"
+                ),
+            )
+            source_rel = source.relative_to(root).as_posix()
+            plan_path = root / "project/implementation-plan.md"
+            plan_path.write_text(
+                plan_path.read_text(encoding="utf-8").replace(
+                    'status: "active"\n---',
+                    f'status: "active"\nsource_incubation: "{source_rel}"\n---',
+                ),
+                encoding="utf-8",
+            )
+            write_relationship_roadmap(root, source_rel, status="active")
+            (root / "project/project-state.md").write_text(
+                (root / "project/project-state.md").read_text(encoding="utf-8").replace(
+                    'phase_status: "in_progress"',
+                    'phase_status: "complete"',
+                ),
+                encoding="utf-8",
+            )
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "writeback",
+                        "--apply",
+                        "--archive-active-plan",
+                        "--roadmap-item",
+                        "relation-test",
+                        "--worktree-start-state",
+                        "dirty test fixture",
+                        "--task-scope",
+                        "covered mixed incubation closeout",
+                        "--docs-decision",
+                        "updated",
+                        "--state-writeback",
+                        "archived active plan and covered source incubation",
+                        "--verification",
+                        "focused tests passed",
+                        "--commit-decision",
+                        "not staged",
+                    ]
+                )
+
+            self.assertEqual(code, 0)
+            self.assertFalse(source.exists())
+            archive_rel = f"project/archive/reference/incubation/{date.today().isoformat()}-mixed-idea.md"
+            self.assertTrue((root / archive_rel).is_file())
+            archived_text = (root / archive_rel).read_text(encoding="utf-8")
+            self.assertIn('status: "implemented"', archived_text)
+            self.assertIn("## Entry Coverage", archived_text)
+            self.assertIn("writeback-incubation-auto-archive", output.getvalue())
+
+    def test_roadmap_apply_writes_reciprocal_source_incubation_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            source = make_incubation_source(root)
+            write_empty_roadmap(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "roadmap",
+                        "--apply",
+                        "--action",
+                        "add",
+                        "--item-id",
+                        "relation-test",
+                        "--title",
+                        "Relation Test",
+                        "--status",
+                        "accepted",
+                        "--order",
+                        "10",
+                        "--source-incubation",
+                        source.relative_to(root).as_posix(),
+                    ]
+                )
+
+            self.assertEqual(code, 0)
+            source_text = source.read_text(encoding="utf-8")
+            self.assertIn('related_roadmap: "project/roadmap.md"', source_text)
+            self.assertIn('related_roadmap_item: "relation-test"', source_text)
+            self.assertIn('promoted_to: "project/roadmap.md"', source_text)
+            self.assertIn("roadmap-relationship-sync", output.getvalue())
+
+    def test_roadmap_apply_rolls_back_roadmap_when_relationship_replace_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            source = make_incubation_source(root)
+            write_empty_roadmap(root)
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            failing_replace = fail_once_when_replace_targets(source)
+            with patch("mylittleharness.atomic_files._replace_path", side_effect=failing_replace), redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "roadmap",
+                        "--apply",
+                        "--action",
+                        "add",
+                        "--item-id",
+                        "relation-test",
+                        "--title",
+                        "Relation Test",
+                        "--status",
+                        "accepted",
+                        "--order",
+                        "10",
+                        "--source-incubation",
+                        source.relative_to(root).as_posix(),
+                    ]
+                )
+
+            self.assertEqual(code, 2)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("rolled back completed target writes", output.getvalue())
+
+    def test_writeback_archives_fully_covered_single_entry_incubation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp))
+            source = make_incubation_source(root)
+            source_rel = source.relative_to(root).as_posix()
+            plan_path = root / "project/implementation-plan.md"
+            plan_path.write_text(
+                plan_path.read_text(encoding="utf-8").replace(
+                    'status: "active"\n---',
+                    f'status: "active"\nsource_incubation: "{source_rel}"\n---',
+                ),
+                encoding="utf-8",
+            )
+            write_relationship_roadmap(root, source_rel, status="active")
+            (root / "project/project-state.md").write_text(
+                (root / "project/project-state.md").read_text(encoding="utf-8").replace(
+                    'phase_status: "in_progress"',
+                    'phase_status: "complete"',
+                ),
+                encoding="utf-8",
+            )
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "writeback",
+                        "--apply",
+                        "--archive-active-plan",
+                        "--roadmap-item",
+                        "relation-test",
+                        "--worktree-start-state",
+                        "dirty test fixture",
+                        "--task-scope",
+                        "relationship closeout",
+                        "--docs-decision",
+                        "updated",
+                        "--state-writeback",
+                        "archived active plan and source incubation",
+                        "--verification",
+                        "focused tests passed",
+                        "--commit-decision",
+                        "not staged",
+                    ]
+                )
+
+            self.assertEqual(code, 0)
+            self.assertFalse(source.exists())
+            archive_rel = f"project/archive/reference/incubation/{date.today().isoformat()}-idea.md"
+            archived_source = root / archive_rel
+            self.assertTrue(archived_source.is_file())
+            archived_text = archived_source.read_text(encoding="utf-8")
+            archived_plan = f"project/archive/plans/{date.today().isoformat()}-plan.md"
+            self.assertIn('status: "implemented"', archived_text)
+            self.assertIn(f'implemented_by: "{archived_plan}"', archived_text)
+            self.assertIn('related_roadmap_item: "relation-test"', archived_text)
+            self.assertFalse((root / "project/implementation-plan.md").exists())
+            archived_plan_text = (root / archived_plan).read_text(encoding="utf-8")
+            self.assertIn(f'source_incubation: "{archive_rel}"', archived_plan_text)
+            roadmap_text = (root / "project/roadmap.md").read_text(encoding="utf-8")
+            self.assertIn("- `status`: `done`", roadmap_text)
+            self.assertIn(f"- `source_incubation`: `{archive_rel}`", roadmap_text)
+            self.assertIn(f"- `related_plan`: `{archived_plan}`", roadmap_text)
+            self.assertIn(f"- `archived_plan`: `{archived_plan}`", roadmap_text)
+            self.assertIn("writeback-incubation-auto-archive", output.getvalue())
+
+    def test_writeback_keeps_mixed_incubation_active_and_reports_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp))
+            (root / "project/project-state.md").write_text(
+                (root / "project/project-state.md").read_text(encoding="utf-8").replace(
+                    'phase_status: "in_progress"',
+                    'phase_status: "complete"',
+                ),
+                encoding="utf-8",
+            )
+            source = make_incubation_source(
+                root,
+                frontmatter_extra='open_threads:\n  - "second idea remains open"\n',
+                body_extra="\n## Open Questions\n\n- [ ] Decide the second idea.\n",
+            )
+            source_rel = source.relative_to(root).as_posix()
+            write_relationship_roadmap(root, source_rel, status="active")
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "writeback",
+                        "--apply",
+                        "--archive-active-plan",
+                        "--roadmap-item",
+                        "relation-test",
+                        "--worktree-start-state",
+                        "dirty test fixture",
+                        "--task-scope",
+                        "relationship closeout",
+                        "--docs-decision",
+                        "updated",
+                        "--state-writeback",
+                        "archived active plan only",
+                        "--verification",
+                        "focused tests passed",
+                        "--commit-decision",
+                        "not staged",
+                    ]
+                )
+
+            self.assertEqual(code, 0)
+            self.assertTrue(source.is_file())
+            source_text = source.read_text(encoding="utf-8")
+            self.assertIn('implemented_by: "project/archive/plans/', source_text)
+            self.assertNotIn('status: "implemented"', source_text)
+            self.assertFalse((root / f"project/archive/reference/incubation/{date.today().isoformat()}-idea.md").exists())
+            self.assertIn("writeback-incubation-archive-blocked", output.getvalue())
+
+    def test_writeback_refuses_multiline_closeout_field_before_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp))
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "writeback", "--apply", "--verification", "line one\nline two"])
+
+            self.assertEqual(code, 2)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("--verification is a one-line closeout field", output.getvalue())
+
 
 def make_live_root(root: Path) -> Path:
     (root / ".codex").mkdir(parents=True)
@@ -171,6 +530,35 @@ def make_live_root(root: Path) -> Path:
     (root / "AGENTS.md").write_text("# Agents\n", encoding="utf-8")
     (root / "README.md").write_text("# Demo\n", encoding="utf-8")
     (root / "project/specs/workflow/workflow-memory-routing-spec.md").write_text("# Routing Spec\n", encoding="utf-8")
+    return root
+
+
+def make_active_live_root(root: Path) -> Path:
+    make_live_root(root)
+    state = root / "project/project-state.md"
+    state.write_text(
+        state.read_text(encoding="utf-8").replace(
+            'operating_mode: "ad_hoc"\nplan_status: "none"\nactive_plan: ""',
+            (
+                'operating_mode: "plan"\n'
+                'plan_status: "active"\n'
+                'active_plan: "project/implementation-plan.md"\n'
+                'active_phase: "phase-1"\n'
+                'phase_status: "in_progress"'
+            ),
+        ),
+        encoding="utf-8",
+    )
+    (root / "project/implementation-plan.md").write_text(
+        "---\n"
+        'title: "Plan"\n'
+        'status: "active"\n'
+        "---\n"
+        "# Plan\n\n"
+        "## phase-1\n\n"
+        "- status: `in_progress`\n",
+        encoding="utf-8",
+    )
     return root
 
 
@@ -203,12 +591,125 @@ def make_research_source(root: Path) -> Path:
     return path
 
 
+def make_incubation_source(root: Path, frontmatter_extra: str = "", body_extra: str = "") -> Path:
+    path = root / "project/plan-incubation/idea.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "---\n"
+        'topic: "Idea"\n'
+        'status: "incubating"\n'
+        'created: "2026-05-01"\n'
+        f"{frontmatter_extra}"
+        "---\n"
+        "# Idea\n\n"
+        "## Entries\n\n"
+        "### 2026-05-01\n\n"
+        "Implement one relationship idea.\n"
+        f"{body_extra}",
+        encoding="utf-8",
+    )
+    return path
+
+
+def make_mixed_incubation_source(root: Path, coverage: str = "") -> Path:
+    path = root / "project/plan-incubation/mixed-idea.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    coverage_section = f"\n{coverage.rstrip()}\n" if coverage else ""
+    path.write_text(
+        "---\n"
+        'topic: "Mixed Idea"\n'
+        'status: "incubating"\n'
+        'created: "2026-05-01"\n'
+        "---\n"
+        "# Mixed Idea\n\n"
+        "## Entries\n\n"
+        "### 2026-05-01\n\n"
+        "Implemented relationship idea.\n\n"
+        "### 2026-05-02\n\n"
+        "Second idea needs a separate fate.\n"
+        f"{coverage_section}",
+        encoding="utf-8",
+    )
+    return path
+
+
+def write_empty_roadmap(root: Path) -> None:
+    (root / "project/roadmap.md").write_text(
+        "---\n"
+        'id: "memory-routing-roadmap"\n'
+        'status: "active"\n'
+        "---\n"
+        "# Roadmap\n\n"
+        "## Items\n\n"
+        "### Existing Item\n\n"
+        "- `id`: `existing-item`\n"
+        "- `status`: `accepted`\n"
+        "- `order`: `1`\n"
+        "- `dependencies`: `[]`\n"
+        "- `source_incubation`: ``\n"
+        "- `related_plan`: ``\n"
+        "- `archived_plan`: ``\n"
+        "- `verification_summary`: ``\n"
+        "- `docs_decision`: `uncertain`\n"
+        "- `carry_forward`: ``\n"
+        "- `supersedes`: `[]`\n"
+        "- `superseded_by`: `[]`\n\n",
+        encoding="utf-8",
+    )
+
+
+def write_relationship_roadmap(
+    root: Path,
+    source_incubation: str,
+    *,
+    status: str,
+    archived_plan: str = "",
+    verification_summary: str = "",
+    docs_decision: str = "uncertain",
+) -> None:
+    (root / "project/roadmap.md").write_text(
+        "---\n"
+        'id: "memory-routing-roadmap"\n'
+        'status: "active"\n'
+        "---\n"
+        "# Roadmap\n\n"
+        "## Items\n\n"
+        "### Relation Test\n\n"
+        "- `id`: `relation-test`\n"
+        f"- `status`: `{status}`\n"
+        "- `order`: `10`\n"
+        "- `dependencies`: `[]`\n"
+        f"- `source_incubation`: `{source_incubation}`\n"
+        "- `related_plan`: `project/implementation-plan.md`\n"
+        f"- `archived_plan`: `{archived_plan}`\n"
+        f"- `verification_summary`: `{verification_summary}`\n"
+        f"- `docs_decision`: `{docs_decision}`\n"
+        "- `carry_forward`: ``\n"
+        "- `supersedes`: `[]`\n"
+        "- `superseded_by`: `[]`\n\n",
+        encoding="utf-8",
+    )
+
+
 def snapshot_tree(root: Path) -> dict[str, str]:
     snapshot: dict[str, str] = {}
     for path in sorted(root.rglob("*")):
         rel_path = path.relative_to(root).as_posix()
         snapshot[rel_path] = "<dir>" if path.is_dir() else path.read_text(encoding="utf-8")
     return snapshot
+
+
+def fail_once_when_replace_targets(target_path: Path):
+    original_replace = atomic_files._replace_path
+    state = {"failed": False}
+
+    def replace(source: Path, target: Path) -> None:
+        if not state["failed"] and target == target_path:
+            state["failed"] = True
+            raise OSError("injected replace failure")
+        original_replace(source, target)
+
+    return replace
 
 
 if __name__ == "__main__":

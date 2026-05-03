@@ -30,6 +30,8 @@ SKIP_RATIONALE_PATTERNS = (
     r"explicitly skipped",
     r"skipped because",
 )
+DURABLE_PROOF_RECORD_PREFIX = "project/verification/"
+DURABLE_PROOF_RECORD_LIMIT = 5
 
 
 def evidence_findings(inventory: Inventory) -> list[Finding]:
@@ -56,6 +58,7 @@ def evidence_findings(inventory: Inventory) -> list[Finding]:
         )
 
     findings.extend(_active_plan_findings(inventory, active_plan, state_data))
+    findings.extend(durable_proof_record_findings(inventory, "evidence"))
     findings.extend(_source_set_findings(active_plan, inventory))
     findings.extend(_anchor_findings(active_plan, inventory))
     findings.extend(_identity_findings(active_plan))
@@ -73,6 +76,102 @@ def evidence_findings(inventory: Inventory) -> list[Finding]:
         )
     )
     return findings
+
+
+def durable_proof_record_findings(inventory: Inventory, code_prefix: str) -> list[Finding]:
+    code = f"{code_prefix}-proof-record"
+    if inventory.root_kind != "live_operating_root":
+        return [
+            Finding(
+                "info",
+                code,
+                "durable proof/evidence record scan is live-root only; product fixtures and archive roots remain non-authority context",
+                inventory.state.rel_path if inventory.state and inventory.state.exists else None,
+            )
+        ]
+
+    records = _durable_proof_record_surfaces(inventory)
+    if not records:
+        return [
+            Finding(
+                "info",
+                code,
+                (
+                    "no durable proof/evidence records found at project/verification/*.md; "
+                    "the active-plan verification block remains the default evidence surface and absence does not block closeout"
+                ),
+            )
+        ]
+
+    findings: list[Finding] = []
+    for record in records[:DURABLE_PROOF_RECORD_LIMIT]:
+        status = _record_status(record)
+        title = _record_title(record)
+        findings.append(
+            Finding(
+                "info",
+                code,
+                (
+                    f"candidate: durable proof/evidence record: {record.rel_path}; "
+                    f"status={status}; title={title}; read-only closeout assembly input only"
+                ),
+                record.rel_path,
+            )
+        )
+        if record.frontmatter.errors or status == "unrecorded" or title == "untitled":
+            findings.append(
+                Finding(
+                    "warn",
+                    f"{code}-ambiguous",
+                    (
+                        f"ambiguous durable proof/evidence record metadata: {record.rel_path}; "
+                        "record status and heading should be explicit before relying on it for closeout assembly"
+                    ),
+                    record.rel_path,
+                )
+            )
+    if len(records) > DURABLE_PROOF_RECORD_LIMIT:
+        findings.append(
+            Finding(
+                "info",
+                code,
+                f"durable proof/evidence record scan truncated at {DURABLE_PROOF_RECORD_LIMIT} of {len(records)} records",
+            )
+        )
+    findings.append(
+        Finding(
+            "info",
+            f"{code}-non-authority",
+            "durable proof/evidence records are report inputs only; they do not satisfy closeout fields, approve lifecycle changes, or write evidence manifests",
+        )
+    )
+    return findings
+
+
+def _durable_proof_record_surfaces(inventory: Inventory) -> list[Surface]:
+    return sorted(
+        (
+            surface
+            for surface in inventory.present_surfaces
+            if surface.memory_route == "verification"
+            and surface.rel_path.startswith(DURABLE_PROOF_RECORD_PREFIX)
+            and surface.path.suffix.lower() == ".md"
+        ),
+        key=lambda surface: surface.rel_path,
+    )
+
+
+def _record_status(surface: Surface) -> str:
+    status = surface.frontmatter.data.get("status")
+    if isinstance(status, str) and status.strip():
+        return status.strip()
+    return "unrecorded"
+
+
+def _record_title(surface: Surface) -> str:
+    if surface.headings:
+        return surface.headings[0].title
+    return "untitled"
 
 
 def _active_plan_findings(inventory: Inventory, active_plan: Surface | None, state_data: dict[str, object]) -> list[Finding]:

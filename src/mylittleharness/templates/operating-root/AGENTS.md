@@ -8,7 +8,7 @@
 - Start by reading this `AGENTS.md`, `.codex/project-workflow.toml`, and `project/project-state.md`.
 - Read `project/implementation-plan.md` only when `project/project-state.md` or the manifest says `plan_status = "active"` or the user explicitly asks about the plan, phase, or closeout.
 - When `plan_status = "active"`, prefer first-class `active_phase` and `phase_status` values from `project/project-state.md` over prose inference for continuation.
-- Use MLH lifecycle routes instead of ad hoc memory pockets; incubation notes live under `project/plan-incubation/*.md`.
+- Use MLH lifecycle routes instead of ad hoc memory pockets; incubation notes live under `project/plan-incubation/*.md`, and optional accepted-work sequencing lives at `project/roadmap.md`.
 - Use the optional docs routing file when present as a routing aid for product docs and impact checks; it is not authority by itself.
 - Run `mylittleharness --root <this-repo> check` before mutating repair work.
 - Run `mylittleharness --root <this-repo> repair --dry-run` before `repair --apply`.

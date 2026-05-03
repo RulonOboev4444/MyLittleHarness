@@ -170,7 +170,9 @@ class PackageMetadataTests(unittest.TestCase):
             "`project/implementation-plan.md` only when `plan_status = \"active\"`",
             "`active_phase` and `phase_status`",
             "`status`/`check` report a compact lifecycle route table for live roots",
+            "`project/roadmap.md` sequencing route",
             "decision/do-not-revisit records",
+            "ADR records",
             "`intelligence --focus routes` prints the same read-only route table",
             "Codex skills, IDE-native rules, MCP clients, shell aliases, preflight wrappers, hooks, and CI may wrap this flow",
         ):
@@ -178,7 +180,10 @@ class PackageMetadataTests(unittest.TestCase):
         for expected in (
             "The operating-root start pass is portable across agents that can read files and run shell commands",
             "Route discovery is part of the visible lifecycle routing contract",
+            "optional roadmap",
             "decision/do-not-revisit",
+            "ADR",
+            "`project/roadmap.md` is an optional live-root sequencing surface",
             "Product-source fixtures do not emit live route-table rows",
             "do not require Codex skills, IDE-native skills, MCP clients, hooks, CI, or workstation adoption",
         ):
@@ -210,11 +215,20 @@ class PackageMetadataTests(unittest.TestCase):
         self.assertIn("A Codex skill, generated docs-impact report, IDE rule, MCP client, hook, or CI result may help route attention", metadata)
         self.assertIn("it cannot be required for the decision and cannot store the only copy of the decision", metadata)
         self.assertIn("marked closeout writeback block in `project/project-state.md`", metadata)
-        self.assertIn("active-plan frontmatter, exact active-plan closeout bullets, and active-phase body status line", metadata)
-        self.assertIn("`writeback --apply` synchronizes them", docs_readme)
+        self.assertIn("exact active-plan closeout bullets inside explicit closeout summary/facts/fields sections", metadata)
+        self.assertIn("schema examples, roadmap fields, and closeout checklist items are not derived closeout copies", metadata)
+        self.assertIn("`writeback --apply` synchronizes requested derived copies", docs_readme)
+        self.assertIn("Optional `--roadmap-item` sync uses only same-request closeout facts", docs_readme)
+        self.assertIn("`plan_id`, `active_plan`, and `archived_plan`", docs_readme)
+        self.assertIn("carry, replace, or refuse", docs_readme)
+        self.assertIn("Partial closeout updates may carry existing facts only when the recorded identity matches", metadata)
+        self.assertIn("plan-identity carry/replace/refusal guardrail", cli_spec)
         self.assertIn("Lifecycle `phase_status = complete` becomes `done` in the phase body", docs_readme)
-        self.assertIn("complete-but-not-archived lifecycle drift", metadata)
-        self.assertIn("post-writeback operating-memory compaction", docs_readme)
+        self.assertIn("Archive-active-plan refuses pending lifecycle state", cli_spec)
+        self.assertIn("synchronized completed `status`/`phase_status` derived copies", docs_readme)
+        self.assertIn("ready-for-closeout boundary", metadata)
+        self.assertIn("post-writeback plus compact-only operating-memory compaction", docs_readme)
+        self.assertIn("`writeback --dry-run|--apply --compact-only`", docs_readme)
         self.assertIn("default 250-line threshold", metadata)
 
     def test_optional_adapter_docs_reject_skill_owned_memory(self) -> None:
@@ -237,18 +251,21 @@ class PackageMetadataTests(unittest.TestCase):
         for expected in (
             "primary instruction-surface size warnings",
             "Deeper section-size detail remains in advanced `context-budget` and `doctor` diagnostics",
-            "`check --deep` adds links, context, and hygiene diagnostics",
+            "`check --deep` adds links, context, hygiene, and report-only grain diagnostics",
+            "Grain diagnostics inspect active-plan slice size",
             "`intelligence --focus routes`",
             "link/docmap/stale-root/rule-context/remainder drift",
         ):
             self.assertIn(expected, readme)
-        self.assertIn("check --focus validation|links|context|hygiene", docs_readme)
+        self.assertIn("check --focus validation|links|context|hygiene|grain", docs_readme)
+        self.assertIn("archived-plan calibration samples", docs_readme)
         self.assertIn("deeper section-size details remain advanced diagnostics", docs_readme)
         self.assertIn("read-only route metadata warnings", docs_readme)
         for expected in (
             "primary instruction-surface size warnings",
             "product docs and stable specs remain covered by advanced `context-budget` detail",
             "`doctor` stays summary-oriented",
+            "Grain diagnostics inspect active-plan frontmatter",
         ):
             self.assertIn(expected, cli_spec)
 
@@ -264,21 +281,49 @@ class PackageMetadataTests(unittest.TestCase):
             "| Incubation write rail | `incubate --dry-run`, `incubate --apply` |",
             "| Plan synthesis write rail | `plan --dry-run`, `plan --apply` |",
             "| Memory lifecycle hygiene rail | `memory-hygiene --dry-run`, `memory-hygiene --apply` |",
+            "| Roadmap item write rail | `roadmap --dry-run`, `roadmap --apply` |",
             "| Dev and release verification | `bootstrap --package-smoke`, `bootstrap --inspect` |",
             "| Deprecation candidates kept for compatibility | `tasks --inspect`, `semantic --inspect`, `semantic --evaluate`, `bootstrap --inspect` |",
             "`check --deep` is read-only",
-            "`check --focus validation|links|context|hygiene` is read-only",
+            "optional `project/roadmap.md` sequencing",
+            "`check --focus validation|links|context|hygiene|grain` is read-only",
+            "report-only grain diagnostics",
             "`intelligence --focus routes` renders compact source inventory plus `Boundary` and `Lifecycle Routes` only",
             "auto-compaction posture",
             "post-writeback operating-memory compaction",
+            "compact-only state-history compaction",
             "project/archive/reference/project-state-history-YYYY-MM-DD",
-            "automatic completed-posture `writeback --apply --phase-status complete`",
+            "explicit ready-for-closeout `writeback --apply --phase-status complete`",
+            "`writeback --dry-run --compact-only`",
             "`incubate --dry-run --topic <topic> --note <note>`",
             "`incubate --apply --topic <topic> --note <note>`",
+            "`--note-file <path>`",
+            "`--note-file -`",
             "`plan --dry-run --title <title> --objective <objective>`",
             "`plan --apply --title <title> --objective <objective>`",
+            "--roadmap-item <id>",
+            "--execution-slice",
+            "--slice-member",
+            "primary_roadmap_item",
+            "covered_roadmap_items",
+            "target_artifacts",
+            "closeout_boundary",
+            "plan-synthesis-bundle-rationale",
+            "plan-synthesis-target-artifact-pressure",
+            "Plan Synthesis Notes",
+            "target_artifact_pressure",
+            "phase_pressure",
+            "execution-policy posture",
+            "auto_continue",
+            "stop_conditions",
+            "current-phase-only execution",
             "memory-hygiene --dry-run --source <rel>",
             "`memory-hygiene --apply`",
+            "memory-hygiene --dry-run --scan",
+            "roadmap --dry-run --action add --item-id <id>",
+            "`roadmap --apply`",
+            "reciprocal source-incubation",
+            "coverage-aware incubation auto-archive",
             "Route metadata diagnostics are read-only validation",
             "route-metadata-frontmatter",
         ):
@@ -286,16 +331,59 @@ class PackageMetadataTests(unittest.TestCase):
 
         pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         self.assertIn("route metadata", pyproject["project"]["description"])
+        self.assertIn("roadmap routes", pyproject["project"]["description"])
         self.assertIn("hidden incubate same-topic note rail", pyproject["project"]["description"])
         self.assertIn("hidden deterministic plan synthesis rail", pyproject["project"]["description"])
+        self.assertIn("roadmap slice frontmatter", pyproject["project"]["description"])
+        self.assertIn("bounded plan-synthesis rationale and target-artifact pressure reporting", pyproject["project"]["description"])
+        self.assertIn("current-phase-only execution metadata", pyproject["project"]["description"])
+        self.assertIn("explicit ready-for-closeout boundary", pyproject["project"]["description"])
+        self.assertIn("explicit auto_continue stop-condition diagnostics", pyproject["project"]["description"])
         self.assertIn("hidden memory lifecycle hygiene rail", pyproject["project"]["description"])
-        self.assertIn("post-writeback state compaction", pyproject["project"]["description"])
+        self.assertIn("hidden bounded roadmap item mutation rail", pyproject["project"]["description"])
+        self.assertIn("advisory execution-slice fields", pyproject["project"]["description"])
+        self.assertIn("relationship hygiene scan diagnostics", pyproject["project"]["description"])
+        self.assertIn("coverage-aware incubation auto-archive", pyproject["project"]["description"])
+        self.assertIn("text audit and entry coverage suggestions", pyproject["project"]["description"])
+        self.assertIn("reciprocal source-incubation metadata", pyproject["project"]["description"])
+        self.assertIn("hidden plan/writeback roadmap relationship sync", pyproject["project"]["description"])
+        self.assertIn("plan-identity carry/replace guardrail", pyproject["project"]["description"])
+        self.assertIn("post-writeback and compact-only state compaction", pyproject["project"]["description"])
+        self.assertIn("optional proof/evidence route records", pyproject["project"]["description"])
+        self.assertIn("report-only grain diagnostics and archived-plan calibration samples", pyproject["project"]["description"])
+
+    def test_phase_execution_policy_docs_are_current_phase_only(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        docs_readme = (ROOT / "docs/README.md").read_text(encoding="utf-8")
+        authority = (ROOT / "docs/specs/authority-and-memory.md").read_text(encoding="utf-8")
+        metadata = (ROOT / "docs/specs/metadata-routing-and-evidence.md").read_text(encoding="utf-8")
+        plan_synthesis = (ROOT / "project/specs/workflow/workflow-plan-synthesis-spec.md").read_text(encoding="utf-8")
+        rollout = (ROOT / "project/specs/workflow/workflow-rollout-slices-spec.md").read_text(encoding="utf-8")
+        closeout = (ROOT / "project/specs/workflow/workflow-verification-and-closeout-spec.md").read_text(encoding="utf-8")
+        plan_synthesis_template = (ROOT / "src/mylittleharness/templates/workflow/workflow-plan-synthesis-spec.md").read_text(encoding="utf-8")
+        rollout_template = (ROOT / "src/mylittleharness/templates/workflow/workflow-rollout-slices-spec.md").read_text(encoding="utf-8")
+        closeout_template = (ROOT / "src/mylittleharness/templates/workflow/workflow-verification-and-closeout-spec.md").read_text(encoding="utf-8")
+
+        for doc in (readme, docs_readme, authority, metadata, plan_synthesis, rollout, plan_synthesis_template, rollout_template):
+            self.assertIn("current-phase-only", doc)
+            self.assertIn("auto_continue", doc)
+            self.assertIn("stop_conditions", doc)
+        for doc in (docs_readme, metadata, closeout):
+            self.assertIn("stop-condition", doc)
+            self.assertIn("verification", doc)
+            self.assertIn("write scope", doc)
+            self.assertIn("closeout", doc)
+        self.assertIn("active-plan-auto-continue", readme)
+        self.assertIn("writeback-phase-execution-boundary", metadata)
+        self.assertIn("verification success alone does not authorize the next phase", rollout_template)
+        self.assertIn("Closeout preparation remains an explicit boundary", closeout_template)
 
     def test_operating_root_agents_template_stays_compact_while_routing_is_cli_visible(self) -> None:
         template = (ROOT / "src/mylittleharness/templates/operating-root/AGENTS.md").read_text(encoding="utf-8")
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         authority = (ROOT / "docs/specs/authority-and-memory.md").read_text(encoding="utf-8")
         artifact_model = (ROOT / "project/specs/workflow/workflow-artifact-model-spec.md").read_text(encoding="utf-8")
+        capability_roadmap = (ROOT / "project/specs/workflow/workflow-capability-roadmap-spec.md").read_text(encoding="utf-8")
 
         self.assertLessEqual(len(template.splitlines()), 20)
         self.assertIn("Use MLH lifecycle routes instead of ad hoc memory pockets", template)
@@ -303,14 +391,25 @@ class PackageMetadataTests(unittest.TestCase):
         for expected in (
             "`status`, `check`, and `intelligence --focus routes`",
             "without growing `AGENTS.md` into a dense manual",
+            "roadmap",
             "decision/do-not-revisit records",
+            "ADR records",
+            "optional `project/verification/*.md` proof/evidence records",
             "Product-source fixtures must not present that table as live memory",
             "Read-only route metadata validation is also live-root-only",
         ):
             self.assertIn(expected, authority)
         self.assertIn("CLI route-table output is a compact discovery view over this artifact model", artifact_model)
+        self.assertIn("durable proof/evidence records are closeout assembly inputs only", artifact_model)
+        self.assertIn("optional accepted-work sequencing lives at `project/roadmap.md`", template)
+        self.assertIn("optional sequencing authority for accepted work", capability_roadmap)
+        self.assertIn("accepted relationship vocabulary", capability_roadmap)
+        self.assertIn("project/archive/reference/incubation/**", capability_roadmap)
+        self.assertIn("Coverage-aware incubation auto-archive is allowed only", capability_roadmap)
+        self.assertIn("Entry Coverage", capability_roadmap)
         self.assertIn("Route output is advisory only", readme)
-        self.assertIn("decision route", (ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        self.assertIn("optional `project/verification/*.md` proof/evidence records", readme)
+        self.assertIn("decision, ADR, and roadmap routes", (ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
     def test_route_metadata_diagnostics_docs_are_read_only(self) -> None:
         docs_readme = (ROOT / "docs/README.md").read_text(encoding="utf-8")

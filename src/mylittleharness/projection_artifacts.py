@@ -21,6 +21,7 @@ ARTIFACT_NAMES = (
     "links.json",
     "backlinks.json",
     "fan-in.json",
+    "relationships.json",
     "summary.json",
 )
 KNOWN_NON_JSON_PROJECTION_NAMES = (
@@ -31,7 +32,7 @@ KNOWN_NON_JSON_PROJECTION_NAMES = (
 )
 PAYLOAD_HASH_ARTIFACT_NAMES = tuple(name for name in ARTIFACT_NAMES if name != "manifest.json")
 SOURCE_SET_ARTIFACT_NAMES = ("sources.json", "source-hashes.json")
-RECORD_SET_ARTIFACT_NAMES = ("links.json", "backlinks.json", "fan-in.json", "summary.json")
+RECORD_SET_ARTIFACT_NAMES = ("links.json", "backlinks.json", "fan-in.json", "relationships.json", "summary.json")
 
 
 def build_projection_artifacts(inventory: Inventory) -> list[Finding]:
@@ -54,7 +55,8 @@ def build_projection_artifacts(inventory: Inventory) -> list[Finding]:
             "projection-artifact-records",
             (
                 f"sources={projection.summary.source_count}; links={projection.summary.link_record_count}; "
-                f"fan_in={projection.summary.fan_in_record_count}; hashes={projection.summary.hashed_source_count}"
+                f"fan_in={projection.summary.fan_in_record_count}; relationships={projection.summary.relationship_edge_count}; "
+                f"hashes={projection.summary.hashed_source_count}"
             ),
         ),
     ]
@@ -357,6 +359,31 @@ def artifact_payloads(inventory: Inventory, projection: Projection) -> dict[str,
         for source in projection.sources
         if source.content_hash is not None
     ]
+    relationships = {
+        "nodes": [
+            {
+                "id": node.id,
+                "kind": node.kind,
+                "source": node.source,
+                "title": node.title,
+                "status": node.status,
+                "route": node.route,
+            }
+            for node in projection.relationship_nodes
+        ],
+        "edges": [
+            {
+                "source": edge.source,
+                "target": edge.target,
+                "relation": edge.relation,
+                "status": edge.status,
+                "source_path": edge.source_path,
+                "line": edge.line,
+            }
+            for edge in projection.relationship_edges
+        ],
+        "authority": "repo-visible relationship metadata remains authoritative; this graph is a disposable navigation projection",
+    }
     summary = asdict(projection.summary)
     payloads = {
         "sources.json": {"schema_version": ARTIFACT_SCHEMA_VERSION, "sources": sources},
@@ -364,6 +391,7 @@ def artifact_payloads(inventory: Inventory, projection: Projection) -> dict[str,
         "links.json": {"schema_version": ARTIFACT_SCHEMA_VERSION, "links": links},
         "backlinks.json": {"schema_version": ARTIFACT_SCHEMA_VERSION, "backlinks": backlinks},
         "fan-in.json": {"schema_version": ARTIFACT_SCHEMA_VERSION, "fan_in": fan_in},
+        "relationships.json": {"schema_version": ARTIFACT_SCHEMA_VERSION, "relationships": relationships},
         "summary.json": {"schema_version": ARTIFACT_SCHEMA_VERSION, "summary": summary},
     }
     payload_hashes = {name: _payload_hash(payloads[name]) for name in PAYLOAD_HASH_ARTIFACT_NAMES}
@@ -424,6 +452,7 @@ def _payload_shape_findings(payloads: dict[str, Any]) -> list[Finding]:
         "links.json": ("links", list),
         "backlinks.json": ("backlinks", list),
         "fan-in.json": ("fan_in", list),
+        "relationships.json": ("relationships", dict),
         "summary.json": ("summary", dict),
     }
     for name, payload in sorted(payloads.items()):
@@ -612,6 +641,8 @@ def _stale_findings(projection: Projection, payloads: dict[str, Any]) -> list[Fi
                 "missing_required_count",
                 "link_record_count",
                 "fan_in_record_count",
+                "relationship_node_count",
+                "relationship_edge_count",
             )
             if stored_summary.get(key) != expected[key]
         ]

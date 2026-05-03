@@ -62,7 +62,7 @@ Lazy creation remains file-level, not directory-level: `project/implementation-p
 Adjacent helper surfaces may coexist around that structure, but they do not outrank the canonical artifact model defined here.
 The contract must remain understandable without installed skills, hooks, MCP servers, Git, GitHub, browser state, IDE state, or external services.
 
-CLI route-table output is a compact discovery view over this artifact model. `status`, `check`, and `intelligence --focus routes` may name the live-root routes for state, active plans, incubation, research, stable specs, verification, closeout/writeback, archive, docs routing, and future optional lanes, but the output is advisory only. It does not replace these repo-visible artifacts and does not authorize mutation, repair, closeout, archive, commit, or lifecycle decisions.
+CLI route-table output is a compact discovery view over this artifact model. `status`, `check`, and `intelligence --focus routes` may name the live-root routes for state, active plans, incubation, research, stable specs, verification through the active-plan block and optional `project/verification/*.md` proof/evidence records, closeout/writeback, archive, and docs routing, but the output is advisory only. It does not replace these repo-visible artifacts and does not authorize mutation, repair, closeout, archive, commit, or lifecycle decisions.
 
 ## Attention Tiers
 
@@ -326,14 +326,15 @@ Rule:
 ### Verification artifacts
 
 Canonical surface:
-- optional future `project/verification/*.md`
-- otherwise the verification block inside the active plan
+- active-plan verification block
+- optional `project/verification/*.md` durable proof/evidence records
 
 Purpose:
 - capture verification evidence when the evidence is too important or too large to leave implicit
 
 Default rule:
 - keep verification inside the active plan unless the change is medium/high-risk, externally visible, policy-changing, or audit-heavy
+- durable proof/evidence records are closeout assembly inputs only; they do not approve lifecycle changes or replace explicit closeout fields
 
 ### Historical archive
 
@@ -487,5 +488,4 @@ The workflow must avoid:
 - using archive artifacts as default authority for current execution
 - copying stable rules into temporary notes instead of linking to canonical docs
 - introducing new hidden memory layers instead of improving the repo-native markdown surfaces
-
 

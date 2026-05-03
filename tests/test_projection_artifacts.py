@@ -31,10 +31,14 @@ class ProjectionArtifactTests(unittest.TestCase):
 
             manifest = json.loads((artifact_dir / "manifest.json").read_text(encoding="utf-8"))
             sources = json.loads((artifact_dir / "sources.json").read_text(encoding="utf-8"))
+            relationships = json.loads((artifact_dir / "relationships.json").read_text(encoding="utf-8"))
             self.assertEqual(2, ARTIFACT_SCHEMA_VERSION)
             self.assertEqual(2, manifest["schema_version"])
             self.assertEqual(".mylittleharness/generated/projection", manifest["storage_boundary"])
             self.assertIn("project/project-state.md", {row["path"] for row in sources["sources"]})
+            self.assertIn("nodes", relationships["relationships"])
+            self.assertIn("edges", relationships["relationships"])
+            self.assertIn("repo-visible relationship metadata remains authoritative", relationships["relationships"]["authority"])
             self.assertEqual(set(ARTIFACT_NAMES) - {"manifest.json"}, set(manifest["payload_hashes"]))
             self.assertEqual(64, len(manifest["source_set_hash"]))
             self.assertEqual(64, len(manifest["record_set_hash"]))
@@ -203,7 +207,7 @@ class ProjectionArtifactTests(unittest.TestCase):
             self.assertIn("product-source compatibility fixture", attach_output.getvalue())
             self.assertIn("product-source compatibility fixture", repair_output.getvalue())
 
-    def test_path_query_parity_reports_current_artifacts_and_skips_stale_artifacts(self) -> None:
+    def test_path_query_parity_auto_refreshes_stale_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_root(Path(tmp), active=False, mirrors=False)
             with redirect_stdout(io.StringIO()):
@@ -224,8 +228,9 @@ class ProjectionArtifactTests(unittest.TestCase):
                 stale_code = main(["--root", str(root), "intelligence", "--focus", "search", "--path", ".agents/docmap.yaml"])
             stale_rendered = stale_output.getvalue()
             self.assertEqual(stale_code, 0)
-            self.assertIn("projection-artifact-query-skipped", stale_rendered)
-            self.assertIn("direct in-memory path search remains authoritative", stale_rendered)
+            self.assertIn("navigation-cache-artifacts-refresh", stale_rendered)
+            self.assertIn("projection-artifact-query-current", stale_rendered)
+            self.assertNotIn("projection-artifact-query-skipped", stale_rendered)
 
     def test_exact_text_search_reports_source_only_projection_boundary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

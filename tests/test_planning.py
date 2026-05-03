@@ -27,12 +27,17 @@ class PlanningTests(unittest.TestCase):
             'active_phase: "phase-1-implementation"',
             'phase_status: "pending"',
             'docs_decision: "uncertain"',
+            'execution_policy: "current-phase-only"',
+            "auto_continue: false",
+            "stop_conditions:",
+            'closeout_boundary: "explicit-closeout-required"',
             "# Plan Synthesis Rail",
             "## Objective",
             "## Explicit Task Input",
             "## Authority Inputs",
             "## Non-goals",
             "## Invariants",
+            "## Execution Policy",
             "## File Ownership",
             "## Phases",
             "## Verification Strategy",
@@ -52,6 +57,20 @@ class PlanningTests(unittest.TestCase):
 
         self.assertIn('docs_decision: "uncertain"', rendered)
         self.assertIn("- docs_decision: uncertain", rendered)
+
+    def test_renderer_defaults_to_current_phase_only_execution_policy(self) -> None:
+        rendered = render_implementation_plan(
+            make_plan_request("Phase Policy", "Make phase continuation explicit.", None),
+            today=date(2026, 5, 1),
+        )
+
+        self.assertIn('execution_policy: "current-phase-only"', rendered)
+        self.assertIn("auto_continue: false", rendered)
+        self.assertIn("stop_conditions:", rendered)
+        self.assertIn("default continuation: execute only `phase-1-implementation`", rendered)
+        self.assertIn("verification failed", rendered)
+        self.assertIn("write scope", rendered)
+        self.assertIn("explicit closeout preparation", rendered)
 
     def test_renderer_defaults_do_not_contain_destructive_rollback_commands(self) -> None:
         rendered = render_implementation_plan(

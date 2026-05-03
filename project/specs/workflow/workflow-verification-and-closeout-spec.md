@@ -231,6 +231,10 @@ Closeout ordering remains:
 
 If any required closeout gate is incomplete, the plan stays active.
 
+For phase execution, completed verification is evidence, not automatic continuation. A plan may opt into auto-continuation only through explicit active-plan metadata such as `auto_continue = true` plus stop-condition coverage for failed or missing verification, uncertain docs or lifecycle authority, write scope changes, source-reality changes, sensitive or destructive action, and the final closeout boundary. Without that explicit safe contract, the default next action after a verified phase is state writeback or closeout preparation, not the next phase by inference. `writeback --phase-status complete` records a ready-for-closeout boundary only; active-plan archive, roadmap done-status, source-incubation archive, and next-slice opening require separate explicit requests.
+
+Read-only grain diagnostics may flag missing or generic verification gates, raw-log-heavy active plans, done roadmap items without archived evidence, or archived-plan samples with weak closeout facts. These findings are closeout assembly prompts and calibration evidence only; they cannot mark work verified, write closeout state, archive a plan, or change roadmap status.
+
 For MyLittleHarness Core v0 work, closeout must also name carry-forward destinations for deferred enhancement-ledger items, skills/MCP/hooks, package/attach compatibility, rename decisions, and lifecycle mutation. Naming a destination does not promote those lanes into core.
 
 When manifest policy is `manual`, the commit decision is skipped even if the directory later becomes a git worktree. When the root is not a git worktree, `worktree_start_state` should record the failed git status fact rather than pretending the tree was clean.
@@ -246,5 +250,3 @@ The workflow must avoid:
 - marking work complete based only on intention or narration
 - creating standalone verification docs for every tiny task
 - hiding retries, repair loops, or escalation inside verification helpers
-
-

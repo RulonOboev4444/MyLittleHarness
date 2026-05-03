@@ -5,6 +5,7 @@ from collections.abc import Iterable
 
 from .inventory import Inventory, Surface
 from .models import Finding
+from .evidence import durable_proof_record_findings
 from .evidence_cues import CLOSEOUT_FIELD_NAMES, closeout_field_cues, cue_findings, find_cues
 from .projection_artifacts import inspect_projection_artifacts
 from .projection_index import inspect_projection_index
@@ -44,6 +45,7 @@ def closeout_sections(inventory: Inventory) -> list[tuple[str, list[Finding]]]:
         ("Worktree", _worktree_findings(vcs_posture)),
         ("Closeout Fields", _closeout_field_findings(inventory, vcs_posture)),
         ("Git Evidence", _git_evidence_findings(inventory, vcs_posture)),
+        ("Proof Records", durable_proof_record_findings(inventory, "closeout")),
         ("Evidence Cues", _evidence_cue_findings(inventory)),
         ("Quality Gates", _quality_gate_findings(inventory, vcs_posture)),
         ("Projection", _projection_findings(inventory)),

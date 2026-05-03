@@ -152,6 +152,9 @@ def load_inventory(root: Path | str) -> Inventory:
     if plan_status == "active" or (root_path / active_plan_rel).exists():
         active_plan_surface = add(active_plan_rel, "active-plan", plan_status == "active")
 
+    if (root_path / "project/roadmap.md").exists():
+        add("project/roadmap.md", "roadmap", False)
+
     for name in EXPECTED_SPEC_NAMES:
         add(f"project/specs/workflow/{name}", "stable-spec", True)
 

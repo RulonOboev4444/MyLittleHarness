@@ -10,7 +10,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from mylittleharness.inventory import EXPECTED_SPEC_NAMES, load_inventory
 from mylittleharness.projection import build_projection
-from tests.test_cli import make_root
+from tests.test_cli import make_root, write_sample_roadmap
 
 
 class ProjectionTests(unittest.TestCase):
@@ -44,6 +44,38 @@ class ProjectionTests(unittest.TestCase):
             self.assertEqual(1, len(docmap_fan_in))
             self.assertEqual(2, docmap_fan_in[0].inbound_count)
             self.assertEqual(("AGENTS.md", "README.md"), docmap_fan_in[0].sources)
+
+    def test_projection_records_lifecycle_relationship_graph(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=True, mirrors=False)
+            write_sample_roadmap(root)
+            projection = build_projection(load_inventory(root))
+
+            node_ids = {node.id for node in projection.relationship_nodes}
+            self.assertIn("project/roadmap.md", node_ids)
+            self.assertIn("project/roadmap.md#minimal-roadmap-mutation-rail", node_ids)
+
+            dependency_edges = [
+                edge
+                for edge in projection.relationship_edges
+                if edge.source == "project/roadmap.md#minimal-roadmap-mutation-rail"
+                and edge.relation == "dependencies"
+            ]
+            self.assertEqual(1, len(dependency_edges))
+            self.assertEqual("project/roadmap.md#roadmap-operationalization-rail", dependency_edges[0].target)
+            self.assertEqual("present", dependency_edges[0].status)
+            slice_member_edges = [
+                edge
+                for edge in projection.relationship_edges
+                if edge.source == "project/roadmap.md#roadmap-operationalization-rail"
+                and edge.relation == "slice_members"
+            ]
+            self.assertEqual(
+                {"project/roadmap.md#roadmap-operationalization-rail", "project/roadmap.md#minimal-roadmap-mutation-rail"},
+                {edge.target for edge in slice_member_edges},
+            )
+            self.assertGreater(projection.summary.relationship_node_count, 0)
+            self.assertGreater(projection.summary.relationship_edge_count, 0)
 
     def test_projection_reports_missing_and_unreadable_source_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

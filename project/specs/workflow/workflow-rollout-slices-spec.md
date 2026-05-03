@@ -49,6 +49,16 @@ That means:
 - Prefer operator-invoked helpers over always-on background behavior.
 - Introduce automation only when it clearly reduces toil without weakening transparency.
 
+## Roadmap Execution Slice Metadata
+
+Roadmap-backed rollout may group accepted roadmap items into one advisory execution slice when the items share context, target artifacts, verification posture, and closeout boundary. Roadmap item blocks can expose `execution_slice`, `slice_goal`, `slice_members`, `slice_dependencies`, and `slice_closeout_boundary` as planning evidence only.
+
+The active implementation plan remains the executable contract for one slice. When a plan opens from a roadmap item, plan frontmatter can carry `primary_roadmap_item`, `covered_roadmap_items`, `domain_context`, `target_artifacts`, `execution_policy`, `auto_continue`, `stop_conditions`, and `closeout_boundary`; `project/project-state.md` should keep only current lifecycle pointers. The default execution policy is current-phase-only: continue only the current active phase, record repo-visible evidence/state, and stop unless explicit auto-continuation metadata and stop-condition coverage are present. A completed phase can become ready for explicit closeout/writeback without archiving the active plan, marking roadmap items done, or opening the next execution slice. Neither roadmap grouping nor generated plan metadata approves repair, closeout, archive, commit, rollback, lifecycle decisions, or next-slice movement.
+
+Bounded plan synthesis may explain why a roadmap-backed plan bundles or splits accepted items by reporting shared execution slice, shared specs, shared target artifacts, source inputs, dependencies, target-artifact pressure, and phase pressure. These reports are advisory review aids only; they do not calibrate slice size, require a split, or authorize a lifecycle transition.
+
+Slice-grain diagnostics are allowed only as read-only reports. They may compare active and archived plans for covered roadmap item count, phase count, target artifact count, write-scope specificity, verification specificity, stop points, closeout evidence, and roadmap live-tail hygiene. The output is empirical tuning evidence, not an automatic slice split, roadmap compaction, closeout decision, or lifecycle approval.
+
 ## Slice 1: Canonical Doc and Template Contract
 
 ### Goal
@@ -180,4 +190,3 @@ It should not begin with:
 ## Success Condition
 
 The rollout succeeds when the workflow becomes more trustworthy and scalable without becoming heavier, more opaque, or more scheduler-like.
-

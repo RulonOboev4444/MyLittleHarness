@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import glob
 import hashlib
+import ast
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,6 +20,54 @@ ROOT_RELATIVE_LINK_PREFIXES = (
     "tests/",
 )
 ROOT_RELATIVE_LINK_NAMES = {"README.md", "AGENTS.md", "pyproject.toml"}
+FRONTMATTER_RELATIONSHIP_FIELDS = {
+    "archived_plan",
+    "archived_to",
+    "covered_roadmap_items",
+    "implemented_by",
+    "merged_from",
+    "merged_into",
+    "primary_roadmap_item",
+    "promoted_to",
+    "rejected_by",
+    "related_adr",
+    "related_adrs",
+    "related_decision",
+    "related_decisions",
+    "related_doc",
+    "related_docs",
+    "related_incubation",
+    "related_plan",
+    "related_roadmap",
+    "related_roadmap_item",
+    "related_research",
+    "related_spec",
+    "related_specs",
+    "related_verification",
+    "source_incubation",
+    "source_research",
+    "source_roadmap",
+    "split_from",
+    "split_to",
+    "superseded_by",
+    "supersedes",
+    "target_artifacts",
+}
+ROADMAP_RELATIONSHIP_FIELDS = {
+    "source_research",
+    "source_incubation",
+    "related_specs",
+    "related_plan",
+    "archived_plan",
+    "target_artifacts",
+}
+ROADMAP_ITEM_RELATIONSHIP_FIELDS = {
+    "dependencies",
+    "slice_members",
+    "slice_dependencies",
+    "supersedes",
+    "superseded_by",
+}
 
 
 @dataclass(frozen=True)
@@ -59,6 +108,26 @@ class ProjectionFanInRecord:
 
 
 @dataclass(frozen=True)
+class ProjectionRelationshipNode:
+    id: str
+    kind: str
+    source: str
+    title: str
+    status: str
+    route: str
+
+
+@dataclass(frozen=True)
+class ProjectionRelationshipEdge:
+    source: str
+    target: str
+    relation: str
+    status: str
+    source_path: str
+    line: int | None = None
+
+
+@dataclass(frozen=True)
 class ProjectionSummary:
     rebuild_status: str
     storage_boundary: str
@@ -69,6 +138,8 @@ class ProjectionSummary:
     missing_required_count: int
     link_record_count: int
     fan_in_record_count: int
+    relationship_node_count: int
+    relationship_edge_count: int
 
 
 @dataclass(frozen=True)
@@ -76,6 +147,8 @@ class Projection:
     sources: tuple[ProjectionSourceRecord, ...]
     links: tuple[ProjectionLinkRecord, ...]
     fan_in: tuple[ProjectionFanInRecord, ...]
+    relationship_nodes: tuple[ProjectionRelationshipNode, ...]
+    relationship_edges: tuple[ProjectionRelationshipEdge, ...]
     summary: ProjectionSummary
 
     @property
@@ -93,6 +166,7 @@ def build_projection(inventory: Inventory) -> Projection:
     sources = tuple(_source_record(surface) for surface in inventory.surfaces)
     links = tuple(_local_link_records(inventory))
     fan_in = tuple(_fan_in_records(inventory, links))
+    relationship_nodes, relationship_edges = _relationship_graph_records(inventory)
     readable_count = len([source for source in sources if source.readable])
     hashed_count = len([source for source in sources if source.content_hash is not None])
     summary = ProjectionSummary(
@@ -105,8 +179,17 @@ def build_projection(inventory: Inventory) -> Projection:
         missing_required_count=len([source for source in sources if source.required and not source.present]),
         link_record_count=len(links),
         fan_in_record_count=len(fan_in),
+        relationship_node_count=len(relationship_nodes),
+        relationship_edge_count=len(relationship_edges),
     )
-    return Projection(sources=sources, links=links, fan_in=fan_in, summary=summary)
+    return Projection(
+        sources=sources,
+        links=links,
+        fan_in=fan_in,
+        relationship_nodes=tuple(relationship_nodes),
+        relationship_edges=tuple(relationship_edges),
+        summary=summary,
+    )
 
 
 def resolve_link(root: Path, target: str, source_rel: str | None = None) -> LinkResolution:
@@ -276,6 +359,237 @@ def _fan_in_records(inventory: Inventory, records: tuple[ProjectionLinkRecord, .
     return fan_in
 
 
+def _relationship_graph_records(inventory: Inventory) -> tuple[list[ProjectionRelationshipNode], list[ProjectionRelationshipEdge]]:
+    roadmap_items = _roadmap_items(inventory)
+    item_ids = set(roadmap_items)
+    nodes: dict[str, ProjectionRelationshipNode] = {}
+    edges: set[ProjectionRelationshipEdge] = set()
+
+    for surface in inventory.present_surfaces:
+        if surface.role == "package-mirror":
+            continue
+        node = ProjectionRelationshipNode(
+            id=surface.rel_path,
+            kind=surface.memory_route or surface.role,
+            source=surface.rel_path,
+            title=_surface_title(surface),
+            status=_surface_status(surface),
+            route=surface.memory_route,
+        )
+        nodes[node.id] = node
+        key_lines = _frontmatter_key_lines(surface.content)
+        for field in sorted(FRONTMATTER_RELATIONSHIP_FIELDS):
+            for target in _relationship_values(surface.frontmatter.data.get(field)):
+                edge = _relationship_edge(
+                    surface.rel_path,
+                    target,
+                    field,
+                    surface.rel_path,
+                    key_lines.get(field),
+                    inventory,
+                    item_ids,
+                )
+                if edge:
+                    edges.add(edge)
+
+    for item_id, item in sorted(roadmap_items.items()):
+        node_id = _roadmap_item_node_id(item_id)
+        nodes[node_id] = ProjectionRelationshipNode(
+            id=node_id,
+            kind="roadmap-item",
+            source="project/roadmap.md",
+            title=str(item.get("title") or item_id),
+            status=str(item.get("status") or ""),
+            route="roadmap",
+        )
+        for field in sorted(ROADMAP_RELATIONSHIP_FIELDS):
+            for target in _relationship_values(item.get(field)):
+                edge = _relationship_edge(
+                    node_id,
+                    target,
+                    field,
+                    "project/roadmap.md",
+                    None,
+                    inventory,
+                    item_ids,
+                )
+                if edge:
+                    edges.add(edge)
+        for field in sorted(ROADMAP_ITEM_RELATIONSHIP_FIELDS):
+            for target_item in _relationship_values(item.get(field)):
+                if not target_item:
+                    continue
+                status = "present" if target_item in item_ids else "missing"
+                edges.add(
+                    ProjectionRelationshipEdge(
+                        source=node_id,
+                        target=_roadmap_item_node_id(target_item),
+                        relation=field,
+                        status=status,
+                        source_path="project/roadmap.md",
+                    )
+                )
+
+    return (
+        sorted(nodes.values(), key=lambda node: (node.kind, node.id)),
+        sorted(edges, key=lambda edge: (edge.source, edge.relation, edge.target, edge.source_path, edge.line or 0)),
+    )
+
+
+def _roadmap_item_node_id(item_id: str) -> str:
+    return f"project/roadmap.md#{item_id}"
+
+
+def _relationship_edge(
+    source: str,
+    target: str,
+    relation: str,
+    source_path: str,
+    line: int | None,
+    inventory: Inventory,
+    roadmap_item_ids: set[str],
+) -> ProjectionRelationshipEdge | None:
+    normalized = _normalized_relationship_target(target, relation)
+    if not normalized:
+        return None
+    status = _relationship_target_status(inventory, normalized, roadmap_item_ids)
+    return ProjectionRelationshipEdge(
+        source=source,
+        target=normalized,
+        relation=relation,
+        status=status,
+        source_path=source_path,
+        line=line,
+    )
+
+
+def _normalized_relationship_target(target: str, relation: str) -> str:
+    clean = str(target or "").strip().strip("`").strip()
+    if not clean:
+        return ""
+    if relation in {"covered_roadmap_items", "primary_roadmap_item", "related_roadmap_item"}:
+        return _roadmap_item_node_id(clean)
+    return normalized_link_path(clean) or clean
+
+
+def _relationship_target_status(inventory: Inventory, target: str, roadmap_item_ids: set[str]) -> str:
+    if target.startswith("project/roadmap.md#"):
+        item_id = target.split("#", 1)[1]
+        return "present" if item_id in roadmap_item_ids else "missing"
+    if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", target) or target.startswith("mailto:"):
+        return "external"
+    if _is_absolute_path(target):
+        rel_target = _root_relative_link_path(inventory, target)
+        if rel_target is not None:
+            target = rel_target
+    if target in inventory.surface_by_rel:
+        return "present" if inventory.surface_by_rel[target].exists else "missing"
+    if (inventory.root / target).exists():
+        return "present"
+    return "missing"
+
+
+def _relationship_values(value: object) -> tuple[str, ...]:
+    if value in (None, ""):
+        return ()
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return ()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            try:
+                parsed = ast.literal_eval(stripped)
+            except (SyntaxError, ValueError):
+                parsed = ()
+            if isinstance(parsed, list):
+                return tuple(str(item).strip() for item in parsed if str(item).strip())
+        return (stripped,)
+    if isinstance(value, (list, tuple)):
+        return tuple(str(item).strip() for item in value if str(item).strip())
+    return (str(value).strip(),)
+
+
+def _surface_title(surface: Surface) -> str:
+    for key in ("title", "topic", "project", "id"):
+        value = surface.frontmatter.data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    for heading in surface.headings:
+        if heading.level == 1 and heading.title.strip():
+            return heading.title.strip()
+    return Path(surface.rel_path).stem
+
+
+def _surface_status(surface: Surface) -> str:
+    value = surface.frontmatter.data.get("status")
+    return str(value or "").strip()
+
+
+def _frontmatter_key_lines(text: str) -> dict[str, int]:
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {}
+    key_lines: dict[str, int] = {}
+    for index, line in enumerate(lines[1:], start=2):
+        if line.strip() == "---":
+            break
+        match = re.match(r"^([A-Za-z0-9_-]+):", line)
+        if match:
+            key_lines.setdefault(match.group(1), index)
+    return key_lines
+
+
+def _roadmap_items(inventory: Inventory) -> dict[str, dict[str, object]]:
+    surface = inventory.surface_by_rel.get("project/roadmap.md")
+    if not surface or not surface.exists:
+        return {}
+    lines = surface.content.splitlines()
+    items: dict[str, dict[str, object]] = {}
+    current: dict[str, object] = {}
+    current_title = ""
+    in_items = False
+    for line in lines:
+        if re.match(r"^##\s+Items\s*$", line.strip()):
+            in_items = True
+            continue
+        if in_items and re.match(r"^##\s+\S", line.strip()):
+            break
+        if not in_items:
+            continue
+        heading = re.match(r"^###\s+(.+?)\s*$", line.strip())
+        if heading:
+            _store_roadmap_item(items, current_title, current)
+            current = {}
+            current_title = heading.group(1).strip()
+            continue
+        match = re.match(r"^-\s+`([A-Za-z0-9_-]+)`:\s*(.*?)\s*$", line.strip())
+        if not match:
+            continue
+        key = match.group(1)
+        raw = match.group(2).strip()
+        if raw.startswith("`") and raw.endswith("`"):
+            raw = raw[1:-1]
+        if raw.startswith("[") and raw.endswith("]"):
+            try:
+                parsed = ast.literal_eval(raw)
+            except (SyntaxError, ValueError):
+                parsed = []
+            current[key] = parsed if isinstance(parsed, list) else []
+        else:
+            current[key] = raw
+    _store_roadmap_item(items, current_title, current)
+    return items
+
+
+def _store_roadmap_item(items: dict[str, dict[str, object]], title: str, fields: dict[str, object]) -> None:
+    item_id = fields.get("id")
+    if not isinstance(item_id, str) or not item_id:
+        return
+    row = dict(fields)
+    row["title"] = title
+    items[item_id] = row
+
+
 def _link_base(root: Path, path_part: str, source_rel: str | None) -> Path:
     normalized = normalized_link_path(path_part)
     if source_rel and source_rel.startswith("docs/") and normalized.startswith(("architecture/", "specs/")):
@@ -321,4 +635,3 @@ def _root_relative_link_path(inventory: Inventory, rel: str) -> str | None:
 
 def _unique_sorted(values) -> list[str]:
     return sorted(set(values))
-

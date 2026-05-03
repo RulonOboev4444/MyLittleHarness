@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
+import re
 import sys
 from pathlib import Path
 
@@ -28,6 +31,7 @@ from .checks import (
 from .closeout import closeout_sections
 from .evidence import evidence_findings
 from .incubate import incubate_apply_findings, incubate_dry_run_findings, make_incubate_request
+from .grain import grain_findings
 from .inventory import RootLoadError
 from .memory_hygiene import (
     make_memory_hygiene_request,
@@ -50,6 +54,7 @@ from .projection_index import (
 )
 from .preflight import preflight_sections, render_git_pre_commit_template
 from .reporting import render_intelligence_report, render_report, render_sectioned_report
+from .roadmap import make_roadmap_request, roadmap_apply_findings, roadmap_dry_run_findings
 from .semantic import semantic_evaluate_sections, semantic_inspect_sections
 from .tasks import tasks_sections
 from .writeback import make_writeback_request, writeback_apply_findings, writeback_dry_run_findings
@@ -75,7 +80,9 @@ COMMANDS = (
     "incubate",
     "plan",
     "writeback",
+    "transition",
     "memory-hygiene",
+    "roadmap",
     "projection",
     "snapshot",
     "attach",
@@ -101,7 +108,7 @@ def build_parser() -> argparse.ArgumentParser:
     check_mode.add_argument("--deep", action="store_true", help="Include links, context, and hygiene diagnostics in the read-only check report.")
     check_mode.add_argument(
         "--focus",
-        choices=("validation", "links", "context", "hygiene"),
+        choices=("validation", "links", "context", "hygiene", "grain"),
         help="Run one focused read-only diagnostic through check.",
     )
     repair = subparsers.add_parser("repair", help="Preview or apply deterministic workflow contract repair.")
@@ -123,11 +130,13 @@ def build_parser() -> argparse.ArgumentParser:
     incubate_mode.add_argument("--dry-run", action="store_true", help="Preview the incubation note target without writing files.")
     incubate_mode.add_argument("--apply", action="store_true", help="Create or append the same-topic incubation note in an eligible live operating root.")
     incubate.add_argument("--topic", required=True, help="Plain future-idea topic used to derive the safe note slug.")
-    incubate.add_argument("--note", required=True, help="Explicit incubation note text to record.")
+    incubate_note = incubate.add_mutually_exclusive_group(required=True)
+    incubate_note.add_argument("--note", help="Explicit incubation note text to record.")
+    incubate_note.add_argument("--note-file", dest="note_file", help="Read explicit incubation note text from a UTF-8 file; use - for stdin.")
     plan = subparsers.add_parser(
         "plan",
         help=argparse.SUPPRESS,
-        description="Advanced mutating command: create or replace a deterministic active implementation-plan scaffold.",
+        description="Advanced mutating command: create or replace a deterministic active implementation-plan scaffold with current-phase-only execution metadata.",
     )
     plan_mode = plan.add_mutually_exclusive_group(required=True)
     plan_mode.add_argument("--dry-run", action="store_true", help="Preview deterministic implementation-plan synthesis without writing files.")
@@ -136,10 +145,12 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--objective", required=True, help="Concrete objective to render into the generated implementation plan.")
     plan.add_argument("--task", help="Optional explicit task input to preserve inside the generated plan.")
     plan.add_argument("--update-active", action="store_true", help="Replace the current default active plan when project-state already has plan_status active.")
+    plan.add_argument("--roadmap-item", dest="roadmap_item", help="Optional existing roadmap item id to link to the active plan.")
+    plan.add_argument("--only-requested-item", action="store_true", help="Limit roadmap sync and slice frontmatter to only --roadmap-item.")
     writeback = subparsers.add_parser(
         "writeback",
         help=argparse.SUPPRESS,
-        description="Advanced mutating command: apply explicit closeout/state writeback and synchronize derived active-plan copies.",
+        description="Advanced mutating command: apply explicit closeout/state writeback and synchronize derived active-plan copies; lifecycle writes do not approve auto-continue.",
     )
     writeback_mode = writeback.add_mutually_exclusive_group(required=True)
     writeback_mode.add_argument("--dry-run", action="store_true", help="Preview closeout/state writeback without writing files.")
@@ -156,6 +167,36 @@ def build_parser() -> argparse.ArgumentParser:
     writeback.add_argument("--phase-status", dest="phase_status", help="Lifecycle phase_status value to write to project-state frontmatter.")
     writeback.add_argument("--last-archived-plan", dest="last_archived_plan", help="Lifecycle last_archived_plan value to write to project-state frontmatter.")
     writeback.add_argument("--archive-active-plan", action="store_true", help="Move the active implementation plan to the canonical archive and close the active lifecycle pointer.")
+    writeback.add_argument("--from-active-plan", action="store_true", help="Harvest closeout facts from the active plan Closeout Summary/Facts/Fields section.")
+    writeback.add_argument("--compact-only", action="store_true", help="Only preview or apply safe project-state history compaction.")
+    writeback.add_argument("--roadmap-item", dest="roadmap_item", help="Optional existing roadmap item id to receive selected plan/writeback relationship facts.")
+    writeback.add_argument("--roadmap-status", dest="roadmap_status", help="Optional roadmap status to write with --roadmap-item.")
+    transition = subparsers.add_parser(
+        "transition",
+        help=argparse.SUPPRESS,
+        description="Advanced mutating command: explicitly review and apply a closeout/archive/next-plan transition composed from writeback and plan rails.",
+    )
+    transition_mode = transition.add_mutually_exclusive_group(required=True)
+    transition_mode.add_argument("--dry-run", action="store_true", help="Preview the transition proposal and review token without writing files.")
+    transition_mode.add_argument("--apply", action="store_true", help="Apply the reviewed transition only when --review-token matches current repo-visible inputs.")
+    transition.add_argument("--review-token", help="Review token printed by the matching transition dry-run; required for --apply.")
+    transition.add_argument("--complete-current-phase", action="store_true", help="First write phase_status complete through writeback.")
+    transition.add_argument("--archive-active-plan", action="store_true", help="Archive the current active plan through writeback after any phase completion step.")
+    transition.add_argument("--from-active-plan", action="store_true", help="Harvest archive closeout facts from the active plan.")
+    transition.add_argument("--current-roadmap-item", dest="current_roadmap_item", help="Explicit current roadmap item to mark done during archive closeout.")
+    transition.add_argument("--next-roadmap-item", dest="next_roadmap_item", help="Explicit roadmap item for the next active implementation plan.")
+    transition.add_argument("--next-title", dest="next_title", help="Title for the next active implementation plan.")
+    transition.add_argument("--next-objective", dest="next_objective", help="Objective for the next active implementation plan.")
+    transition.add_argument("--next-task", dest="next_task", help="Optional explicit task input for the next active implementation plan.")
+    transition.add_argument("--only-requested-item", action="store_true", help="Limit next-plan roadmap sync and slice frontmatter to --next-roadmap-item.")
+    transition.add_argument("--worktree-start-state", dest="worktree_start_state", help="Archive closeout worktree_start_state value to record.")
+    transition.add_argument("--task-scope", dest="task_scope", help="Archive closeout task_scope value to record.")
+    transition.add_argument("--docs-decision", dest="docs_decision", help="Archive closeout docs_decision value: updated, not-needed, or uncertain.")
+    transition.add_argument("--state-writeback", dest="state_writeback", help="Archive closeout state_writeback value to record.")
+    transition.add_argument("--verification", help="Archive closeout verification value to record.")
+    transition.add_argument("--commit-decision", dest="commit_decision", help="Archive closeout commit_decision value to record.")
+    transition.add_argument("--residual-risk", dest="residual_risk", help="Optional archive closeout residual_risk value to record.")
+    transition.add_argument("--carry-forward", dest="carry_forward", help="Optional archive closeout carry_forward value to record.")
     memory_hygiene = subparsers.add_parser(
         "memory-hygiene",
         help=argparse.SUPPRESS,
@@ -164,11 +205,42 @@ def build_parser() -> argparse.ArgumentParser:
     memory_hygiene_mode = memory_hygiene.add_mutually_exclusive_group(required=True)
     memory_hygiene_mode.add_argument("--dry-run", action="store_true", help="Preview lifecycle hygiene without writing files.")
     memory_hygiene_mode.add_argument("--apply", action="store_true", help="Write bounded lifecycle metadata, archive movement, and exact link repairs in an eligible live operating root.")
-    memory_hygiene.add_argument("--source", required=True, help="Root-relative MLH-owned research/incubation Markdown source to update.")
+    memory_hygiene.add_argument("--source", help="Root-relative MLH-owned research/incubation Markdown source to update.")
     memory_hygiene.add_argument("--promoted-to", dest="promoted_to", help="Root-relative accepted destination recorded as promoted_to.")
     memory_hygiene.add_argument("--status", help="Lifecycle status to write. Defaults to distilled when --promoted-to is supplied.")
     memory_hygiene.add_argument("--archive-to", dest="archive_to", help="Explicit root-relative archive target under project/archive/reference/research or incubation.")
     memory_hygiene.add_argument("--repair-links", action="store_true", help="Repair exact root-relative source path references to the archive path.")
+    memory_hygiene.add_argument("--scan", action="store_true", help="Read-only relationship hygiene scan; valid with --dry-run.")
+    roadmap = subparsers.add_parser(
+        "roadmap",
+        help=argparse.SUPPRESS,
+        description="Advanced mutating command: add or update explicit accepted-work roadmap items.",
+    )
+    roadmap_mode = roadmap.add_mutually_exclusive_group(required=True)
+    roadmap_mode.add_argument("--dry-run", action="store_true", help="Preview roadmap item changes without writing files.")
+    roadmap_mode.add_argument("--apply", action="store_true", help="Write one bounded roadmap item change in an eligible live operating root.")
+    roadmap.add_argument("--action", choices=("add", "update"), required=True, help="Roadmap mutation action.")
+    roadmap.add_argument("--item-id", required=True, help="Stable roadmap item id to add or update.")
+    roadmap.add_argument("--title", help="Roadmap item heading. Required for --action add.")
+    roadmap.add_argument("--status", help="Roadmap item status.")
+    roadmap.add_argument("--order", type=int, help="Roadmap item ordering value.")
+    roadmap.add_argument("--execution-slice", dest="execution_slice", help="Advisory execution slice id for this roadmap item.")
+    roadmap.add_argument("--slice-goal", dest="slice_goal", help="One-line advisory goal for the roadmap execution slice.")
+    roadmap.add_argument("--slice-member", dest="slice_members", action="append", default=[], help="Roadmap item id covered by the same advisory execution slice. May be repeated.")
+    roadmap.add_argument("--slice-dependency", dest="slice_dependencies", action="append", default=[], help="Roadmap item id that the advisory execution slice depends on. May be repeated.")
+    roadmap.add_argument("--slice-closeout-boundary", dest="slice_closeout_boundary", help="One-line advisory closeout boundary for the execution slice.")
+    roadmap.add_argument("--source-incubation", dest="source_incubation", help="Root-relative source incubation route.")
+    roadmap.add_argument("--source-research", dest="source_research", help="Root-relative source research route.")
+    roadmap.add_argument("--related-spec", dest="related_specs", action="append", default=[], help="Root-relative related spec route. May be repeated.")
+    roadmap.add_argument("--related-plan", dest="related_plan", help="Root-relative active or archived plan route.")
+    roadmap.add_argument("--archived-plan", dest="archived_plan", help="Root-relative archived plan route.")
+    roadmap.add_argument("--target-artifact", dest="target_artifacts", action="append", default=[], help="Root-relative expected implementation target artifact. May be repeated.")
+    roadmap.add_argument("--verification-summary", dest="verification_summary", help="One-line verification summary.")
+    roadmap.add_argument("--docs-decision", dest="docs_decision", help="Docs decision: updated, not-needed, or uncertain.")
+    roadmap.add_argument("--carry-forward", dest="carry_forward", help="One-line carry-forward summary.")
+    roadmap.add_argument("--dependency", dest="dependencies", action="append", default=[], help="Existing roadmap item id dependency. May be repeated.")
+    roadmap.add_argument("--supersedes", dest="supersedes", action="append", default=[], help="Existing roadmap item id superseded by this item. May be repeated.")
+    roadmap.add_argument("--superseded-by", dest="superseded_by", action="append", default=[], help="Existing roadmap item id that supersedes this item. May be repeated.")
     preflight = subparsers.add_parser(
         "preflight",
         help=argparse.SUPPRESS,
@@ -205,7 +277,7 @@ def build_parser() -> argparse.ArgumentParser:
     intelligence = subparsers.add_parser(
         "intelligence",
         help=argparse.SUPPRESS,
-        description="Advanced diagnostic: report read-only repo intelligence over inventory-discovered surfaces.",
+        description="Advanced diagnostic: report repo intelligence over inventory-discovered surfaces and refresh disposable navigation cache when path/full-text search needs it.",
     )
     intelligence.add_argument("--query", help="Unified recovery query expanded into omitted exact, path, and full-text search modes.")
     intelligence.add_argument("--search", help="Case-sensitive literal text to search in inventory-discovered surface contents.")
@@ -259,7 +331,9 @@ def build_parser() -> argparse.ArgumentParser:
         "incubate",
         "plan",
         "writeback",
+        "transition",
         "memory-hygiene",
+        "roadmap",
         "projection",
         "snapshot",
         "adapter",
@@ -398,6 +472,10 @@ def main(argv: list[str] | None = None) -> int:
     if command == "writeback":
         request = make_writeback_request(
             archive_active_plan=args.archive_active_plan,
+            compact_only=args.compact_only,
+            from_active_plan=args.from_active_plan,
+            roadmap_item=args.roadmap_item,
+            roadmap_status=args.roadmap_status,
             worktree_start_state=args.worktree_start_state,
             task_scope=args.task_scope,
             docs_decision=args.docs_decision,
@@ -411,26 +489,73 @@ def main(argv: list[str] | None = None) -> int:
             last_archived_plan=args.last_archived_plan,
         )
         report_name = "writeback --apply" if args.apply else "writeback --dry-run"
+        if args.compact_only:
+            report_name += " --compact-only"
         findings = writeback_apply_findings(inventory, request) if args.apply else writeback_dry_run_findings(inventory, request)
         result = _result_for(findings)
         print(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
         return 2 if args.apply and result == "error" else 0
+    if command == "transition":
+        report_name = "transition --apply" if args.apply else "transition --dry-run"
+        findings = _transition_apply_findings(inventory, args) if args.apply else _transition_dry_run_findings(inventory, args)
+        result = _result_for(findings)
+        print(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
+        return 2 if args.apply and result == "error" else 0
     if command == "plan":
-        request = make_plan_request(args.title, args.objective, args.task, args.update_active)
+        request = make_plan_request(args.title, args.objective, args.task, args.update_active, args.roadmap_item, args.only_requested_item)
         report_name = "plan --apply" if args.apply else "plan --dry-run"
         findings = plan_apply_findings(inventory, request) if args.apply else plan_dry_run_findings(inventory, request)
         result = _result_for(findings)
         print(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
         return 2 if args.apply and result == "error" else 0
     if command == "memory-hygiene":
-        request = make_memory_hygiene_request(args.source, args.promoted_to, args.status, args.archive_to, args.repair_links)
+        request = make_memory_hygiene_request(args.source, args.promoted_to, args.status, args.archive_to, args.repair_links, args.scan)
         report_name = "memory-hygiene --apply" if args.apply else "memory-hygiene --dry-run"
         findings = memory_hygiene_apply_findings(inventory, request) if args.apply else memory_hygiene_dry_run_findings(inventory, request)
         result = _result_for(findings)
         print(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
         return 2 if args.apply and result == "error" else 0
+    if command == "roadmap":
+        request = make_roadmap_request(
+            action=args.action,
+            item_id=args.item_id,
+            title=args.title,
+            status=args.status,
+            order=args.order,
+            execution_slice=args.execution_slice,
+            slice_goal=args.slice_goal,
+            slice_members=args.slice_members,
+            slice_dependencies=args.slice_dependencies,
+            slice_closeout_boundary=args.slice_closeout_boundary,
+            source_incubation=args.source_incubation,
+            source_research=args.source_research,
+            related_specs=args.related_specs,
+            related_plan=args.related_plan,
+            archived_plan=args.archived_plan,
+            target_artifacts=args.target_artifacts,
+            verification_summary=args.verification_summary,
+            docs_decision=args.docs_decision,
+            carry_forward=args.carry_forward,
+            dependencies=args.dependencies,
+            supersedes=args.supersedes,
+            superseded_by=args.superseded_by,
+        )
+        report_name = "roadmap --apply" if args.apply else "roadmap --dry-run"
+        findings = roadmap_apply_findings(inventory, request) if args.apply else roadmap_dry_run_findings(inventory, request)
+        result = _result_for(findings)
+        print(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
+        return 2 if args.apply and result == "error" else 0
     if command == "incubate":
-        request = make_incubate_request(args.topic, args.note)
+        note_text = args.note
+        note_source = "--note"
+        if args.note_file is not None:
+            note_result = _read_text_argument("--note-file", args.note_file)
+            if note_result[1]:
+                print(f"mylittleharness: {note_result[1]}", file=sys.stderr)
+                return 2
+            note_text = note_result[0]
+            note_source = f"--note-file {args.note_file}"
+        request = make_incubate_request(args.topic, note_text, note_source)
         report_name = "incubate --apply" if args.apply else "incubate --dry-run"
         findings = incubate_apply_findings(inventory, request) if args.apply else incubate_dry_run_findings(inventory, request)
         result = _result_for(findings)
@@ -491,6 +616,266 @@ def main(argv: list[str] | None = None) -> int:
     return 2
 
 
+def _transition_dry_run_findings(inventory, args) -> list[Finding]:
+    token = _transition_review_token(inventory, args)
+    findings = [
+        Finding("info", "transition-dry-run", "transition proposal only; no files were written"),
+        Finding(
+            "info",
+            "transition-boundary",
+            "transition composes explicit writeback and plan rails; dry-run output cannot approve closeout, archive, next-plan opening, stage, commit, rollback, or future mutations",
+        ),
+        Finding("info", "transition-review-token", f"review token: {token}"),
+        Finding("info", "transition-targets", f"target files: {', '.join(_transition_target_rels(inventory, args)) or 'none'}"),
+    ]
+    errors = _transition_input_errors(inventory, args, apply=False)
+    if errors:
+        findings.extend(_with_severity(errors, "warn"))
+        findings.append(Finding("info", "transition-validation-posture", "dry-run refused before apply; fix refusal reasons and rerun transition --dry-run"))
+        return findings
+    if args.complete_current_phase:
+        findings.append(Finding("info", "transition-step", "would complete current phase through writeback --phase-status complete", "project/project-state.md"))
+        findings.extend(writeback_dry_run_findings(inventory, make_writeback_request(phase_status="complete")))
+    if args.archive_active_plan:
+        findings.append(Finding("info", "transition-step", "would archive active plan through writeback --archive-active-plan", "project/implementation-plan.md"))
+        if args.complete_current_phase and _state_phase_status(inventory) != "complete":
+            findings.append(
+                Finding(
+                    "info",
+                    "transition-sequenced-preview",
+                    "archive preview is sequenced after phase completion; apply reloads repo-visible state before running archive-active-plan",
+                    "project/project-state.md",
+                )
+            )
+        else:
+            findings.extend(writeback_dry_run_findings(inventory, _transition_archive_request(args)))
+    if args.next_roadmap_item:
+        findings.append(Finding("info", "transition-step", f"would open next active plan for roadmap item {args.next_roadmap_item!r}", "project/implementation-plan.md"))
+        if args.archive_active_plan and _state_plan_status(inventory) == "active":
+            findings.append(
+                Finding(
+                    "info",
+                    "transition-sequenced-preview",
+                    "next-plan preview is sequenced after archive-active-plan clears the active lifecycle pointer",
+                    "project/implementation-plan.md",
+                )
+            )
+        else:
+            findings.extend(plan_dry_run_findings(inventory, _transition_next_plan_request(args)))
+    findings.append(Finding("info", "transition-validation-posture", "apply requires the same flags plus --review-token; token mismatch refuses before writes"))
+    return findings
+
+
+def _transition_apply_findings(inventory, args) -> list[Finding]:
+    token = _transition_review_token(inventory, args)
+    errors = _transition_input_errors(inventory, args, apply=True)
+    if args.review_token and args.review_token != token:
+        errors.append(Finding("error", "transition-review-token-mismatch", f"--review-token does not match current repo-visible inputs; expected {token}"))
+    if errors:
+        return errors
+
+    findings = [
+        Finding("info", "transition-apply", "transition apply started"),
+        Finding("info", "transition-review-token", f"accepted review token: {token}"),
+        Finding("info", "transition-targets", f"target files: {', '.join(_transition_target_rels(inventory, args)) or 'none'}"),
+        Finding("info", "transition-no-vcs", "transition does not stage, commit, push, or mutate Git state"),
+    ]
+    current = inventory
+    if args.complete_current_phase:
+        findings.append(Finding("info", "transition-step", "completing current phase through writeback --phase-status complete", "project/project-state.md"))
+        step_findings = writeback_apply_findings(current, make_writeback_request(phase_status="complete"))
+        findings.extend(step_findings)
+        if any(finding.severity == "error" for finding in step_findings):
+            return findings
+        current, reload_findings = _reload_transition_inventory(current)
+        findings.extend(reload_findings)
+        if reload_findings:
+            return findings
+    if args.archive_active_plan:
+        findings.append(Finding("info", "transition-step", "archiving active plan through writeback --archive-active-plan", "project/implementation-plan.md"))
+        step_findings = writeback_apply_findings(current, _transition_archive_request(args))
+        findings.extend(step_findings)
+        if any(finding.severity == "error" for finding in step_findings):
+            return findings
+        current, reload_findings = _reload_transition_inventory(current)
+        findings.extend(reload_findings)
+        if reload_findings:
+            return findings
+    if args.next_roadmap_item:
+        findings.append(Finding("info", "transition-step", f"opening next active plan for roadmap item {args.next_roadmap_item!r}", "project/implementation-plan.md"))
+        step_findings = plan_apply_findings(current, _transition_next_plan_request(args))
+        findings.extend(step_findings)
+        if any(finding.severity == "error" for finding in step_findings):
+            return findings
+    findings.append(
+        Finding(
+            "info",
+            "transition-authority",
+            "repo-visible project-state, archived plan, active plan, and roadmap files remain the only transition authority",
+            "project/project-state.md",
+        )
+    )
+    return findings
+
+
+def _transition_input_errors(inventory, args, apply: bool) -> list[Finding]:
+    errors: list[Finding] = []
+    if not (args.complete_current_phase or args.archive_active_plan or args.next_roadmap_item):
+        errors.append(Finding("error", "transition-refused", "transition requires at least one explicit action flag"))
+    if apply and not args.review_token:
+        errors.append(Finding("error", "transition-refused", "transition --apply requires --review-token from a matching dry-run"))
+    if args.from_active_plan and not args.archive_active_plan:
+        errors.append(Finding("error", "transition-refused", "--from-active-plan requires --archive-active-plan"))
+    if args.current_roadmap_item and not args.archive_active_plan:
+        errors.append(Finding("error", "transition-refused", "--current-roadmap-item requires --archive-active-plan"))
+    if args.only_requested_item and not args.next_roadmap_item:
+        errors.append(Finding("error", "transition-refused", "--only-requested-item requires --next-roadmap-item"))
+    if args.next_roadmap_item:
+        if not args.next_title:
+            errors.append(Finding("error", "transition-refused", "--next-title is required with --next-roadmap-item"))
+        if not args.next_objective:
+            errors.append(Finding("error", "transition-refused", "--next-objective is required with --next-roadmap-item"))
+        if _state_plan_status(inventory) == "active" and not args.archive_active_plan:
+            errors.append(Finding("error", "transition-refused", "--next-roadmap-item with an active plan requires --archive-active-plan"))
+    return errors
+
+
+def _transition_archive_request(args):
+    return make_writeback_request(
+        archive_active_plan=True,
+        from_active_plan=args.from_active_plan,
+        roadmap_item=args.current_roadmap_item,
+        worktree_start_state=args.worktree_start_state,
+        task_scope=args.task_scope,
+        docs_decision=args.docs_decision,
+        state_writeback=args.state_writeback,
+        verification=args.verification,
+        commit_decision=args.commit_decision,
+        residual_risk=args.residual_risk,
+        carry_forward=args.carry_forward,
+    )
+
+
+def _transition_next_plan_request(args):
+    return make_plan_request(
+        args.next_title,
+        args.next_objective,
+        args.next_task,
+        False,
+        args.next_roadmap_item,
+        args.only_requested_item,
+    )
+
+
+def _reload_transition_inventory(inventory):
+    try:
+        return load_for_root(inventory.root), []
+    except RootLoadError as exc:
+        return inventory, [Finding("error", "transition-refused", f"could not reload root after transition step: {exc}")]
+
+
+def _transition_review_token(inventory, args) -> str:
+    payload = {
+        "actions": {
+            "complete_current_phase": bool(args.complete_current_phase),
+            "archive_active_plan": bool(args.archive_active_plan),
+            "from_active_plan": bool(args.from_active_plan),
+            "current_roadmap_item": args.current_roadmap_item or "",
+            "next_roadmap_item": args.next_roadmap_item or "",
+            "next_title": args.next_title or "",
+            "next_objective": args.next_objective or "",
+            "next_task": args.next_task or "",
+            "only_requested_item": bool(args.only_requested_item),
+        },
+        "closeout": _transition_closeout_values(args),
+        "files": _transition_file_digests(inventory),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:16]
+
+
+def _transition_closeout_values(args) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for field in (
+        "worktree_start_state",
+        "task_scope",
+        "docs_decision",
+        "state_writeback",
+        "verification",
+        "commit_decision",
+        "residual_risk",
+        "carry_forward",
+    ):
+        value = getattr(args, field, None)
+        if value:
+            values[field] = str(value)
+    return values
+
+
+def _transition_file_digests(inventory) -> dict[str, str]:
+    digests: dict[str, str] = {}
+    for rel in ("project/project-state.md", "project/implementation-plan.md", "project/roadmap.md"):
+        path = inventory.root / rel
+        if not path.exists():
+            digests[rel] = "<missing>"
+        elif not path.is_file():
+            digests[rel] = "<not-file>"
+        else:
+            digests[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return digests
+
+
+def _transition_target_rels(inventory, args) -> list[str]:
+    targets: list[str] = []
+    if args.complete_current_phase or args.archive_active_plan or args.next_roadmap_item:
+        targets.append("project/project-state.md")
+        targets.append("project/implementation-plan.md")
+    if args.archive_active_plan:
+        archive_rel = _transition_archive_target_rel(inventory)
+        if archive_rel:
+            targets.append(archive_rel)
+    if args.current_roadmap_item or args.next_roadmap_item:
+        targets.append("project/roadmap.md")
+    return sorted(dict.fromkeys(targets))
+
+
+def _transition_archive_target_rel(inventory) -> str:
+    plan = inventory.active_plan_surface
+    if not plan or not plan.exists:
+        return ""
+    title = ""
+    if plan.frontmatter.has_frontmatter and not plan.frontmatter.errors:
+        title = str(plan.frontmatter.data.get("title") or "")
+    if not title:
+        title = _transition_first_heading(plan.content) or "implementation-plan"
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", title.strip().lower()).strip("-") or "implementation-plan"
+    from datetime import date
+
+    return f"project/archive/plans/{date.today().isoformat()}-{slug}.md"
+
+
+def _transition_first_heading(text: str) -> str | None:
+    for line in text.splitlines():
+        match = re.match(r"^#\s+(.+?)\s*$", line)
+        if match:
+            return match.group(1).strip()
+    return None
+
+
+def _state_phase_status(inventory) -> str:
+    data = inventory.state.frontmatter.data if inventory.state and inventory.state.exists else {}
+    return str(data.get("phase_status") or "")
+
+
+def _state_plan_status(inventory) -> str:
+    data = inventory.state.frontmatter.data if inventory.state and inventory.state.exists else {}
+    return str(data.get("plan_status") or "")
+
+
+def _with_severity(findings: list[Finding], severity: str) -> list[Finding]:
+    return [Finding(severity, finding.code, finding.message, finding.source, finding.line) for finding in findings]
+
+
 def _result_for(findings) -> str:
     if any(finding.severity == "error" for finding in findings):
         return "error"
@@ -509,6 +894,7 @@ def _check_report(args: argparse.Namespace, inventory: object) -> tuple[str, lis
             "links": ("Links", audit_link_findings(inventory)),
             "context": ("Context", context_budget_findings(inventory)),
             "hygiene": ("Hygiene", doctor_findings(inventory.root, inventory)),
+            "grain": ("Grain", grain_findings(inventory)),
         }
         section = focus_sections[args.focus]
         boundary_section.append(Finding("info", "check-focus-read-only", f"check --focus {args.focus} runs one compatibility diagnostic without writing files"))
@@ -525,9 +911,10 @@ def _check_report(args: argparse.Namespace, inventory: object) -> tuple[str, lis
                 ("Links", audit_link_findings(inventory)),
                 ("Context", context_budget_findings(inventory)),
                 ("Hygiene", doctor_findings(inventory.root, inventory)),
+                ("Grain", grain_findings(inventory)),
             ]
         )
-        boundary_section.append(Finding("info", "check-deep-read-only", "check --deep composes links, context, and hygiene diagnostics without writing files"))
+        boundary_section.append(Finding("info", "check-deep-read-only", "check --deep composes links, context, hygiene, and grain diagnostics without writing files"))
         return "check --deep", [*sections, ("Boundary", boundary_section)]
 
     boundary_section.append(Finding("info", "check-compatibility-diagnostics", "use check --deep or check --focus for consolidated links, context, and hygiene diagnostics; compatibility commands remain available"))
@@ -542,6 +929,16 @@ def _positive_int(value: str) -> int:
     if parsed < 1:
         raise argparse.ArgumentTypeError("--limit must be >= 1")
     return parsed
+
+
+def _read_text_argument(flag: str, value: str) -> tuple[str | None, str | None]:
+    if value == "-":
+        return sys.stdin.read(), None
+    path = Path(value).expanduser()
+    try:
+        return path.read_text(encoding="utf-8"), None
+    except (OSError, UnicodeError) as exc:
+        return None, f"{flag} could not be read as UTF-8 text: {exc}"
 
 
 def _projection_target_findings(target: str, artifacts_fn, index_fn, inventory: object) -> list[Finding]:
@@ -599,10 +996,12 @@ def _suggestions(command: str, findings) -> list[str]:
         if errors:
             return ["check found validation errors; inspect the validation section before running repair."]
         if any(finding.code == "check-deep-read-only" for finding in findings):
-            return ["check --deep completed as a read-only status, validation, drift, links, context, and hygiene report."]
+            return ["check --deep completed as a read-only status, validation, drift, links, context, hygiene, and grain report."]
         focus_finding = next((finding for finding in findings if finding.code == "check-focus-read-only"), None)
         if focus_finding:
             return [f"{focus_finding.message}."]
+        if any(finding.code == "rule-context-surface-large" and finding.source == "project/project-state.md" for finding in warnings):
+            return ["check completed as a read-only report; preview safe state compaction with `mylittleharness writeback --dry-run --compact-only`."]
         if warnings:
             return ["check completed as a read-only report with advisory findings; use advanced diagnostics only when needed."]
         return ["check completed as a read-only status plus validation report."]
@@ -619,7 +1018,7 @@ def _suggestions(command: str, findings) -> list[str]:
     if command == "intelligence":
         if warnings:
             return ["Use the listed source paths and line numbers for direct inspection; intelligence reports are advisory and never apply fixes."]
-        return ["intelligence completed as a terminal-only read-only report; repo files remain the authority."]
+        return ["intelligence completed as a terminal-only advisory report; disposable navigation cache may be refreshed, but repo files remain the authority."]
     if command == "projection":
         if any(finding.severity == "error" for finding in findings):
             return ["projection artifact command was refused before writing or deleting outside the owned boundary."]
@@ -641,6 +1040,10 @@ def _suggestions(command: str, findings) -> list[str]:
     if command == "writeback":
         if any(finding.severity == "error" for finding in findings):
             return ["writeback apply was refused before closeout/state writeback became authoritative."]
+        if any(finding.code == "writeback-compact-only" for finding in findings):
+            if any(finding.code == "writeback-dry-run" for finding in findings):
+                return ["writeback compact-only dry-run reported safe state compaction posture without writing files."]
+            return ["writeback compact-only apply ran the bounded state compaction rail; run check to verify the archive pointer posture."]
         if any(finding.code == "writeback-dry-run" for finding in findings):
             return ["writeback dry-run reported the planned closeout/state synchronization without writing files."]
         return ["writeback apply synchronized project-state closeout facts and matching active-plan derived copies."]
@@ -656,6 +1059,12 @@ def _suggestions(command: str, findings) -> list[str]:
         if any(finding.code == "plan-dry-run" for finding in findings):
             return ["plan dry-run reported deterministic plan synthesis and lifecycle update posture without writing files."]
         return ["plan apply wrote the active implementation plan scaffold and project-state lifecycle pointers."]
+    if command == "transition":
+        if any(finding.severity == "error" for finding in findings):
+            return ["transition apply was refused or stopped before the next unreviewed step."]
+        if any(finding.code == "transition-dry-run" for finding in findings):
+            return ["transition dry-run reported the reviewed closeout/archive/next-plan proposal and token without writing files."]
+        return ["transition apply completed the explicitly reviewed writeback/plan sequence without VCS side effects."]
     if command == "memory-hygiene":
         if any(finding.severity == "error" for finding in findings):
             return ["memory-hygiene apply was refused before lifecycle source, archive, or link targets were changed."]

@@ -252,6 +252,12 @@ For workflow-level plan quality, the plan should also make these surfaces explic
 
 These can be embedded into phase or validation sections; they do not require a second plan file.
 
+When an active plan opens from a roadmap item that belongs to a roadmap execution slice, the plan frontmatter is the executable one-slice contract. It should preserve `primary_roadmap_item`, `covered_roadmap_items`, `domain_context`, `target_artifacts`, `execution_policy`, `auto_continue`, `stop_conditions`, and `closeout_boundary` as derived plan metadata. The default generated contract is current-phase-only with `auto_continue = false`; any future auto-continuation must be explicit and covered by stop conditions rather than inferred from verification success. `project/project-state.md` should keep only lifecycle pointers such as `active_plan`, `active_phase`, and `phase_status`, not roadmap slice membership or target artifact lists.
+
+When roadmap slice metadata is available, plan synthesis should make bundle/split decisions inspectable without making them authoritative. Dry-run/apply reports may include bundle rationale, split boundary, target-artifact pressure, and phase pressure; generated plans may mirror those values under `Plan Synthesis Notes`. Target-artifact pressure is a report-only sizing signal, not a calibrated threshold or hard gate, and the synthesis report cannot approve lifecycle movement, closeout, archive, repair, commit, rollback, or future mutation.
+
+Read-only grain diagnostics may later inspect generated plans for missing slice metadata, missing target artifacts, vague write scope, generic verification gates, over-atomic slices, giant brittle slices, and unsafe auto-continuation posture. Those diagnostics are calibration inputs for future planning behavior only; they do not rewrite plans, split slices, or promote numeric thresholds into refusal gates.
+
 ## One-Plan Rule
 
 - Exactly one accepted active plan should govern one work item at a time.
@@ -329,4 +335,3 @@ The workflow must avoid:
 - copying canonical specs into temporary notes instead of linking them
 - creating new plan files just to preserve thought traces
 - letting a plan absorb every design decision that should have been promoted into a stable spec
-

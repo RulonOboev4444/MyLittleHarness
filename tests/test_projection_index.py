@@ -152,14 +152,17 @@ class ProjectionIndexTests(unittest.TestCase):
             self.assertIn("projection-index-delete-skipped", rendered)
             self.assertIn("directory-shaped SQLite index sidecar", rendered)
 
-    def test_full_text_search_is_optional_source_verified_and_exact_search_survives_delete(self) -> None:
+    def test_full_text_search_auto_refreshes_source_verified_index_and_exact_search_survives_delete(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_root(Path(tmp), active=False, mirrors=False)
             missing_output = io.StringIO()
             with redirect_stdout(missing_output):
                 missing_code = main(["--root", str(root), "intelligence", "--focus", "search", "--full-text", "MyLittleHarness"])
             self.assertEqual(missing_code, 0)
-            self.assertIn("projection-index-query-skipped", missing_output.getvalue())
+            missing_rendered = missing_output.getvalue()
+            self.assertIn("navigation-cache-index-refresh", missing_rendered)
+            self.assertIn("projection-index-query-current", missing_rendered)
+            self.assertIn("full-text-match", missing_rendered)
 
             with redirect_stdout(io.StringIO()):
                 self.assertEqual(main(["--root", str(root), "projection", "--build", "--target", "index"]), 0)
@@ -177,7 +180,10 @@ class ProjectionIndexTests(unittest.TestCase):
             with redirect_stdout(stale_output):
                 stale_code = main(["--root", str(root), "intelligence", "--focus", "search", "--full-text", "MyLittleHarness"])
             self.assertEqual(stale_code, 0)
-            self.assertIn("projection-index-query-skipped", stale_output.getvalue())
+            stale_rendered = stale_output.getvalue()
+            self.assertIn("navigation-cache-index-refresh", stale_rendered)
+            self.assertIn("projection-index-query-current", stale_rendered)
+            self.assertNotIn("projection-index-query-skipped", stale_rendered)
 
             with redirect_stdout(io.StringIO()):
                 self.assertEqual(main(["--root", str(root), "projection", "--delete", "--target", "index"]), 0)
@@ -207,7 +213,7 @@ class ProjectionIndexTests(unittest.TestCase):
             self.assertIn("search-path-match", rendered)
             self.assertIn("search-path-reference", rendered)
 
-    def test_unified_query_keeps_exact_and_path_results_when_index_is_missing_or_stale(self) -> None:
+    def test_unified_query_auto_refreshes_missing_or_stale_index_while_keeping_exact_and_path_results(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_root(Path(tmp), active=False, mirrors=False)
             missing_output = io.StringIO()
@@ -215,7 +221,8 @@ class ProjectionIndexTests(unittest.TestCase):
                 missing_code = main(["--root", str(root), "intelligence", "--focus", "search", "--query", ".agents/docmap.yaml"])
             missing_rendered = missing_output.getvalue()
             self.assertEqual(missing_code, 0)
-            self.assertIn("projection-index-query-skipped", missing_rendered)
+            self.assertIn("navigation-cache-index-refresh", missing_rendered)
+            self.assertIn("projection-index-query-current", missing_rendered)
             self.assertIn("search-match", missing_rendered)
             self.assertIn("search-path-reference", missing_rendered)
 
@@ -227,7 +234,8 @@ class ProjectionIndexTests(unittest.TestCase):
                 stale_code = main(["--root", str(root), "intelligence", "--focus", "search", "--query", ".agents/docmap.yaml"])
             stale_rendered = stale_output.getvalue()
             self.assertEqual(stale_code, 0)
-            self.assertIn("projection-index-query-skipped", stale_rendered)
+            self.assertIn("navigation-cache-index-refresh", stale_rendered)
+            self.assertIn("projection-index-query-current", stale_rendered)
             self.assertIn("search-match", stale_rendered)
             self.assertIn("search-path-reference", stale_rendered)
 

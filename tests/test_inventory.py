@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from mylittleharness.checks import (
     check_drift_findings,
     audit_link_findings,
+    context_budget_findings,
     product_hygiene_findings,
     rule_context_findings,
     status_findings,
@@ -35,11 +36,13 @@ class InventoryTests(unittest.TestCase):
             (root / "project/plan-incubation/memory-routing.md").write_text("# Incubation\n", encoding="utf-8")
             (root / "project/research").mkdir()
             (root / "project/research/memory-routing.md").write_text("# Research\n", encoding="utf-8")
+            (root / "project/roadmap.md").write_text("# Roadmap\n", encoding="utf-8")
 
             inventory = load_inventory(root)
 
             self.assertEqual("operating-guardrails", inventory.surface_by_rel["AGENTS.md"].memory_route)
             self.assertEqual("state", inventory.surface_by_rel["project/project-state.md"].memory_route)
+            self.assertEqual("roadmap", inventory.surface_by_rel["project/roadmap.md"].memory_route)
             self.assertEqual("stable-specs", inventory.surface_by_rel["project/specs/workflow/workflow-memory-routing-spec.md"].memory_route)
             self.assertEqual("incubation", inventory.surface_by_rel["project/plan-incubation/memory-routing.md"].memory_route)
             self.assertEqual("research", inventory.surface_by_rel["project/research/memory-routing.md"].memory_route)
@@ -60,17 +63,86 @@ class InventoryTests(unittest.TestCase):
             self.assertEqual("adrs", inventory.surface_by_rel["project/adrs/0001-routing.md"].memory_route)
             self.assertEqual("verification", inventory.surface_by_rel["project/verification/route-metadata.md"].memory_route)
 
+    def test_roadmap_route_metadata_validation_accepts_route_relationships(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_route_metadata_live_root(Path(tmp))
+            (root / "project/plan-incubation").mkdir()
+            (root / "project/archive/plans").mkdir(parents=True)
+            (root / "project/decisions").mkdir()
+            (root / "project/verification").mkdir()
+            (root / "project/archive/plans/2026-05-02-old-plan.md").write_text("# Old Plan\n", encoding="utf-8")
+            (root / "project/verification/proof.md").write_text(
+                '---\nstatus: "passed"\n---\n# Proof\n',
+                encoding="utf-8",
+            )
+            (root / "project/plan-incubation/roadmap.md").write_text(
+                '---\nstatus: "incubating"\npromoted_to: "project/roadmap.md"\n---\n# Incubation\n',
+                encoding="utf-8",
+            )
+            (root / "project/roadmap.md").write_text(
+                "---\n"
+                'status: "deferred"\n'
+                'source_incubation: "project/plan-incubation/roadmap.md"\n'
+                'related_roadmap: "project/roadmap.md"\n'
+                'source_roadmap: "project/roadmap.md"\n'
+                'archived_plan: "project/archive/plans/2026-05-02-old-plan.md"\n'
+                'related_verification: "project/verification/proof.md"\n'
+                "---\n"
+                "# Roadmap\n",
+                encoding="utf-8",
+            )
+            (root / "project/decisions/current.md").write_text('---\nstatus: "accepted"\n---\n# Current\n', encoding="utf-8")
+            (root / "project/decisions/bad-roadmap-link.md").write_text(
+                '---\nstatus: "accepted"\nrelated_roadmap: "project/decisions/current.md"\n---\n# Bad\n',
+                encoding="utf-8",
+            )
+
+            inventory = load_inventory(root)
+            warnings = [finding for finding in validation_findings(inventory) if finding.code.startswith("route-metadata-")]
+
+            self.assertEqual("roadmap", inventory.surface_by_rel["project/roadmap.md"].memory_route)
+            self.assertFalse(
+                any(
+                    finding.source == "project/roadmap.md"
+                    and finding.code in {"route-metadata-status", "route-metadata-destination", "route-metadata-missing-target"}
+                    for finding in warnings
+                )
+            )
+            self.assertFalse(
+                any(
+                    finding.source == "project/plan-incubation/roadmap.md"
+                    and finding.code == "route-metadata-destination"
+                    for finding in warnings
+                )
+            )
+            self.assertTrue(
+                any(
+                    finding.source == "project/decisions/bad-roadmap-link.md"
+                    and finding.code == "route-metadata-destination"
+                    and "related_roadmap must point to a roadmap route" in finding.message
+                    for finding in warnings
+                )
+            )
+
     def test_route_metadata_validation_reports_advisory_warnings_for_live_roots(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_route_metadata_live_root(Path(tmp))
             (root / "project/research").mkdir()
             (root / "project/plan-incubation").mkdir()
+            (root / "project/adrs").mkdir()
             (root / "project/decisions").mkdir()
             (root / "project/archive/reference/research").mkdir(parents=True)
             (root / "project/archive/reference/research/raw.md").write_text("# Archived Raw\n", encoding="utf-8")
-            (root / "project/plan-incubation/idea.md").write_text('---\nstatus: "incubating"\n---\n# Idea\n', encoding="utf-8")
+            (root / "project/plan-incubation/idea.md").write_text(
+                '---\nstatus: "incubating"\narchived_to: "project/archive/reference/research/raw.md"\n---\n# Idea\n',
+                encoding="utf-8",
+            )
             (root / "project/research/old.md").write_text(
                 '---\nstatus: "archived"\narchived_to: "project/archive/reference/research/raw.md"\n---\n# Old\n',
+                encoding="utf-8",
+            )
+            (root / "project/research/label.md").write_text(
+                '---\nstatus: "research-ready"\nsupersedes: "2026-04-30 snapshot in this file"\n---\n# Label\n',
                 encoding="utf-8",
             )
             (root / "project/research/bad.md").write_text(
@@ -88,8 +160,16 @@ class InventoryTests(unittest.TestCase):
                 '---\nstatus: "accepted"\nrelated_research: "project/research/old.md"\n---\n# Current\n',
                 encoding="utf-8",
             )
+            (root / "project/specs/workflow/workflow-memory-routing-spec.md").write_text(
+                '---\nstatus: "accepted"\nsource_incubation: "project/plan-incubation/idea.md"\n---\n# Spec\n',
+                encoding="utf-8",
+            )
             (root / "project/decisions/malformed.md").write_text(
                 "---\nstatus:\n  nested: no\n---\n# Malformed\n",
+                encoding="utf-8",
+            )
+            (root / "project/adrs/bad.md").write_text(
+                '---\nstatus: "accepted"\nrelated_adr: "project/decisions/current.md"\n---\n# ADR\n',
                 encoding="utf-8",
             )
 
@@ -104,6 +184,28 @@ class InventoryTests(unittest.TestCase):
             self.assertIn("route-metadata-stale-reference", codes)
             self.assertIn("route-metadata-frontmatter", codes)
             self.assertIn("route-metadata-authority", codes)
+            self.assertTrue(
+                any(
+                    finding.source == "project/adrs/bad.md"
+                    and finding.code == "route-metadata-destination"
+                    and "related_adr must point to an ADR route" in finding.message
+                    for finding in warnings
+                )
+            )
+            self.assertFalse(
+                any(
+                    finding.source == "project/research/label.md"
+                    and finding.code in {"route-metadata-missing-target", "route-metadata-destination"}
+                    for finding in warnings
+                )
+            )
+            self.assertFalse(
+                any(
+                    finding.source == "project/specs/workflow/workflow-memory-routing-spec.md"
+                    and finding.code == "route-metadata-stale-reference"
+                    for finding in warnings
+                )
+            )
             self.assertTrue(all(finding.severity in {"warn", "info"} for finding in warnings))
 
     def test_route_metadata_validation_is_live_root_only(self) -> None:
@@ -220,7 +322,7 @@ class InventoryTests(unittest.TestCase):
             warnings = [finding.code for finding in validation_findings(inventory) if finding.severity == "warn"]
             self.assertIn("active-plan-phase-body-drift", warnings)
 
-    def test_complete_closeout_active_plan_warns_when_not_archived(self) -> None:
+    def test_complete_closeout_active_plan_reports_ready_for_closeout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_minimal_root(Path(tmp), active=True, docmap=True)
             state = root / "project/project-state.md"
@@ -242,8 +344,8 @@ class InventoryTests(unittest.TestCase):
                 encoding="utf-8",
             )
             inventory = load_inventory(root)
-            warnings = [finding.code for finding in validation_findings(inventory) if finding.severity == "warn"]
-            self.assertIn("active-plan-complete-not-archived", warnings)
+            infos = [finding.code for finding in validation_findings(inventory) if finding.severity == "info"]
+            self.assertIn("active-plan-ready-for-closeout", infos)
 
     def test_active_plan_warns_on_invalid_docs_decision_frontmatter(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -320,6 +422,47 @@ class InventoryTests(unittest.TestCase):
             self.assertIn("candidate-docmap-gap", warnings)
             self.assertIn("stale-fallback-root-reference", warnings)
             self.assertIn("stale-product-root-role", warnings)
+
+    def test_audit_links_treats_product_source_lifecycle_route_examples_as_optional(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_minimal_root(Path(tmp), active=False, docmap=True)
+            (root / "docs").mkdir(parents=True)
+            (root / "docs/README.md").write_text(
+                "See `project/roadmap.md`, `project/decisions/no-revisit.md`, "
+                "`project/adrs/0001-routing.md`, and `project/verification/closeout.md` "
+                "in serviced operating roots.\n",
+                encoding="utf-8",
+            )
+            inventory = load_inventory(root)
+            findings = audit_link_findings(inventory)
+            warnings = [
+                finding
+                for finding in findings
+                if finding.severity == "warn" and finding.code in {"missing-link", "unresolved-link"}
+            ]
+            self.assertEqual(warnings, [])
+            optional_messages = "\n".join(finding.message for finding in findings if finding.code == "optional-link-missing")
+            self.assertIn("roadmap route examples belong in serviced live operating roots", optional_messages)
+            self.assertIn("ADR route examples belong in serviced live operating roots", optional_messages)
+            self.assertIn("decision route examples belong in serviced live operating roots", optional_messages)
+            self.assertIn("verification route examples belong in serviced live operating roots", optional_messages)
+
+    def test_context_budget_keeps_product_docs_and_specs_measurement_informational(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_minimal_root(Path(tmp), active=False, docmap=True)
+            (root / "docs/specs").mkdir(parents=True)
+            (root / "docs/specs/large-product-doc.md").write_text("# Product Doc\n" + ("detail\n" * 600), encoding="utf-8")
+            (root / "project/specs/workflow/workflow-artifact-model-spec.md").write_text(
+                "# Stable Spec\n" + ("rule\n" * 600),
+                encoding="utf-8",
+            )
+            inventory = load_inventory(root)
+            findings = context_budget_findings(inventory)
+            warnings = [finding for finding in findings if finding.severity == "warn"]
+            self.assertEqual(warnings, [])
+            measured_sources = {finding.source for finding in findings if finding.code == "file-budget"}
+            self.assertIn("docs/specs/large-product-doc.md", measured_sources)
+            self.assertIn("project/specs/workflow/workflow-artifact-model-spec.md", measured_sources)
 
     def test_check_drift_reports_only_docmap_and_root_pointer_risk(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -439,12 +582,15 @@ class InventoryTests(unittest.TestCase):
     def test_product_hygiene_reports_operational_surfaces_and_debris(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_minimal_root(Path(tmp), active=False, docmap=True)
+            (root / "project/roadmap.md").write_text("# Roadmap\n", encoding="utf-8")
             (root / "project/research").mkdir()
             (root / "project/research/raw.md").write_text("# Raw\n", encoding="utf-8")
             (root / "project/incubator").mkdir()
             (root / "project/incubator/idea.md").write_text("# Idea\n", encoding="utf-8")
             (root / "project/archive/plans").mkdir(parents=True)
             (root / "project/archive/plans/old.md").write_text("# Old\n", encoding="utf-8")
+            (root / "project/adrs").mkdir()
+            (root / "project/adrs/0001-runtime-layer.md").write_text("# ADR\n", encoding="utf-8")
             (root / "project/decisions").mkdir()
             (root / "project/decisions/no-revisit.md").write_text("# Decision\n", encoding="utf-8")
             (root / "__pycache__").mkdir()
@@ -464,9 +610,11 @@ class InventoryTests(unittest.TestCase):
 
             self.assertIn("forbidden-product-surface", codes)
             self.assertIn("product-debris", codes)
+            self.assertIn("project/roadmap.md", sources)
             self.assertIn("project/research", sources)
             self.assertIn("project/incubator", sources)
             self.assertIn("project/archive", sources)
+            self.assertIn("project/adrs", sources)
             self.assertIn("project/decisions", sources)
             self.assertIn("__pycache__", sources)
             self.assertIn("debug.log", sources)
