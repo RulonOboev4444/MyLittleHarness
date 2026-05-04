@@ -148,6 +148,36 @@ def _active_plan_grain_findings(stats: PlanGrainStats) -> list[Finding]:
             )
         )
 
+    ownership_gaps = _target_artifact_write_scope_gaps(stats)
+    if ownership_gaps:
+        sample = ", ".join(ownership_gaps[:5])
+        suffix = f", +{len(ownership_gaps) - 5} more" if len(ownership_gaps) > 5 else ""
+        findings.append(
+            Finding(
+                "warn",
+                "grain-plan-target-ownership",
+                f"active plan target_artifacts are not named in phase write_scope lines: {sample}{suffix}",
+                stats.rel_path,
+            )
+        )
+
+    if (
+        stats.phase_count <= 1
+        and len(stats.target_artifacts) >= 3
+        and (_verification_is_vague(stats.verification_lines) or _write_scope_is_vague(stats.write_scope_lines))
+    ):
+        findings.append(
+            Finding(
+                "warn",
+                "grain-plan-under-decomposed",
+                (
+                    "active plan has one phase with multiple target_artifacts and generic execution gates; "
+                    "generate phase decomposition or an explicit one-shot rationale before confident execution"
+                ),
+                stats.rel_path,
+            )
+        )
+
     if stats.auto_continue and len(stats.stop_conditions) < 3:
         findings.append(
             Finding(
@@ -215,11 +245,15 @@ def _roadmap_grain_findings(inventory: Inventory, active_stats: PlanGrainStats |
 
     detailed_done = [item for item in items if _field_scalar(item.fields, "status") == "done"]
     if len(detailed_done) > 4:
+        compaction_ready = [item for item in detailed_done if _done_item_has_live_tail_evidence(item)]
         findings.append(
             Finding(
                 "warn",
                 "grain-roadmap-done-tail",
-                f"roadmap keeps {len(detailed_done)} detailed done item blocks; consider live-tail compaction only after durable closeout evidence",
+                (
+                    f"roadmap keeps {len(detailed_done)} detailed done item blocks; "
+                    f"{len(compaction_ready)} have archived-plan evidence and can be compacted by the explicit roadmap apply rail"
+                ),
                 roadmap.rel_path,
             )
         )
@@ -437,6 +471,15 @@ def _contract_line_is_specific(line: str, vague_markers: tuple[str, ...]) -> boo
     return bool(re.search(r"`[^`]+`|[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+|[A-Za-z0-9_.-]+\.(py|md|toml|yaml|yml|json)", line))
 
 
+def _target_artifact_write_scope_gaps(stats: PlanGrainStats) -> list[str]:
+    if not stats.target_artifacts:
+        return []
+    write_scope_text = "\n".join(stats.write_scope_lines).replace("\\", "/")
+    if not write_scope_text.strip():
+        return list(stats.target_artifacts)
+    return [target for target in stats.target_artifacts if target.replace("\\", "/") not in write_scope_text]
+
+
 def _pressure_signals(stats: PlanGrainStats) -> list[str]:
     signals: list[str] = []
     if len(stats.covered_roadmap_items) > COVERED_ITEM_REVIEW_THRESHOLD:
@@ -521,6 +564,16 @@ def _field_scalar(fields: dict[str, object], key: str) -> str:
 
 def _field_list(fields: dict[str, object], key: str) -> tuple[str, ...]:
     return _list_value(fields.get(key))
+
+
+def _done_item_has_live_tail_evidence(item: RoadmapGrainItem) -> bool:
+    archived_plan = _field_scalar(item.fields, "archived_plan")
+    docs_decision = _field_scalar(item.fields, "docs_decision")
+    return (
+        archived_plan.startswith("project/archive/plans/")
+        and bool(_field_scalar(item.fields, "verification_summary"))
+        and docs_decision in {"updated", "not-needed"}
+    )
 
 
 def _list_value(value: object) -> tuple[str, ...]:

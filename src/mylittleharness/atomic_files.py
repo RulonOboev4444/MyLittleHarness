@@ -45,7 +45,7 @@ def apply_file_transaction(operations: Iterable[AtomicFileWrite | AtomicFileDele
                 continue
             created_dirs.extend(_missing_parent_dirs(operation.tmp_path))
             operation.tmp_path.parent.mkdir(parents=True, exist_ok=True)
-            operation.tmp_path.write_text(operation.text, encoding="utf-8")
+            _write_text_exact(operation.tmp_path, operation.text)
             written_tmps.append(operation.tmp_path)
 
         for operation in planned:
@@ -171,3 +171,7 @@ def _replace_path(source: Path, target: Path) -> None:
 
 def _unlink_path(path: Path) -> None:
     path.unlink()
+
+
+def _write_text_exact(path: Path, text: str) -> None:
+    path.write_bytes(text.encode("utf-8"))

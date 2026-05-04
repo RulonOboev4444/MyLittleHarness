@@ -15,6 +15,7 @@ from .projection_index import inspect_projection_index
 MCP_READ_PROJECTION_TARGET = "mcp-read-projection"
 MCP_PROTOCOL_VERSION = "2025-11-25"
 MCP_READ_PROJECTION_TOOL = "mylittleharness.read_projection"
+MCP_READ_PROJECTION_SERVER_NAME = "mylittleharness"
 
 
 def mcp_read_projection_sections(inventory: Inventory) -> list[tuple[str, list[Finding]]]:
@@ -41,6 +42,7 @@ def mcp_read_projection_payload(inventory: Inventory) -> dict[str, object]:
             "protocolVersion": MCP_PROTOCOL_VERSION,
             "transport": "stdio",
         },
+        "activation": mcp_read_projection_client_config(inventory),
         "root": {
             "path": str(inventory.root),
             "kind": inventory.root_kind,
@@ -60,7 +62,58 @@ def mcp_read_projection_payload(inventory: Inventory) -> dict[str, object]:
             "writesFiles": False,
             "createsAdapterState": False,
             "authorizesLifecycle": False,
+            "serveCommand": mcp_read_projection_serve_command(inventory),
+            "refreshPolicy": "adapter reports generated-input posture only; use intelligence or projection commands for explicit cache refresh",
             "fallback": "generic CLI and repo-visible files remain sufficient without MCP tooling",
+        },
+    }
+
+
+def mcp_read_projection_serve_command(inventory: Inventory) -> list[str]:
+    return [
+        "mylittleharness",
+        "--root",
+        str(inventory.root),
+        "adapter",
+        "--serve",
+        "--target",
+        MCP_READ_PROJECTION_TARGET,
+        "--transport",
+        "stdio",
+    ]
+
+
+def mcp_read_projection_client_config(inventory: Inventory) -> dict[str, object]:
+    command = mcp_read_projection_serve_command(inventory)
+    server = {
+        "name": MCP_READ_PROJECTION_SERVER_NAME,
+        "command": command[0],
+        "args": command[1:],
+        "transport": "stdio",
+    }
+    return {
+        "status": "available",
+        "defaultActive": True,
+        "serverName": MCP_READ_PROJECTION_SERVER_NAME,
+        "tool": MCP_READ_PROJECTION_TOOL,
+        "recommendedUse": (
+            "call before or alongside CLI/file reads when route discovery, projection context, "
+            "relationship lookup, or impact checks would reduce navigation"
+        ),
+        "codex": {
+            "configPath": "%USERPROFILE%\\.codex\\config.toml",
+            "server": server,
+            "toml": _codex_mcp_toml(command),
+        },
+        "generic": {
+            "server": server,
+            "json": {"mcpServers": {MCP_READ_PROJECTION_SERVER_NAME: {"command": command[0], "args": command[1:]}}},
+        },
+        "boundary": {
+            "writesUserConfig": False,
+            "writesRepoFiles": False,
+            "authorizesLifecycle": False,
+            "fallback": "repo-visible files and generic CLI remain authoritative when no MCP client is active",
         },
     }
 
@@ -103,6 +156,30 @@ def _adapter_findings(inventory: Inventory) -> list[Finding]:
             "info",
             "adapter-runtime",
             "dependency-free MCP stdio serving is explicit and foreground-only; no MCP SDK, HTTP server, network dependency, hook, IDE, browser, GitHub, CI, or task-runner runtime is required",
+        ),
+        Finding(
+            "info",
+            "adapter-mcp-helper",
+            (
+                "read-only MCP helper can be served with `mylittleharness --root <root> adapter --serve --target "
+                "mcp-read-projection --transport stdio`; generated inputs are reported as optional posture, not refreshed by the adapter"
+            ),
+        ),
+        Finding(
+            "info",
+            "adapter-default-agent-tooling",
+            (
+                "default agent tooling config is available for MCP server `mylittleharness` and tool "
+                "`mylittleharness.read_projection`; MyLittleHarness reports the config but does not write user config"
+            ),
+        ),
+        Finding(
+            "info",
+            "adapter-agent-use",
+            (
+                "agents should call `mylittleharness.read_projection` before or alongside CLI/file reads when projection "
+                "context helps navigation, relationship lookup, route discovery, or impact checks"
+            ),
         ),
     ]
 
@@ -248,6 +325,17 @@ def _trim(value: str, limit: int = 140) -> str:
     return value[: limit - 3] + "..."
 
 
+def _codex_mcp_toml(command: list[str]) -> str:
+    rendered_args = ", ".join(json.dumps(arg, ensure_ascii=True) for arg in command[1:])
+    return "\n".join(
+        [
+            f"[mcp_servers.{MCP_READ_PROJECTION_SERVER_NAME}]",
+            f"command = {json.dumps(command[0], ensure_ascii=True)}",
+            f"args = [{rendered_args}]",
+        ]
+    )
+
+
 def _handle_jsonrpc_message(inventory: Inventory, message: object) -> dict[str, object] | None:
     if not isinstance(message, dict):
         return _error_response(None, -32600, "Invalid Request")
@@ -301,13 +389,14 @@ def _tool_definition() -> dict[str, object]:
             "type": "object",
             "properties": {
                 "adapter": {"type": "object"},
+                "activation": {"type": "object"},
                 "root": {"type": "object"},
                 "status": {"type": "string"},
                 "sources": {"type": "array"},
                 "sections": {"type": "array"},
                 "boundary": {"type": "object"},
             },
-            "required": ["adapter", "root", "status", "sources", "sections", "boundary"],
+            "required": ["adapter", "activation", "root", "status", "sources", "sections", "boundary"],
         },
         "annotations": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False},
         "execution": {"taskSupport": "forbidden"},

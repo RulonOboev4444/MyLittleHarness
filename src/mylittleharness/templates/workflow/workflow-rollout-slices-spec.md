@@ -10,4 +10,4 @@ Bundle/split rationale and target-artifact pressure reports are review aids for 
 
 Generated plans default to `execution_policy = current-phase-only`, `auto_continue = false`, and repo-visible `stop_conditions`; verification success alone does not authorize the next phase.
 
-Read-only grain diagnostics may compare active and archived plans for roadmap item count, phase count, target artifact count, write-scope specificity, verification specificity, stop points, closeout evidence, and roadmap live-tail hygiene. Their output is empirical tuning evidence only, not an automatic split, compaction, closeout, or lifecycle decision.
+Read-only grain diagnostics may compare active and archived plans for roadmap item count, phase count, target artifact count, write-scope specificity, verification specificity, stop points, closeout evidence, and roadmap live-tail hygiene. They should flag under-decomposed plans when a single phase carries multiple target artifacts with generic write scope or verification gates. Their output is empirical tuning evidence only, not an automatic split, compaction, closeout, or lifecycle decision.

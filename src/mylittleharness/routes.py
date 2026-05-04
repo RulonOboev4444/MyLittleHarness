@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 
@@ -10,6 +11,16 @@ class MemoryRoute:
     purpose: str
     start_path: str
     authority: str
+
+
+@dataclass(frozen=True)
+class IntakeRouteAdvice:
+    route_id: str
+    target: str
+    confidence: str
+    reason: str
+    next_action: str
+    apply_allowed: bool
 
 
 LIVE_LIFECYCLE_ROUTES: tuple[MemoryRoute, ...] = (
@@ -147,6 +158,42 @@ SUPPORT_ROUTES: tuple[MemoryRoute, ...] = (
 ROUTE_REGISTRY: tuple[MemoryRoute, ...] = LIVE_LIFECYCLE_ROUTES + SUPPORT_ROUTES
 ROUTE_BY_ID = {route.route_id: route for route in ROUTE_REGISTRY}
 
+INTAKE_ROUTE_ALLOWED_TARGETS = {
+    "adrs",
+    "archive",
+    "decisions",
+    "incubation",
+    "product-docs",
+    "research",
+    "verification",
+}
+INTAKE_ROUTE_DEFAULT_STATUS = {
+    "adrs": "draft",
+    "archive": "archived",
+    "decisions": "draft",
+    "incubation": "incubating",
+    "product-docs": "draft",
+    "research": "imported",
+    "verification": "passed",
+}
+INTAKE_ROUTE_CUES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("adrs", ("adr:", "adr ", "architecture decision record", "architecture decision")),
+    ("decisions", ("decision:", "decided:", "do-not-revisit", "do not revisit", "we decided", "accepted decision")),
+    ("verification", ("verification:", "verified:", "pytest", "tests passed", "smoke passed", "validation passed", "evidence:")),
+    ("product-docs", ("docs impact:", "doc impact:", "documentation:", "readme", "docs update", "documentation update")),
+    ("archive", ("archive reference:", "archived reference", "historical reference", "legacy reference", "for reference only")),
+    ("research", ("research import:", "research:", "distillate:", "source notes", "imported research", "raw import")),
+    ("incubation", ("future idea:", "idea:", "follow-up:", "follow up:", "later:", "todo:", "proposal:", "candidate:")),
+)
+AMBIGUOUS_INTAKE = IntakeRouteAdvice(
+    route_id="ambiguous",
+    target="<manual-route-required>",
+    confidence="none",
+    reason="no single route cue dominated the input",
+    next_action="classify the input explicitly before writing operating memory",
+    apply_allowed=False,
+)
+
 ROLE_TO_ROUTE_ID = {
     "active-plan": "active-plan",
     "adr": "adrs",
@@ -168,6 +215,50 @@ ROLE_TO_ROUTE_ID = {
 
 def lifecycle_route_rows() -> tuple[tuple[str, str, str], ...]:
     return tuple((route.route_id, route.target, route.purpose) for route in LIVE_LIFECYCLE_ROUTES)
+
+
+def classify_intake_text(text: str) -> IntakeRouteAdvice:
+    normalized = _normalized_intake_text(text)
+    if not normalized:
+        return AMBIGUOUS_INTAKE
+
+    matches: list[tuple[int, int, str, tuple[str, ...]]] = []
+    for index, (route_id, cues) in enumerate(INTAKE_ROUTE_CUES):
+        matched = tuple(cue for cue in cues if cue in normalized)
+        if matched:
+            matches.append((len(matched), index, route_id, matched))
+
+    if not matches:
+        return AMBIGUOUS_INTAKE
+
+    matches.sort(key=lambda item: (item[0], -item[1]), reverse=True)
+    top_count, _top_index, route_id, top_cues = matches[0]
+    if len(matches) > 1 and matches[1][0] == top_count:
+        return IntakeRouteAdvice(
+            route_id="ambiguous",
+            target="<manual-route-required>",
+            confidence="none",
+            reason=f"multiple route cues matched: {route_id}, {matches[1][2]}",
+            next_action="choose the destination route explicitly before applying intake",
+            apply_allowed=False,
+        )
+
+    route = ROUTE_BY_ID[route_id]
+    confidence = "high" if top_count > 1 or any(cue.endswith(":") for cue in top_cues) else "medium"
+    return IntakeRouteAdvice(
+        route_id=route_id,
+        target=route.target,
+        confidence=confidence,
+        reason=f"matched cue(s): {', '.join(top_cues)}",
+        next_action=_intake_next_action(route_id),
+        apply_allowed=True,
+    )
+
+
+def intake_target_matches_route(route_id: str, rel_path: str) -> bool:
+    if route_id not in INTAKE_ROUTE_ALLOWED_TARGETS:
+        return False
+    return classify_memory_route(rel_path).route_id == route_id
 
 
 def classify_memory_route(rel_path: str, role: str = "") -> MemoryRoute:
@@ -207,3 +298,22 @@ def classify_memory_route(rel_path: str, role: str = "") -> MemoryRoute:
         if lowered.startswith(prefix):
             return ROUTE_BY_ID[prefix_route_id]
     return ROUTE_BY_ID["unclassified"]
+
+
+def _normalized_intake_text(text: str) -> str:
+    lowered = str(text or "").casefold()
+    lowered = lowered.replace("_", " ").replace("-", " ")
+    return re.sub(r"\s+", " ", lowered).strip()
+
+
+def _intake_next_action(route_id: str) -> str:
+    actions = {
+        "adrs": "write an ADR under project/adrs/ only when an architecture decision is accepted",
+        "archive": "write under project/archive/reference/** only for explicit historical reference material",
+        "decisions": "write a decision record under project/decisions/ when rationale should not be rediscovered",
+        "incubation": "use project/plan-incubation/*.md for future ideas that are not yet accepted work",
+        "product-docs": "route docs impact to the relevant docs/**/*.md product contract or README surface",
+        "research": "write imported or distilled research under project/research/*.md before promotion",
+        "verification": "write durable proof under project/verification/*.md only when reusable evidence is worth the ceremony",
+    }
+    return actions.get(route_id, AMBIGUOUS_INTAKE.next_action)

@@ -9,6 +9,8 @@
 - Read `project/implementation-plan.md` only when `project/project-state.md` or the manifest says `plan_status = "active"` or the user explicitly asks about the plan, phase, or closeout.
 - When `plan_status = "active"`, prefer first-class `active_phase` and `phase_status` values from `project/project-state.md` over prose inference for continuation.
 - Use MLH lifecycle routes instead of ad hoc memory pockets; incubation notes live under `project/plan-incubation/*.md`, and optional accepted-work sequencing lives at `project/roadmap.md`.
+- When `check` reports oversized `project/project-state.md`, do not manually trim only the newest note; preview/apply `writeback --compact-only` so MLH scans the whole state and archives older/non-current history while preserving current authority.
+- If an MCP client exposes `mylittleharness.read_projection`, use it as a read-only projection helper before or alongside CLI/file reads when route discovery, relationship lookup, or impact checks would help; repo-visible files remain authoritative.
 - Use the optional docs routing file when present as a routing aid for product docs and impact checks; it is not authority by itself.
 - Run `mylittleharness --root <this-repo> check` before mutating repair work.
 - Run `mylittleharness --root <this-repo> repair --dry-run` before `repair --apply`.

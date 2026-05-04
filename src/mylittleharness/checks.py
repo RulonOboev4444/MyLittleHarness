@@ -7,11 +7,13 @@ import json
 import re
 import subprocess
 import sys
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
 from importlib import resources
 from pathlib import Path
 
 from . import __version__
+from .atomic_files import AtomicFileWrite, FileTransactionError, apply_file_transaction
 from .inventory import (
     EXPECTED_SPEC_NAMES,
     Inventory,
@@ -19,6 +21,7 @@ from .inventory import (
     Surface,
     load_inventory,
 )
+from .lifecycle_focus import CURRENT_FOCUS_BEGIN, CURRENT_FOCUS_END, MEMORY_ROADMAP_BEGIN, MEMORY_ROADMAP_END
 from .models import Finding
 from .memory_hygiene import relationship_hygiene_scan_findings
 from .projection import Projection, ProjectionLinkRecord, build_projection, product_target_artifact_reason
@@ -30,10 +33,21 @@ from .projection_artifacts import (
     rebuild_projection_artifacts,
 )
 from .projection_index import INDEX_REL_PATH, build_projection_index, full_text_search_findings, inspect_projection_index, rebuild_projection_index
-from .routes import ROUTE_BY_ID, classify_memory_route, lifecycle_route_rows
+from .routes import (
+    INTAKE_ROUTE_ALLOWED_TARGETS,
+    INTAKE_ROUTE_DEFAULT_STATUS,
+    IntakeRouteAdvice,
+    ROUTE_BY_ID,
+    classify_intake_text,
+    classify_memory_route,
+    intake_target_matches_route,
+    lifecycle_route_rows,
+)
 from .writeback import (
     active_plan_body_facts,
+    active_plan_completed_phase_handoff_findings,
     active_plan_phase_body_status_fact,
+    active_plan_preceding_phase_body_status_facts,
     canonical_phase_body_status,
     closeout_values_are_complete,
     state_writeback_facts,
@@ -255,6 +269,7 @@ PHASE_STATUS_VALUES = {
     "skipped",
     "paused",
 }
+PHASE_BODY_TERMINAL_STATUS_VALUES = {"complete", "done", "skipped"}
 DOCS_DECISION_VALUES = {"updated", "not-needed", "uncertain"}
 ROUTE_METADATA_VALIDATED_ROUTES = {"adrs", "decisions", "incubation", "research", "roadmap", "stable-specs", "verification"}
 ROUTE_METADATA_STATUS_VALUES = {
@@ -324,6 +339,89 @@ ROUTE_METADATA_PROMOTION_TARGET_ROUTES = {
     "verification",
 }
 LIFECYCLE_ROUTE_ROWS = lifecycle_route_rows()
+
+
+@dataclass(frozen=True)
+class IntakeRequest:
+    text: str
+    text_source: str
+    title: str
+    target: str
+
+
+def make_intake_request(text: str | None, text_source: str, title: str | None, target: str | None) -> IntakeRequest:
+    return IntakeRequest(
+        text=str(text or ""),
+        text_source=str(text_source or "").strip() or "intake input",
+        title=str(title or "").strip(),
+        target=_normalized_intake_target(target),
+    )
+
+
+def intake_dry_run_findings(inventory: Inventory, request: IntakeRequest) -> list[Finding]:
+    findings = [
+        Finding("info", "intake-dry-run", "intake route proposal only; no files were written"),
+        Finding("info", "intake-root-posture", f"root kind: {inventory.root_kind}"),
+    ]
+    errors = _intake_request_errors(inventory, request, apply=False)
+    if errors:
+        findings.extend(_with_severity(errors, "warn"))
+        findings.append(Finding("info", "intake-validation-posture", "dry-run refused before apply; classify the input and rerun dry-run before writing intake"))
+        return findings
+
+    advice = classify_intake_text(request.text)
+    findings.extend(_intake_advice_findings(advice, request, prefix="would "))
+    if request.target:
+        findings.extend(_intake_target_preview_findings(request, advice))
+    findings.extend(_intake_boundary_findings())
+    findings.append(
+        Finding(
+            "info",
+            "intake-validation-posture",
+            "apply would write one explicit new Markdown target in a compatible route; dry-run writes no files",
+            request.target or None,
+        )
+    )
+    return findings
+
+
+def intake_apply_findings(inventory: Inventory, request: IntakeRequest) -> list[Finding]:
+    advice = classify_intake_text(request.text)
+    errors = _intake_request_errors(inventory, request, apply=True)
+    if errors:
+        return errors
+
+    target_path = inventory.root / request.target
+    document = _intake_document_text(request, advice)
+    operation = AtomicFileWrite(
+        target_path=target_path,
+        tmp_path=target_path.with_name(f".{target_path.name}.intake.tmp"),
+        text=document,
+        backup_path=target_path.with_name(f".{target_path.name}.intake.backup"),
+    )
+    try:
+        cleanup_warnings = apply_file_transaction([operation])
+    except FileTransactionError as exc:
+        return [Finding("error", "intake-refused", f"intake apply failed before the target write completed: {exc}", request.target)]
+
+    findings = [
+        Finding("info", "intake-apply", "intake apply started"),
+        Finding("info", "intake-root-posture", f"root kind: {inventory.root_kind}"),
+        Finding("info", "intake-written", f"wrote routed intake note to {request.target}", request.target),
+    ]
+    findings.extend(_intake_advice_findings(advice, request, prefix=""))
+    for warning in cleanup_warnings:
+        findings.append(Finding("warn", "intake-backup-cleanup", warning, request.target))
+    findings.extend(_intake_boundary_findings())
+    findings.append(
+        Finding(
+            "info",
+            "intake-validation-posture",
+            "run check after apply to verify the live operating root remains healthy; intake output is not lifecycle approval",
+            request.target,
+        )
+    )
+    return findings
 
 
 def status_findings(inventory: Inventory) -> list[Finding]:
@@ -588,6 +686,73 @@ def check_drift_findings(inventory: Inventory) -> list[Finding]:
     return [Finding("info", "check-drift-ok", "no check-level docmap, root-pointer, rule/context, or remainder drift was found")]
 
 
+def projection_cache_status_findings(inventory: Inventory) -> list[Finding]:
+    projection = build_projection(inventory)
+    artifact_findings = inspect_projection_artifacts(inventory, projection)
+    index_findings = inspect_projection_index(inventory, projection)
+    artifact_status, artifact_reason = _projection_cache_status(
+        artifact_findings,
+        current_code="projection-artifact-current",
+        missing_code="projection-artifact-missing",
+    )
+    index_status, index_reason = _projection_cache_status(
+        index_findings,
+        current_code="projection-index-current",
+        missing_code="projection-index-missing",
+    )
+    reason = _projection_cache_reason_label(artifact_reason, index_reason)
+    return [
+        Finding(
+            "info",
+            "projection-cache-status",
+            (
+                f"generated projection cache: artifacts={artifact_status}; sqlite_index={index_status}; "
+                f"detail={reason}; source files and the in-memory projection remain authoritative"
+            ),
+            ARTIFACT_DIR_REL,
+        ),
+        Finding(
+            "info",
+            "projection-cache-read-only",
+            (
+                "check inspects projection freshness without refreshing generated artifacts or SQLite indexes; "
+                "intelligence path/full-text navigation may refresh the disposable cache when a query needs it"
+            ),
+            ARTIFACT_DIR_REL,
+        ),
+    ]
+
+
+def _projection_cache_status(findings: list[Finding], current_code: str, missing_code: str) -> tuple[str, str]:
+    codes = [finding.code for finding in findings]
+    if any(code.endswith("fts5-unavailable") for code in codes):
+        return "unavailable", _projection_cache_sample(codes)
+    if missing_code in codes:
+        return "missing", missing_code
+    if current_code in codes:
+        return "current", current_code
+    if any(
+        code.endswith(suffix)
+        for code in codes
+        for suffix in ("stale", "hash", "count", "schema", "root-mismatch")
+    ):
+        return "stale", _projection_cache_sample(codes)
+    if any(finding.severity in {"warn", "error"} for finding in findings):
+        return "degraded", _projection_cache_sample(codes)
+    return "current", _projection_cache_sample(codes)
+
+
+def _projection_cache_sample(codes: list[str]) -> str:
+    selected = [code for code in codes if not code.endswith("boundary")]
+    return ",".join(selected[:3]) if selected else "no-detail"
+
+
+def _projection_cache_reason_label(artifact_reason: str, index_reason: str) -> str:
+    if artifact_reason == index_reason:
+        return artifact_reason
+    return f"artifacts:{artifact_reason}; index:{index_reason}"
+
+
 def diagnostic_drift_findings(inventory: Inventory) -> list[Finding]:
     findings = audit_link_findings(inventory)
     findings.extend(rule_context_findings(inventory, include_ok=False))
@@ -628,7 +793,7 @@ def _large_rule_context_message(inventory: Inventory, surface: Surface, label: s
         f"{surface.char_count} chars, label={label}; use context-budget for section detail"
     )
     if inventory.root_kind == "live_operating_root" and surface.rel_path == "project/project-state.md":
-        message += "; preview safe state compaction with writeback --dry-run --compact-only"
+        message += "; preview whole-state history compaction with writeback --dry-run --compact-only"
     return message
 
 
@@ -5029,7 +5194,118 @@ def _state_findings(inventory: Inventory) -> list[Finding]:
             findings.append(Finding("error", "state-frontmatter-field", f"project-state.md missing frontmatter key: {key}", state.rel_path))
     if inventory.root_kind == "live_operating_root":
         findings.extend(_live_product_source_root_findings(inventory, state))
+        findings.extend(_state_lifecycle_prose_drift_findings(state))
     return findings
+
+
+def _state_lifecycle_prose_drift_findings(state: Surface) -> list[Finding]:
+    plan_status = str(state.frontmatter.data.get("plan_status") or "")
+    if plan_status not in {"active", "none", ""}:
+        return []
+
+    findings: list[Finding] = []
+    for line_number, line in _current_state_authority_lines(state.content):
+        normalized = line.casefold()
+        if plan_status == "none" and _line_says_active_plan_is_open(normalized):
+            findings.append(
+                Finding(
+                    "warn",
+                    "state-lifecycle-prose-drift",
+                    (
+                        "project-state frontmatter records plan_status='none' but current prose says an active plan is open; "
+                        "rewrite the prose as historical context or preview whole-state history compaction with writeback --dry-run --compact-only"
+                    ),
+                    state.rel_path,
+                    line_number,
+                )
+            )
+        elif plan_status == "active" and _line_says_no_active_plan_is_open(normalized):
+            findings.append(
+                Finding(
+                    "warn",
+                    "state-lifecycle-prose-drift",
+                    (
+                        "project-state frontmatter records plan_status='active' but current prose says no active plan is open; "
+                        "rewrite the prose as historical context or refresh managed focus with writeback/plan apply"
+                    ),
+                    state.rel_path,
+                    line_number,
+                )
+            )
+    return findings
+
+
+def _current_state_authority_lines(text: str) -> list[tuple[int, str]]:
+    excluded_spans = _managed_state_spans(text)
+    lines = text.splitlines()
+    current_section = ""
+    results: list[tuple[int, str]] = []
+    for index, line in enumerate(lines, start=1):
+        if any(start <= index <= end for start, end in excluded_spans):
+            continue
+        heading = re.match(r"^##\s+(.+?)\s*$", line)
+        if heading:
+            current_section = heading.group(1).strip()
+            continue
+        if _state_section_is_historical(current_section):
+            continue
+        if line.strip():
+            results.append((index, line))
+    return results
+
+
+def _managed_state_spans(text: str) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    for begin, end in (
+        (CURRENT_FOCUS_BEGIN, CURRENT_FOCUS_END),
+        (MEMORY_ROADMAP_BEGIN, MEMORY_ROADMAP_END),
+        ("<!-- BEGIN mylittleharness-closeout-writeback v1 -->", "<!-- END mylittleharness-closeout-writeback v1 -->"),
+    ):
+        spans.extend(_marker_spans(text, begin, end))
+    return spans
+
+
+def _marker_spans(text: str, begin: str, end: str) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    start: int | None = None
+    for index, line in enumerate(text.splitlines(), start=1):
+        if line.strip() == begin:
+            start = index
+            continue
+        if line.strip() == end and start is not None:
+            spans.append((start, index))
+            start = None
+    return spans
+
+
+def _state_section_is_historical(title: str) -> bool:
+    normalized = title.casefold()
+    return normalized.startswith(
+        (
+            "ad hoc update",
+            "active plan implementation update",
+            "active plan validation refresh",
+            "archived state history",
+            "research update",
+            "mlh closeout writeback",
+        )
+    )
+
+
+def _line_says_active_plan_is_open(normalized_line: str) -> bool:
+    return (
+        "active implementation plan is open" in normalized_line
+        or "active plan is open" in normalized_line
+        or "current active-plan pointer" in normalized_line
+    )
+
+
+def _line_says_no_active_plan_is_open(normalized_line: str) -> bool:
+    return (
+        "no active implementation plan is open" in normalized_line
+        or "no active plan is open" in normalized_line
+        or "no active-plan pointer" in normalized_line
+    )
 
 
 def _live_product_source_root_findings(inventory: Inventory, state: Surface) -> list[Finding]:
@@ -5229,12 +5505,40 @@ def _active_plan_findings(inventory: Inventory) -> list[Finding]:
             findings.extend(_active_plan_docs_decision_findings(plan, data))
             findings.extend(_active_plan_writeback_drift_findings(inventory, plan, data))
             findings.extend(_active_plan_lifecycle_drift_findings(inventory, plan, data))
+            findings.extend(_active_plan_source_incubation_relationship_findings(inventory, plan))
     elif plan and plan.exists:
         findings.append(Finding("warn", "stale-plan-file", "implementation plan exists while plan_status is not active", plan.rel_path))
     manifest_plan = inventory.manifest.get("memory", {}).get("plan_file") if inventory.manifest else None
     if status == "active" and manifest_plan and str(active_plan).replace("\\", "/") != str(manifest_plan).replace("\\", "/"):
         findings.append(Finding("error", "active-plan-manifest", "active_plan differs from manifest memory.plan_file", state.rel_path if state else None))
     return findings
+
+
+def _active_plan_source_incubation_relationship_findings(inventory: Inventory, plan: Surface) -> list[Finding]:
+    if not plan.frontmatter.has_frontmatter:
+        return []
+    source_incubation = _normalize_route_metadata_path(str(plan.frontmatter.data.get("source_incubation") or ""))
+    if not source_incubation:
+        return []
+    source_surface = inventory.surface_by_rel.get(source_incubation)
+    if not source_surface or not source_surface.exists or not source_surface.frontmatter.has_frontmatter:
+        return []
+    related_plan = _normalize_route_metadata_path(str(source_surface.frontmatter.data.get("related_plan") or ""))
+    if related_plan == "project/implementation-plan.md":
+        return []
+    display = related_plan or "<empty>"
+    return [
+        Finding(
+            "warn",
+            "active-plan-source-incubation-related-plan-drift",
+            (
+                f"active plan source_incubation {source_incubation} has related_plan {display!r}; "
+                "plan --apply --roadmap-item should sync the source incubation back to project/implementation-plan.md "
+                "when opening this active plan"
+            ),
+            source_incubation,
+        )
+    ]
 
 
 def _active_plan_generated_shape_findings(plan: Surface) -> list[Finding]:
@@ -5554,9 +5858,13 @@ def _active_plan_lifecycle_drift_findings(inventory: Inventory, plan: Surface, s
 
     active_phase = str(state_data.get("active_phase") or "")
     body_fact = active_plan_phase_body_status_fact(plan, active_phase)
+    handoff_body_drift = bool(
+        body_fact and phase_status == "pending" and body_fact.value in PHASE_BODY_TERMINAL_STATUS_VALUES
+    )
+    findings.extend(active_plan_completed_phase_handoff_findings(inventory))
     if body_fact:
         expected_body_status = canonical_phase_body_status(phase_status)
-        if body_fact.value != expected_body_status:
+        if body_fact.value != expected_body_status and not handoff_body_drift:
             findings.append(
                 Finding(
                     "warn",
@@ -5568,6 +5876,29 @@ def _active_plan_lifecycle_drift_findings(inventory: Inventory, plan: Surface, s
                     ),
                     body_fact.source,
                     body_fact.line,
+                )
+            )
+    if active_phase and phase_status == "pending":
+        active_body_status_line = body_fact.line if body_fact else None
+        for prior_fact in active_plan_preceding_phase_body_status_facts(plan, active_phase):
+            if _phase_label_matches_active_phase(prior_fact.phase, active_phase):
+                continue
+            if active_body_status_line is not None and prior_fact.line == active_body_status_line:
+                continue
+            if prior_fact.value in PHASE_BODY_TERMINAL_STATUS_VALUES:
+                continue
+            findings.append(
+                Finding(
+                    "warn",
+                    "active-plan-prior-phase-open",
+                    (
+                        f"project-state active_phase is {active_phase!r} with phase_status 'pending', but earlier active-plan "
+                        f"phase block {prior_fact.phase!r} has body status {prior_fact.value!r}; "
+                        f"writeback --apply --active-phase {active_phase} --phase-status pending completes the prior current phase "
+                        "and advances the next pending phase in one lifecycle writeback"
+                    ),
+                    prior_fact.source,
+                    prior_fact.line,
                 )
             )
 
@@ -5589,6 +5920,10 @@ def _active_plan_lifecycle_drift_findings(inventory: Inventory, plan: Surface, s
             )
         )
     return findings
+
+
+def _phase_label_matches_active_phase(phase: str, active_phase: str) -> bool:
+    return _contract_text(phase).casefold() == _contract_text(active_phase).casefold()
 
 
 def _active_plan_docs_decision_findings(plan: Surface, state_data: dict[str, object]) -> list[Finding]:
@@ -6188,6 +6523,183 @@ def _git_findings(root: Path) -> list[Finding]:
     message = (result.stderr or result.stdout).strip().splitlines()
     detail = message[0] if message else f"git exited {result.returncode}"
     return [Finding("info", "git-status", f"not a git worktree: {detail}")]
+
+
+def _intake_request_errors(inventory: Inventory, request: IntakeRequest, apply: bool) -> list[Finding]:
+    errors: list[Finding] = []
+    if not request.text.strip():
+        errors.append(Finding("error", "intake-refused", "intake text is required"))
+
+    advice = classify_intake_text(request.text)
+    if apply:
+        if inventory.root_kind == "product_source_fixture":
+            errors.append(Finding("error", "intake-refused", "target is a product-source compatibility fixture; intake --apply is refused", request.target or None))
+        elif inventory.root_kind == "fallback_or_archive":
+            errors.append(Finding("error", "intake-refused", "target is fallback/archive or generated-output evidence; intake --apply is refused", request.target or None))
+        elif inventory.root_kind != "live_operating_root":
+            errors.append(Finding("error", "intake-refused", f"target root kind is {inventory.root_kind}; intake --apply requires a live operating root", request.target or None))
+        if not request.target:
+            errors.append(Finding("error", "intake-refused", "--target is required with --apply"))
+        if not advice.apply_allowed:
+            errors.append(Finding("error", "intake-refused", f"input is ambiguous: {advice.reason}"))
+
+    if request.target:
+        errors.extend(_intake_target_errors(inventory, request.target, advice, apply))
+    return errors
+
+
+def _intake_target_errors(inventory: Inventory, target: str, advice: IntakeRouteAdvice, apply: bool) -> list[Finding]:
+    errors: list[Finding] = []
+    if _intake_rel_has_absolute_or_parent_parts(target):
+        return [Finding("error", "intake-refused", "--target must be a root-relative path without parent segments", target)]
+    if not target.endswith(".md"):
+        errors.append(Finding("error", "intake-refused", "--target must be a Markdown file", target))
+    route_id = classify_memory_route(target).route_id
+    if route_id not in INTAKE_ROUTE_ALLOWED_TARGETS:
+        errors.append(
+            Finding(
+                "error",
+                "intake-refused",
+                f"--target route {route_id!r} is not an intake destination; use one of {', '.join(sorted(INTAKE_ROUTE_ALLOWED_TARGETS))}",
+                target,
+            )
+        )
+    elif advice.apply_allowed and not intake_target_matches_route(advice.route_id, target):
+        errors.append(
+            Finding(
+                "error",
+                "intake-refused",
+                f"--target route {route_id!r} does not match classified route {advice.route_id!r}",
+                target,
+            )
+        )
+    target_path = inventory.root / target
+    if _intake_path_escapes_root(inventory.root, target_path):
+        errors.append(Finding("error", "intake-refused", "target path escapes the target root", target))
+        return errors
+    for parent in _intake_parents_between(inventory.root, target_path.parent):
+        rel = parent.relative_to(inventory.root).as_posix()
+        if parent.exists() and parent.is_symlink():
+            errors.append(Finding("error", "intake-refused", f"target directory contains a symlink segment: {rel}", rel))
+        elif parent.exists() and not parent.is_dir():
+            errors.append(Finding("error", "intake-refused", f"target directory contains a non-directory segment: {rel}", rel))
+    if apply and target_path.exists():
+        errors.append(Finding("error", "intake-refused", "target already exists; choose a new explicit intake file", target))
+    return errors
+
+
+def _intake_advice_findings(advice: IntakeRouteAdvice, request: IntakeRequest, prefix: str) -> list[Finding]:
+    source = request.target or None
+    return [
+        Finding(
+            "info",
+            "intake-route-advisor",
+            f"{prefix}classify input as {advice.route_id}; target route: {advice.target}; confidence: {advice.confidence}; {advice.reason}",
+            source,
+        ),
+        Finding("info", "intake-route-next-action", f"{prefix}{advice.next_action}", source),
+    ]
+
+
+def _intake_target_preview_findings(request: IntakeRequest, advice: IntakeRouteAdvice) -> list[Finding]:
+    route_id = classify_memory_route(request.target).route_id
+    compatible = advice.apply_allowed and intake_target_matches_route(advice.route_id, request.target)
+    posture = "compatible" if compatible else "not compatible"
+    return [
+        Finding(
+            "info",
+            "intake-target",
+            f"would target {request.target}; route: {route_id}; classifier compatibility: {posture}",
+            request.target,
+        )
+    ]
+
+
+def _intake_boundary_findings() -> list[Finding]:
+    return [
+        Finding(
+            "info",
+            "intake-boundary",
+            "intake dry-run is advisory; intake apply writes only one explicit new Markdown target in an eligible live operating root",
+        ),
+        Finding(
+            "info",
+            "intake-authority",
+            "intake classification cannot approve repair, closeout, archive, commit, rollback, lifecycle decisions, or roadmap promotion",
+        ),
+    ]
+
+
+def _intake_document_text(request: IntakeRequest, advice: IntakeRouteAdvice) -> str:
+    title = _intake_title(request)
+    status = INTAKE_ROUTE_DEFAULT_STATUS.get(advice.route_id, "draft")
+    body = request.text.strip()
+    return (
+        "---\n"
+        f'title: "{_yaml_double_quoted_value(title)}"\n'
+        f'status: "{_yaml_double_quoted_value(status)}"\n'
+        f'route: "{_yaml_double_quoted_value(advice.route_id)}"\n'
+        f'created: "{date.today().isoformat()}"\n'
+        f'intake_source: "{_yaml_double_quoted_value(request.text_source)}"\n'
+        "---\n"
+        f"# {title}\n\n"
+        f"{body}\n"
+    )
+
+
+def _intake_title(request: IntakeRequest) -> str:
+    if request.title:
+        return _clean_intake_title(request.title)
+    for line in request.text.splitlines():
+        cleaned = _clean_intake_title(re.sub(r"^[A-Za-z][A-Za-z -]{1,30}:\s*", "", line.strip()))
+        if cleaned:
+            return cleaned
+    return "Incoming Information"
+
+
+def _clean_intake_title(value: str) -> str:
+    cleaned = re.sub(r"[`*_#\[\]<>]", "", value).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned[:80].strip(" .,:;-") or "Incoming Information"
+
+
+def _normalized_intake_target(value: object) -> str:
+    return str(value or "").replace("\\", "/").strip().strip("/")
+
+
+def _intake_rel_has_absolute_or_parent_parts(rel_path: str) -> bool:
+    if not rel_path or rel_path.startswith("/") or re.match(r"^[A-Za-z]:", rel_path):
+        return True
+    parts = [part for part in rel_path.split("/") if part]
+    return any(part in {".", ".."} for part in parts)
+
+
+def _intake_path_escapes_root(root: Path, path: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return False
+    except ValueError:
+        return True
+
+
+def _intake_parents_between(root: Path, path: Path) -> list[Path]:
+    parents: list[Path] = []
+    current = path
+    root_resolved = root.resolve()
+    while True:
+        try:
+            current.resolve().relative_to(root_resolved)
+        except ValueError:
+            break
+        if current.resolve() == root_resolved:
+            break
+        parents.append(current)
+        current = current.parent
+    return list(reversed(parents))
+
+
+def _with_severity(findings: list[Finding], severity: str) -> list[Finding]:
+    return [Finding(severity, finding.code, finding.message, finding.source, finding.line) for finding in findings]
 
 
 def _is_product_source_inventory(inventory: Inventory) -> bool:

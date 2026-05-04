@@ -8,6 +8,7 @@ CURRENT_FOCUS_END = "<!-- END mylittleharness-current-focus v1 -->"
 MEMORY_ROADMAP_BEGIN = "<!-- BEGIN mylittleharness-memory-routing-roadmap v1 -->"
 MEMORY_ROADMAP_END = "<!-- END mylittleharness-memory-routing-roadmap v1 -->"
 DEFAULT_ACTIVE_PLAN_REL = "project/implementation-plan.md"
+STATE_HISTORY_REFERENCE_LABEL = "Older prose and archived state history are reference context, not lifecycle authority."
 
 
 def sync_current_focus_block(text: str) -> str:
@@ -40,6 +41,7 @@ def _render_current_focus_block(fields: dict[str, str]) -> str:
         if last_archived_plan:
             lines.append(f"Last archived plan: `{last_archived_plan}`.")
     lines.append("Project-state lifecycle frontmatter remains the continuation authority.")
+    lines.append(STATE_HISTORY_REFERENCE_LABEL)
     lines.append(CURRENT_FOCUS_END)
     return "\n".join(lines) + "\n"
 
@@ -101,6 +103,7 @@ def _render_memory_routing_roadmap_block(fields: dict[str, str]) -> str:
     else:
         lines.append("No active-plan pointer is currently open.")
     lines.append("Project-state lifecycle frontmatter remains the continuation authority; roadmap prose here is only a hot pointer.")
+    lines.append("Roadmap metadata sequences accepted work but never overrides lifecycle frontmatter.")
     lines.append(MEMORY_ROADMAP_END)
     return "\n".join(lines) + "\n"
 

@@ -8,8 +8,10 @@ from pathlib import Path
 from .atomic_files import AtomicFileWrite, FileTransactionError, apply_file_transaction
 from .inventory import Inventory
 from .lifecycle_focus import sync_current_focus_block
+from .memory_hygiene import RelationshipUpdatePlan, relationship_update_plan
 from .models import Finding
 from .roadmap import (
+    ROADMAP_REL,
     RoadmapPlan,
     RoadmapSliceContract,
     RoadmapSynthesisReport,
@@ -47,6 +49,22 @@ class PlanRequest:
     update_active: bool = False
     roadmap_item: str = ""
     only_requested_item: bool = False
+
+
+@dataclass(frozen=True)
+class GeneratedPlanPhase:
+    phase_id: str
+    status: str
+    objective: str
+    dependencies: tuple[str, ...]
+    write_scope: tuple[str, ...]
+    read_context: tuple[str, ...]
+    invariants: str
+    implementation_contract: str
+    verification_gates: str
+    docs_decision_rule: str
+    state_transfer: str
+    refusal_or_escalation: str
 
 
 def make_plan_request(
@@ -134,18 +152,7 @@ def render_implementation_plan(
         "- Read context: inspect adjacent source, tests, docs, and workflow authority before widening scope.\n"
         "- Off-limits: generated caches, workstation state, package artifacts, and unrelated user changes.\n"
         "\n## Phases\n\n"
-        f"### {DEFAULT_ACTIVE_PHASE}\n\n"
-        f"- status: `{DEFAULT_PHASE_STATUS}`\n"
-        "- objective: implement the requested change inside the declared write scope.\n"
-        "- preconditions: operating-root `check` is clean enough for the work; existing dirty files are preserved.\n"
-        "- write scope: update this section with exact target files before mutation.\n"
-        "- read context: use repo-visible authority and relevant local tests/docs.\n"
-        "- invariants: keep MLH target-repository boundaries and explicit apply/dry-run semantics intact.\n"
-        "- implementation contract: deliver the requested behavior without adding hidden runtime state.\n"
-        "- verification gates: run targeted tests first, then broader checks appropriate to the changed surface.\n"
-        "- docs decision: keep `docs_decision` as `uncertain` until docs impact is proven.\n"
-        "- state transfer: record changed contracts, verification evidence, residual risk, and carry-forward.\n"
-        "- refusal or escalation: stop before unsafe roots, destructive recovery, hidden infrastructure, or unclear ownership.\n"
+        f"{_phase_sections(slice_contract, synthesis_report)}"
         "\n## Verification Strategy\n\n"
         "- Run the narrowest deterministic tests that cover changed behavior.\n"
         "- Run `mylittleharness --root <this-repo> check` before confident closeout.\n"
@@ -239,6 +246,7 @@ def _plan_synthesis_section(report: RoadmapSynthesisReport | None) -> str:
     covered = ", ".join(f"`{item}`" for item in report.covered_roadmap_items) or "`<none>`"
     bundle = "\n".join(f"- {signal}" for signal in report.bundle_signals)
     split = "\n".join(f"- {signal}" for signal in report.split_signals)
+    phase_note = _phase_outline_note(report)
     return (
         "\n## Plan Synthesis Notes\n\n"
         f"- covered_roadmap_items: {covered}\n"
@@ -248,8 +256,236 @@ def _plan_synthesis_section(report: RoadmapSynthesisReport | None) -> str:
         f"{bundle}\n"
         "\n### Split Boundary\n\n"
         f"{split}\n"
+        f"{phase_note}"
         "\nPlan synthesis notes are advisory sizing evidence only; they cannot approve repair, closeout, archive, commit, rollback, lifecycle decisions, or next-slice movement.\n"
     )
+
+
+def _phase_outline_note(report: RoadmapSynthesisReport) -> str:
+    if _recommended_phase_count_for_report(report) <= 1:
+        return (
+            "\n### One-Shot Rationale\n\n"
+            "- Generated as one explicit current phase because the roadmap slice has low artifact and verification pressure.\n"
+            "- If implementation discovers extra write scope, docs/API uncertainty, or missing deterministic verification, stop and update the plan before widening.\n"
+        )
+    phases = _generated_phases(None, report)
+    lines = ["\n### Phase Outline\n\n"]
+    for phase in phases:
+        lines.append(f"- `{phase.phase_id}`: {phase.objective}\n")
+    return "".join(lines)
+
+
+def _phase_sections(
+    slice_contract: RoadmapSliceContract | None,
+    report: RoadmapSynthesisReport | None,
+) -> str:
+    return "\n".join(_render_phase_section(phase) for phase in _generated_phases(slice_contract, report))
+
+
+def _generated_phases(
+    slice_contract: RoadmapSliceContract | None,
+    report: RoadmapSynthesisReport | None,
+) -> tuple[GeneratedPlanPhase, ...]:
+    if report is None:
+        return (_default_generated_phase(),)
+
+    targets = tuple(report.target_artifacts)
+    groups = _artifact_groups(targets)
+    read_context = tuple(
+        _dedupe_nonempty(
+            (
+                "AGENTS.md",
+                ".codex/project-workflow.toml",
+                "project/project-state.md",
+                "project/roadmap.md",
+                *report.related_specs,
+                *report.source_inputs,
+            )
+        )
+    )
+    boundary = slice_contract.closeout_boundary if slice_contract else "explicit-closeout-required"
+    source_scope = groups["source"] or groups["other"] or targets
+    test_scope = groups["tests"]
+    docs_scope = groups["docs"]
+    all_scope = targets or ("project/implementation-plan.md",)
+
+    phase_1 = GeneratedPlanPhase(
+        phase_id=DEFAULT_ACTIVE_PHASE,
+        status=DEFAULT_PHASE_STATUS,
+        objective="Implement the roadmap-backed behavior inside the declared product/source contract.",
+        dependencies=(),
+        write_scope=source_scope,
+        read_context=read_context,
+        invariants=(
+            "keep MLH target-repository boundaries, explicit dry-run/apply semantics, and "
+            "current-phase-only execution intact"
+        ),
+        implementation_contract=(
+            f"deliver the behavior for `{report.primary_roadmap_item}` without hidden runtime state; "
+            "roadmap synthesis remains advisory and cannot approve lifecycle movement"
+        ),
+        verification_gates=_focused_verification_gate(test_scope),
+        docs_decision_rule="keep `docs_decision` as `uncertain` until docs/spec/package impact is proven.",
+        state_transfer="record changed contracts, source assumptions, verification evidence, residual risk, and carry-forward.",
+        refusal_or_escalation="stop before unsafe roots, destructive recovery, hidden infrastructure, unclear ownership, or edits outside this phase write_scope.",
+    )
+
+    if _recommended_phase_count_for_report(report) <= 1:
+        return (phase_1,)
+
+    phase_2_scope = tuple(_dedupe_nonempty((*test_scope, *docs_scope))) or all_scope
+    phase_2 = GeneratedPlanPhase(
+        phase_id="phase-2-verification-and-docs",
+        status="pending",
+        objective="Prove the behavior with focused tests and update user-facing workflow specs/templates when impact is present.",
+        dependencies=(DEFAULT_ACTIVE_PHASE,),
+        write_scope=phase_2_scope,
+        read_context=read_context,
+        invariants="do not weaken phase-1 verification, roadmap advisory boundaries, or current-phase-only stop conditions.",
+        implementation_contract=(
+            "focused tests and docs/spec fixtures describe the generated phase outline or one-shot rationale consistently"
+        ),
+        verification_gates=_focused_verification_gate(test_scope),
+        docs_decision_rule="record `updated` when specs/templates/docs change; otherwise record `not-needed` with evidence.",
+        state_transfer="record exact commands, expected success signals, docs decision evidence, and any remaining generic gates.",
+        refusal_or_escalation="stop if docs/API/lifecycle authority is uncertain or verification cannot provide a deterministic success signal.",
+    )
+
+    if _recommended_phase_count_for_report(report) <= 2:
+        return (phase_1, phase_2)
+
+    phase_3 = GeneratedPlanPhase(
+        phase_id="phase-3-integration-and-state-transfer",
+        status="pending",
+        objective="Run broader integration checks, mirror/cross-root verification when required, and prepare explicit closeout evidence.",
+        dependencies=("phase-2-verification-and-docs",),
+        write_scope=("project/implementation-plan.md", "project/project-state.md"),
+        read_context=tuple(_dedupe_nonempty((*read_context, *all_scope))),
+        invariants=(
+            f"closeout boundary remains `{boundary}`; completing implementation does not archive, commit, "
+            "mark roadmap done, or open the next slice"
+        ),
+        implementation_contract="repo-visible state transfer is compact, deterministic, and enough for explicit closeout preparation.",
+        verification_gates=(
+            "`mylittleharness --root <operating-root> check` exits 0; run broader product/demo tests when product source or mirrors changed"
+        ),
+        docs_decision_rule="final docs_decision must be `updated`, `not-needed`, or `uncertain`; uncertain keeps closeout language provisional.",
+        state_transfer="record final verification summary, residual risk, carry-forward, and commit decision without staging or archive authority.",
+        refusal_or_escalation="stop before closeout/archive/roadmap done-status/commit unless the user explicitly requests that lifecycle action.",
+    )
+    return (phase_1, phase_2, phase_3)
+
+
+def _default_generated_phase() -> GeneratedPlanPhase:
+    return GeneratedPlanPhase(
+        phase_id=DEFAULT_ACTIVE_PHASE,
+        status=DEFAULT_PHASE_STATUS,
+        objective="Implement the requested change inside the declared write scope.",
+        dependencies=(),
+        write_scope=("update this section with exact target files before mutation",),
+        read_context=("repo-visible authority and relevant local tests/docs",),
+        invariants="keep MLH target-repository boundaries and explicit apply/dry-run semantics intact.",
+        implementation_contract="deliver the requested behavior without adding hidden runtime state.",
+        verification_gates="run targeted tests first, then broader checks appropriate to the changed surface.",
+        docs_decision_rule="keep `docs_decision` as `uncertain` until docs impact is proven.",
+        state_transfer="record changed contracts, verification evidence, residual risk, and carry-forward.",
+        refusal_or_escalation="stop before unsafe roots, destructive recovery, hidden infrastructure, or unclear ownership.",
+    )
+
+
+def _render_phase_section(phase: GeneratedPlanPhase) -> str:
+    dependencies = _backticked_values(phase.dependencies, "`<none>`")
+    return (
+        f"### {phase.phase_id}\n\n"
+        f"- id: `{phase.phase_id}`\n"
+        f"- status: `{phase.status}`\n"
+        f"- objective: {phase.objective}\n"
+        f"- dependencies: {dependencies}\n"
+        f"- write_scope: {_backticked_values(phase.write_scope, '`<none>`')}\n"
+        f"- read_context: {_backticked_values(phase.read_context, '`<none>`')}\n"
+        f"- invariants: {phase.invariants}\n"
+        f"- implementation_contract: {phase.implementation_contract}\n"
+        f"- verification_gates: {phase.verification_gates}\n"
+        f"- docs_decision_rule: {phase.docs_decision_rule}\n"
+        f"- state_transfer: {phase.state_transfer}\n"
+        f"- refusal_or_escalation: {phase.refusal_or_escalation}\n"
+    )
+
+
+def _artifact_groups(targets: tuple[str, ...]) -> dict[str, tuple[str, ...]]:
+    source: list[str] = []
+    tests: list[str] = []
+    docs: list[str] = []
+    other: list[str] = []
+    for target in targets:
+        normalized = _normalize_rel(target)
+        if normalized.startswith("tests/"):
+            tests.append(normalized)
+        elif (
+            normalized.startswith("docs/")
+            or normalized.startswith("project/specs/")
+            or normalized.startswith("src/mylittleharness/templates/")
+            or normalized.endswith(".md")
+        ):
+            docs.append(normalized)
+        elif normalized.startswith("src/"):
+            source.append(normalized)
+        else:
+            other.append(normalized)
+    return {
+        "source": tuple(source),
+        "tests": tuple(tests),
+        "docs": tuple(docs),
+        "other": tuple(other),
+    }
+
+
+def _focused_verification_gate(test_scope: tuple[str, ...]) -> str:
+    if test_scope:
+        return (
+            "`PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src uv run --no-project --with pytest pytest -q "
+            f"{' '.join(test_scope)}` exits 0"
+        )
+    return "`PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src uv run --no-project --with pytest pytest -q` exits 0 or a narrower deterministic command is recorded before completion"
+
+
+def _recommended_phase_count_for_report(report: RoadmapSynthesisReport) -> int:
+    return _recommended_phase_count_for_values(
+        covered_count=len(report.covered_roadmap_items),
+        target_count=len(report.target_artifacts),
+        related_spec_count=len(report.related_specs),
+        verification_summary_count=report.verification_summary_count,
+    )
+
+
+def _recommended_phase_count_for_values(
+    *,
+    covered_count: int,
+    target_count: int,
+    related_spec_count: int,
+    verification_summary_count: int,
+) -> int:
+    pressure = 0
+    if covered_count > 1:
+        pressure += 1
+    if target_count >= 4:
+        pressure += 2
+    elif target_count > 1:
+        pressure += 1
+    if related_spec_count > 1:
+        pressure += 1
+    if verification_summary_count > 0:
+        pressure += 1
+    if pressure <= 1:
+        return 1
+    if pressure <= 2:
+        return 2
+    return 3
+
+
+def _backticked_values(values: tuple[str, ...], fallback: str) -> str:
+    rendered = ", ".join(f"`{value}`" for value in values if value)
+    return rendered or fallback
 
 
 def plan_dry_run_findings(inventory: Inventory, request: PlanRequest) -> list[Finding]:
@@ -260,6 +496,8 @@ def plan_dry_run_findings(inventory: Inventory, request: PlanRequest) -> list[Fi
     errors = _plan_preflight_errors(inventory, request)
     roadmap_plans, roadmap_errors = _plan_roadmap_plans(inventory, request)
     errors.extend(roadmap_errors)
+    source_plans, source_errors = _plan_source_incubation_plans(inventory, request)
+    errors.extend(source_errors)
     findings.append(Finding("info", "plan-target", f"would write active plan: {DEFAULT_PLAN_REL}", DEFAULT_PLAN_REL))
     findings.append(
         Finding(
@@ -279,6 +517,8 @@ def plan_dry_run_findings(inventory: Inventory, request: PlanRequest) -> list[Fi
         synthesis_report = _plan_synthesis_report(inventory, request, slice_contract)
         if synthesis_report:
             findings.extend(_plan_synthesis_findings(synthesis_report, apply=False))
+    if source_plans:
+        findings.extend(_plan_source_incubation_findings(source_plans, apply=False))
     if errors:
         findings.extend(_with_severity(errors, "warn"))
         findings.append(Finding("info", "plan-validation-posture", "dry-run refused before apply; fix refusal reasons, then rerun dry-run before writing a plan"))
@@ -311,6 +551,8 @@ def plan_apply_findings(inventory: Inventory, request: PlanRequest) -> list[Find
     errors = _plan_preflight_errors(inventory, request)
     roadmap_plans, roadmap_errors = _plan_roadmap_plans(inventory, request)
     errors.extend(roadmap_errors)
+    source_plans, source_errors = _plan_source_incubation_plans(inventory, request)
+    errors.extend(source_errors)
     if errors:
         return errors
 
@@ -345,6 +587,11 @@ def plan_apply_findings(inventory: Inventory, request: PlanRequest) -> list[Find
         else None
     )
     roadmap_backup = roadmap_target_path.with_name(f".{roadmap_target_path.name}.plan.backup") if roadmap_target_path else None
+    source_plan_tmps = tuple(
+        (_plan_source_incubation_tmp(plan), _plan_source_incubation_backup(plan), plan)
+        for plan in source_plans
+        if plan.current_text != plan.updated_text
+    )
     for candidate, label in (
         (plan_tmp, "temporary plan write path"),
         (state_tmp, "temporary state write path"),
@@ -355,6 +602,13 @@ def plan_apply_findings(inventory: Inventory, request: PlanRequest) -> list[Find
     ):
         if candidate and candidate.exists():
             return [Finding("error", "plan-refused", f"{label} already exists: {candidate.relative_to(inventory.root).as_posix()}")]
+    for source_tmp, source_backup, _plan in source_plan_tmps:
+        for candidate, label in (
+            (source_tmp, "temporary source-incubation relationship write path"),
+            (source_backup, "temporary source-incubation relationship backup path"),
+        ):
+            if candidate and candidate.exists():
+                return [Finding("error", "plan-refused", f"{label} already exists: {candidate.relative_to(inventory.root).as_posix()}")]
 
     existed = plan_path.exists()
     operations: list[AtomicFileWrite] = [
@@ -363,6 +617,8 @@ def plan_apply_findings(inventory: Inventory, request: PlanRequest) -> list[Find
     ]
     if roadmap_tmp and roadmap_target_path and roadmap_backup and roadmap_plans:
         operations.append(AtomicFileWrite(roadmap_target_path, roadmap_tmp, roadmap_plans[-1].updated_text, roadmap_backup))
+    for source_tmp, source_backup, source_plan in source_plan_tmps:
+        operations.append(AtomicFileWrite(source_plan.target_path, source_tmp, source_plan.updated_text, source_backup))
     try:
         cleanup_warnings = apply_file_transaction(operations)
     except FileTransactionError as exc:
@@ -387,6 +643,8 @@ def plan_apply_findings(inventory: Inventory, request: PlanRequest) -> list[Find
     ]
     if roadmap_plans:
         findings.extend(_plan_roadmap_findings(roadmap_plans, apply=True))
+    if source_plans:
+        findings.extend(_plan_source_incubation_findings(source_plans, apply=True))
     if slice_contract:
         findings.extend(_plan_slice_contract_findings(slice_contract, apply=True))
     if request.only_requested_item:
@@ -521,6 +779,76 @@ def _plan_roadmap_item_ids(inventory: Inventory, request: PlanRequest) -> tuple[
     return (requested,)
 
 
+def _plan_source_incubation_plans(inventory: Inventory, request: PlanRequest) -> tuple[tuple[RelationshipUpdatePlan, ...], list[Finding]]:
+    if not request.roadmap_item:
+        return (), []
+    plans: list[RelationshipUpdatePlan] = []
+    errors: list[Finding] = []
+    seen_sources: set[str] = set()
+    for item_id in _plan_roadmap_item_ids(inventory, request):
+        fields = roadmap_item_fields(inventory, item_id)
+        source_incubation = _normalize_rel(str(fields.get("source_incubation") or ""))
+        if not source_incubation or source_incubation in seen_sources:
+            continue
+        seen_sources.add(source_incubation)
+        plan, plan_errors = relationship_update_plan(
+            inventory,
+            source_incubation,
+            {
+                "related_roadmap": ROADMAP_REL,
+                "related_roadmap_item": item_id,
+                "related_plan": DEFAULT_PLAN_REL,
+                "promoted_to": ROADMAP_REL,
+            },
+        )
+        errors.extend(plan_errors)
+        if plan is not None:
+            plans.append(plan)
+    return tuple(plans), errors
+
+
+def _plan_source_incubation_tmp(plan: RelationshipUpdatePlan) -> Path:
+    return plan.target_path.with_name(f".{plan.target_path.name}.plan-source-incubation.tmp")
+
+
+def _plan_source_incubation_backup(plan: RelationshipUpdatePlan) -> Path:
+    return plan.target_path.with_name(f".{plan.target_path.name}.plan-source-incubation.backup")
+
+
+def _plan_source_incubation_findings(plans: tuple[RelationshipUpdatePlan, ...], apply: bool) -> list[Finding]:
+    prefix = "" if apply else "would "
+    changed_plans = tuple(plan for plan in plans if plan.changed_fields)
+    action = "updated" if apply and changed_plans else "checked" if apply else "would update"
+    findings = [
+        Finding(
+            "info",
+            "plan-source-incubation-sync",
+            f"{action} source incubation relationship metadata for {len(plans)} roadmap source file(s)",
+        )
+    ]
+    for plan in changed_plans:
+        findings.extend(
+            Finding(
+                "info",
+                "plan-source-incubation-changed-field",
+                f"{prefix}change source incubation {plan.source_rel} field: {field}",
+                plan.source_rel,
+            )
+            for field in plan.changed_fields
+        )
+    if not changed_plans:
+        findings.append(Finding("info", "plan-source-incubation-noop", "source incubation relationship metadata already matches the new active plan", plans[0].source_rel if plans else None))
+    findings.append(
+        Finding(
+            "info",
+            "plan-source-incubation-boundary",
+            "plan source-incubation sync records same-request active-plan ownership only; it cannot approve archive, closeout, roadmap done-status, commit, or future lifecycle movement",
+            DEFAULT_PLAN_REL,
+        )
+    )
+    return findings
+
+
 def _plan_slice_contract(inventory: Inventory, request: PlanRequest) -> RoadmapSliceContract | None:
     if not request.roadmap_item:
         return None
@@ -558,6 +886,12 @@ def _plan_synthesis_report(
     source_inputs = tuple(_dedupe_nonempty((contract.source_incubation, contract.source_research)))
     verification_summary = _normalized_note(roadmap_item_fields(inventory, request.roadmap_item).get("verification_summary"))
     verification_summary_count = 1 if verification_summary else 0
+    recommended_phase_count = _recommended_phase_count_for_values(
+        covered_count=1,
+        target_count=len(contract.target_artifacts),
+        related_spec_count=len(contract.related_specs),
+        verification_summary_count=verification_summary_count,
+    )
     return RoadmapSynthesisReport(
         primary_roadmap_item=request.roadmap_item,
         execution_slice=contract.execution_slice,
@@ -579,7 +913,7 @@ def _plan_synthesis_report(
         ),
         phase_pressure=(
             f"1 domain context and {verification_summary_count} {_plural('verification summary', verification_summary_count)}; "
-            "generated plans still start with one explicit current phase"
+            f"candidate plan outline: {recommended_phase_count} {_plural('phase', recommended_phase_count)} or explicit one-shot rationale"
         ),
     )
 

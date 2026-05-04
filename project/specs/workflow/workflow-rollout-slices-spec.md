@@ -57,7 +57,9 @@ The active implementation plan remains the executable contract for one slice. Wh
 
 Bounded plan synthesis may explain why a roadmap-backed plan bundles or splits accepted items by reporting shared execution slice, shared specs, shared target artifacts, source inputs, dependencies, target-artifact pressure, and phase pressure. These reports are advisory review aids only; they do not calibrate slice size, require a split, or authorize a lifecycle transition.
 
-Slice-grain diagnostics are allowed only as read-only reports. They may compare active and archived plans for covered roadmap item count, phase count, target artifact count, write-scope specificity, verification specificity, stop points, closeout evidence, and roadmap live-tail hygiene. The output is empirical tuning evidence, not an automatic slice split, roadmap compaction, closeout decision, or lifecycle approval.
+Generated roadmap-backed plans should materialize either a `Phase Outline` with concrete phase sections or an explicit one-shot rationale. Higher target-artifact, docs/spec, verification, or grouped-roadmap pressure should produce phase sections whose `write_scope` and `verification_gates` are concrete enough to execute current-phase-only without hidden chat memory.
+
+Slice-grain diagnostics are allowed only as read-only reports. They may compare active and archived plans for covered roadmap item count, phase count, target artifact count, write-scope specificity, verification specificity, under-decomposed single-phase plans, stop points, closeout evidence, and roadmap live-tail hygiene. The output is empirical tuning evidence, not an automatic slice split, roadmap compaction, closeout decision, or lifecycle approval.
 
 ## Slice 1: Canonical Doc and Template Contract
 

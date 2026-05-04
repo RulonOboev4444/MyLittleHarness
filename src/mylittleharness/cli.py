@@ -7,7 +7,12 @@ import re
 import sys
 from pathlib import Path
 
-from .adapter import MCP_READ_PROJECTION_TARGET, mcp_read_projection_sections, serve_mcp_read_projection
+from .adapter import (
+    MCP_READ_PROJECTION_TARGET,
+    mcp_read_projection_client_config,
+    mcp_read_projection_sections,
+    serve_mcp_read_projection,
+)
 from .bootstrap import bootstrap_sections, package_smoke_sections
 from .checks import (
     attach_apply_findings,
@@ -19,7 +24,11 @@ from .checks import (
     flatten_sections,
     intelligence_sections,
     intelligence_route_sections,
+    intake_apply_findings,
+    intake_dry_run_findings,
     load_for_root,
+    make_intake_request,
+    projection_cache_status_findings,
     detach_apply_sections,
     repair_apply_findings,
     repair_dry_run_findings,
@@ -53,8 +62,8 @@ from .projection_index import (
     rebuild_projection_index,
 )
 from .preflight import preflight_sections, render_git_pre_commit_template
-from .reporting import render_intelligence_report, render_report, render_sectioned_report
-from .roadmap import make_roadmap_request, roadmap_apply_findings, roadmap_dry_run_findings
+from .reporting import emit_text, render_intelligence_report, render_report, render_sectioned_report
+from .roadmap import make_roadmap_request, roadmap_apply_findings, roadmap_dry_run_findings, roadmap_item_fields
 from .semantic import semantic_evaluate_sections, semantic_inspect_sections
 from .tasks import tasks_sections
 from .writeback import make_writeback_request, writeback_apply_findings, writeback_dry_run_findings
@@ -77,6 +86,7 @@ COMMANDS = (
     "intelligence",
     "evidence",
     "closeout",
+    "intake",
     "incubate",
     "plan",
     "writeback",
@@ -121,6 +131,19 @@ def build_parser() -> argparse.ArgumentParser:
     detach_mode.add_argument("--apply", action="store_true", help="Create the marker-only detach evidence file in an eligible live operating root.")
     for command in ("status", "validate", "context-budget", "audit-links", "doctor", "evidence", "closeout"):
         subparsers.add_parser(command)
+    intake = subparsers.add_parser(
+        "intake",
+        help=argparse.SUPPRESS,
+        description="Advanced mutating command: route incoming information before it becomes incubation clutter.",
+    )
+    intake_mode = intake.add_mutually_exclusive_group(required=True)
+    intake_mode.add_argument("--dry-run", action="store_true", help="Classify the intake text without writing files.")
+    intake_mode.add_argument("--apply", action="store_true", help="Write one explicit new Markdown intake target in a compatible route.")
+    intake_text = intake.add_mutually_exclusive_group(required=True)
+    intake_text.add_argument("--text", help="Incoming information to classify or write.")
+    intake_text.add_argument("--text-file", dest="text_file", help="Read incoming information from a UTF-8 file; use - for stdin.")
+    intake.add_argument("--title", help="Optional Markdown title for the applied intake note.")
+    intake.add_argument("--target", help="Explicit root-relative Markdown target for --apply.")
     incubate = subparsers.add_parser(
         "incubate",
         help=argparse.SUPPRESS,
@@ -212,7 +235,7 @@ def build_parser() -> argparse.ArgumentParser:
     memory_hygiene.add_argument("--status", help="Lifecycle status to write. Defaults to distilled when --promoted-to is supplied.")
     memory_hygiene.add_argument("--archive-to", dest="archive_to", help="Explicit root-relative archive target under project/archive/reference/research or incubation.")
     memory_hygiene.add_argument("--repair-links", action="store_true", help="Repair exact root-relative source path references to the archive path.")
-    memory_hygiene.add_argument("--scan", action="store_true", help="Read-only relationship hygiene scan; valid with --dry-run.")
+    memory_hygiene.add_argument("--scan", action="store_true", help="Read-only relationship hygiene and incubation cleanup advisor scan; valid with --dry-run.")
     memory_hygiene.add_argument("--archive-covered", action="store_true", help="For incubation notes, derive an archive target and require terminal Entry Coverage before archive.")
     memory_hygiene.add_argument("--entry-coverage", dest="entry_coverage", action="append", default=[], help="Terminal Entry Coverage bullet value `<entry-id>: <status> <destination>`; may be repeated.")
     roadmap = subparsers.add_parser(
@@ -315,7 +338,13 @@ def build_parser() -> argparse.ArgumentParser:
     adapter_mode = adapter.add_mutually_exclusive_group(required=True)
     adapter_mode.add_argument("--inspect", action="store_true", help="Inspect the selected adapter projection without installing or running an adapter.")
     adapter_mode.add_argument("--serve", action="store_true", help="Serve the selected adapter projection as a foreground MCP stdio JSON-RPC server.")
-    adapter.add_argument("--target", choices=(MCP_READ_PROJECTION_TARGET,), required=True, help="Adapter projection target to inspect.")
+    adapter_mode.add_argument("--client-config", action="store_true", help="Print no-write MCP client configuration for the selected adapter projection.")
+    adapter.add_argument(
+        "--target",
+        choices=(MCP_READ_PROJECTION_TARGET,),
+        default=MCP_READ_PROJECTION_TARGET,
+        help="Adapter projection target to inspect. Defaults to mcp-read-projection.",
+    )
     adapter.add_argument("--transport", choices=("stdio",), help="Adapter serving transport. Required with --serve; only stdio is supported.")
     attach = subparsers.add_parser(
         "attach",
@@ -332,6 +361,7 @@ def build_parser() -> argparse.ArgumentParser:
         "preflight",
         "semantic",
         "intelligence",
+        "intake",
         "incubate",
         "plan",
         "writeback",
@@ -351,7 +381,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command == "adapter":
-        if args.inspect and args.transport is not None:
+        if not args.serve and args.transport is not None:
             parser.error("--transport is only valid with adapter --serve")
         if args.serve and args.transport != "stdio":
             parser.error("adapter --serve requires --transport stdio")
@@ -359,7 +389,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         inventory = load_for_root(root)
     except RootLoadError as exc:
-        print(f"mylittleharness: {exc}", file=sys.stderr)
+        emit_text(f"mylittleharness: {exc}", stream=sys.stderr)
         return 2
 
     command = args.command
@@ -367,7 +397,7 @@ def main(argv: list[str] | None = None) -> int:
         report_name, sections = _check_report(args, inventory)
         findings = flatten_sections(sections)
         result = _result_for(findings)
-        print(render_sectioned_report(report_name, inventory.root, result, inventory.sources_for_report(), sections, _suggestions(command, findings)))
+        emit_text(render_sectioned_report(report_name, inventory.root, result, inventory.sources_for_report(), sections, _suggestions(command, findings)))
         return 1 if any(finding.severity == "error" for finding in findings) else 0
     if command == "detach":
         report_name = "detach --dry-run"
@@ -378,47 +408,47 @@ def main(argv: list[str] | None = None) -> int:
             sections = detach_dry_run_sections(inventory)
         findings = flatten_sections(sections)
         result = _result_for(findings)
-        print(render_sectioned_report(report_name, inventory.root, result, inventory.sources_for_report(), sections, _suggestions(command, findings)))
+        emit_text(render_sectioned_report(report_name, inventory.root, result, inventory.sources_for_report(), sections, _suggestions(command, findings)))
         return 2 if args.apply and result == "error" else 0
     if command == "status":
         findings = status_findings(inventory)
         result = _result_for(findings)
-        print(render_report("status", inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
+        emit_text(render_report("status", inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
         return 0
     if command == "validate":
         findings = validation_findings(inventory)
         result = _result_for(findings)
-        print(render_report("validate", inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
+        emit_text(render_report("validate", inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
         return 1 if any(finding.severity == "error" for finding in findings) else 0
     if command == "context-budget":
         findings = context_budget_findings(inventory)
         result = _result_for(findings)
-        print(render_report("context-budget", inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
+        emit_text(render_report("context-budget", inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
         return 0
     if command == "audit-links":
         findings = audit_link_findings(inventory)
         result = _result_for(findings)
-        print(render_report("audit-links", inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
+        emit_text(render_report("audit-links", inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
         return 0
     if command == "doctor":
         findings = doctor_findings(inventory.root, inventory)
         result = _result_for(findings)
-        print(render_report("doctor", inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
+        emit_text(render_report("doctor", inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
         return 0
     if command == "preflight":
         if args.template == "git-pre-commit":
-            print(render_git_pre_commit_template(inventory.root))
+            emit_text(render_git_pre_commit_template(inventory.root))
             return 0
         sections = preflight_sections(inventory)
         findings = flatten_sections(sections)
         result = _result_for(findings)
-        print(render_sectioned_report("preflight", inventory.root, result, inventory.sources_for_report(), sections, _suggestions(command, findings)))
+        emit_text(render_sectioned_report("preflight", inventory.root, result, inventory.sources_for_report(), sections, _suggestions(command, findings)))
         return 0
     if command == "tasks":
         sections = tasks_sections(inventory)
         findings = flatten_sections(sections)
         result = _result_for(findings)
-        print(render_sectioned_report("tasks --inspect", inventory.root, result, inventory.sources_for_report(), sections, _suggestions(command, findings)))
+        emit_text(render_sectioned_report("tasks --inspect", inventory.root, result, inventory.sources_for_report(), sections, _suggestions(command, findings)))
         return 0
     if command == "bootstrap":
         if args.package_smoke:
@@ -429,7 +459,7 @@ def main(argv: list[str] | None = None) -> int:
             report_name = "bootstrap --inspect"
         findings = flatten_sections(sections)
         result = _result_for(findings)
-        print(render_sectioned_report(report_name, inventory.root, result, inventory.sources_for_report(), sections, _suggestions(command, findings)))
+        emit_text(render_sectioned_report(report_name, inventory.root, result, inventory.sources_for_report(), sections, _suggestions(command, findings)))
         return 1 if args.package_smoke and result == "error" else 0
     if command == "semantic":
         if args.evaluate:
@@ -440,7 +470,7 @@ def main(argv: list[str] | None = None) -> int:
             report_name = "semantic --inspect"
         findings = flatten_sections(sections)
         result = _result_for(findings)
-        print(render_sectioned_report(report_name, inventory.root, result, inventory.sources_for_report(), sections, _suggestions(command, findings)))
+        emit_text(render_sectioned_report(report_name, inventory.root, result, inventory.sources_for_report(), sections, _suggestions(command, findings)))
         return 0
     if command == "intelligence":
         sections = (
@@ -451,7 +481,7 @@ def main(argv: list[str] | None = None) -> int:
         findings = flatten_sections(sections)
         result = _result_for(findings)
         display_sections = _focused_intelligence_sections(sections, args.focus)
-        print(
+        emit_text(
             render_intelligence_report(
                 inventory.root,
                 result,
@@ -465,14 +495,30 @@ def main(argv: list[str] | None = None) -> int:
     if command == "evidence":
         findings = evidence_findings(inventory)
         result = _result_for(findings)
-        print(render_report("evidence", inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
+        emit_text(render_report("evidence", inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
         return 0
     if command == "closeout":
         sections = closeout_sections(inventory)
         findings = flatten_sections(sections)
         result = _result_for(findings)
-        print(render_sectioned_report("closeout", inventory.root, result, inventory.sources_for_report(), sections, _suggestions(command, findings)))
+        emit_text(render_sectioned_report("closeout", inventory.root, result, inventory.sources_for_report(), sections, _suggestions(command, findings)))
         return 0
+    if command == "intake":
+        intake_text = args.text
+        intake_source = "--text"
+        if args.text_file is not None:
+            text_result = _read_text_argument("--text-file", args.text_file)
+            if text_result[1]:
+                emit_text(f"mylittleharness: {text_result[1]}", stream=sys.stderr)
+                return 2
+            intake_text = text_result[0]
+            intake_source = f"--text-file {args.text_file}"
+        request = make_intake_request(intake_text, intake_source, args.title, args.target)
+        report_name = "intake --apply" if args.apply else "intake --dry-run"
+        findings = intake_apply_findings(inventory, request) if args.apply else intake_dry_run_findings(inventory, request)
+        result = _result_for(findings)
+        emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
+        return 2 if args.apply and result == "error" else 0
     if command == "writeback":
         request = make_writeback_request(
             archive_active_plan=args.archive_active_plan,
@@ -498,20 +544,20 @@ def main(argv: list[str] | None = None) -> int:
             report_name += " --compact-only"
         findings = writeback_apply_findings(inventory, request) if args.apply else writeback_dry_run_findings(inventory, request)
         result = _result_for(findings)
-        print(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
+        emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
         return 2 if args.apply and result == "error" else 0
     if command == "transition":
         report_name = "transition --apply" if args.apply else "transition --dry-run"
         findings = _transition_apply_findings(inventory, args) if args.apply else _transition_dry_run_findings(inventory, args)
         result = _result_for(findings)
-        print(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
+        emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
         return 2 if args.apply and result == "error" else 0
     if command == "plan":
         request = make_plan_request(args.title, args.objective, args.task, args.update_active, args.roadmap_item, args.only_requested_item)
         report_name = "plan --apply" if args.apply else "plan --dry-run"
         findings = plan_apply_findings(inventory, request) if args.apply else plan_dry_run_findings(inventory, request)
         result = _result_for(findings)
-        print(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
+        emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
         return 2 if args.apply and result == "error" else 0
     if command == "memory-hygiene":
         request = make_memory_hygiene_request(
@@ -527,7 +573,7 @@ def main(argv: list[str] | None = None) -> int:
         report_name = "memory-hygiene --apply" if args.apply else "memory-hygiene --dry-run"
         findings = memory_hygiene_apply_findings(inventory, request) if args.apply else memory_hygiene_dry_run_findings(inventory, request)
         result = _result_for(findings)
-        print(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
+        emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
         return 2 if args.apply and result == "error" else 0
     if command == "roadmap":
         request = make_roadmap_request(
@@ -557,7 +603,7 @@ def main(argv: list[str] | None = None) -> int:
         report_name = "roadmap --apply" if args.apply else "roadmap --dry-run"
         findings = roadmap_apply_findings(inventory, request) if args.apply else roadmap_dry_run_findings(inventory, request)
         result = _result_for(findings)
-        print(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
+        emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
         return 2 if args.apply and result == "error" else 0
     if command == "incubate":
         note_text = args.note
@@ -565,7 +611,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.note_file is not None:
             note_result = _read_text_argument("--note-file", args.note_file)
             if note_result[1]:
-                print(f"mylittleharness: {note_result[1]}", file=sys.stderr)
+                emit_text(f"mylittleharness: {note_result[1]}", stream=sys.stderr)
                 return 2
             note_text = note_result[0]
             note_source = f"--note-file {args.note_file}"
@@ -573,7 +619,7 @@ def main(argv: list[str] | None = None) -> int:
         report_name = "incubate --apply" if args.apply else "incubate --dry-run"
         findings = incubate_apply_findings(inventory, request) if args.apply else incubate_dry_run_findings(inventory, request)
         result = _result_for(findings)
-        print(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
+        emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
         return 2 if args.apply and result == "error" else 0
     if command == "projection":
         report_name = f"projection --inspect --target {args.target}"
@@ -589,20 +635,23 @@ def main(argv: list[str] | None = None) -> int:
         else:
             findings = _projection_target_findings(args.target, inspect_projection_artifacts, inspect_projection_index, inventory)
         result = _result_for(findings)
-        print(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
+        emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
         return 2 if any(finding.severity == "error" for finding in findings) else 0
     if command == "snapshot":
         findings = snapshot_inspect_findings(inventory)
         result = _result_for(findings)
-        print(render_report("snapshot --inspect", inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
+        emit_text(render_report("snapshot --inspect", inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
         return 0
     if command == "adapter":
         if args.serve:
             return serve_mcp_read_projection(inventory, sys.stdin, sys.stdout)
+        if args.client_config:
+            emit_text(json.dumps(mcp_read_projection_client_config(inventory), sort_keys=True, indent=2, ensure_ascii=True))
+            return 0
         sections = mcp_read_projection_sections(inventory)
         findings = flatten_sections(sections)
         result = _result_for(findings)
-        print(render_sectioned_report(f"adapter --inspect --target {args.target}", inventory.root, result, inventory.sources_for_report(), sections, _suggestions(command, findings)))
+        emit_text(render_sectioned_report(f"adapter --inspect --target {args.target}", inventory.root, result, inventory.sources_for_report(), sections, _suggestions(command, findings)))
         return 0
     if command in {"init", "attach"}:
         report_name = f"{command} --dry-run"
@@ -612,7 +661,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             findings = attach_dry_run_findings(inventory, args.project)
         result = _result_for(findings)
-        print(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
+        emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
         return 2 if args.apply and result == "error" else 0
     if command == "repair":
         report_name = "repair --dry-run"
@@ -622,7 +671,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             findings = repair_dry_run_findings(inventory)
         result = _result_for(findings)
-        print(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
+        emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
         if args.apply:
             return _repair_apply_exit_code(findings)
         return 0
@@ -662,7 +711,7 @@ def _transition_dry_run_findings(inventory, args) -> list[Finding]:
                 )
             )
         else:
-            findings.extend(writeback_dry_run_findings(inventory, _transition_archive_request(args)))
+            findings.extend(writeback_dry_run_findings(inventory, _transition_archive_request(inventory, args)))
     if args.next_roadmap_item:
         findings.append(Finding("info", "transition-step", f"would open next active plan for roadmap item {args.next_roadmap_item!r}", "project/implementation-plan.md"))
         if args.archive_active_plan and _state_plan_status(inventory) == "active":
@@ -707,7 +756,7 @@ def _transition_apply_findings(inventory, args) -> list[Finding]:
             return findings
     if args.archive_active_plan:
         findings.append(Finding("info", "transition-step", "archiving active plan through writeback --archive-active-plan", "project/implementation-plan.md"))
-        step_findings = writeback_apply_findings(current, _transition_archive_request(args))
+        step_findings = writeback_apply_findings(current, _transition_archive_request(current, args))
         findings.extend(step_findings)
         if any(finding.severity == "error" for finding in step_findings):
             return findings
@@ -754,11 +803,12 @@ def _transition_input_errors(inventory, args, apply: bool) -> list[Finding]:
     return errors
 
 
-def _transition_archive_request(args):
+def _transition_archive_request(inventory, args):
     return make_writeback_request(
         archive_active_plan=True,
         from_active_plan=args.from_active_plan,
         roadmap_item=args.current_roadmap_item,
+        archive_retarget_skip_rels=_transition_next_source_incubation_rels(inventory, args),
         worktree_start_state=args.worktree_start_state,
         task_scope=args.task_scope,
         docs_decision=args.docs_decision,
@@ -768,6 +818,14 @@ def _transition_archive_request(args):
         residual_risk=args.residual_risk,
         carry_forward=args.carry_forward,
     )
+
+
+def _transition_next_source_incubation_rels(inventory, args) -> tuple[str, ...]:
+    if not args.next_roadmap_item:
+        return ()
+    fields = roadmap_item_fields(inventory, args.next_roadmap_item)
+    source = str(fields.get("source_incubation") or "").strip().replace("\\", "/")
+    return (source,) if source else ()
 
 
 def _transition_next_plan_request(args):
@@ -917,6 +975,7 @@ def _check_report(args: argparse.Namespace, inventory: object) -> tuple[str, lis
     sections = [
         ("Status", status_findings(inventory)),
         ("Validation", validation_findings(inventory)),
+        ("Projection Cache", projection_cache_status_findings(inventory)),
         ("Drift", check_drift_findings(inventory)),
     ]
     if args.deep:
@@ -1015,7 +1074,7 @@ def _suggestions(command: str, findings) -> list[str]:
         if focus_finding:
             return [f"{focus_finding.message}."]
         if any(finding.code == "rule-context-surface-large" and finding.source == "project/project-state.md" for finding in warnings):
-            return ["check completed as a read-only report; preview safe state compaction with `mylittleharness writeback --dry-run --compact-only`."]
+            return ["check completed as a read-only report; preview whole-state history compaction with `mylittleharness writeback --dry-run --compact-only`."]
         if warnings:
             return ["check completed as a read-only report with advisory findings; use advanced diagnostics only when needed."]
         return ["check completed as a read-only status plus validation report."]
@@ -1056,8 +1115,8 @@ def _suggestions(command: str, findings) -> list[str]:
             return ["writeback apply was refused before closeout/state writeback became authoritative."]
         if any(finding.code == "writeback-compact-only" for finding in findings):
             if any(finding.code == "writeback-dry-run" for finding in findings):
-                return ["writeback compact-only dry-run reported safe state compaction posture without writing files."]
-            return ["writeback compact-only apply ran the bounded state compaction rail; run check to verify the archive pointer posture."]
+                return ["writeback compact-only dry-run reported whole-state compaction posture without writing files."]
+            return ["writeback compact-only apply ran the bounded whole-state compaction rail; run check to verify the archive pointer posture."]
         if any(finding.code == "writeback-dry-run" for finding in findings):
             return ["writeback dry-run reported the planned closeout/state synchronization without writing files."]
         return ["writeback apply synchronized project-state closeout facts and matching active-plan derived copies."]
@@ -1067,6 +1126,12 @@ def _suggestions(command: str, findings) -> list[str]:
         if any(finding.code == "incubate-dry-run" for finding in findings):
             return ["incubate dry-run reported the target note and create/append posture without writing files."]
         return ["incubate apply updated the same-topic incubation note; promote accepted facts through research, specs, plans, or state later."]
+    if command == "intake":
+        if any(finding.severity == "error" for finding in findings):
+            return ["intake apply was refused before any routed note was written."]
+        if any(finding.code == "intake-dry-run" for finding in findings):
+            return ["intake dry-run classified the incoming text without writing files."]
+        return ["intake apply wrote one explicit routed note; classification remains advisory and does not approve lifecycle movement."]
     if command == "plan":
         if any(finding.severity == "error" for finding in findings):
             return ["plan apply was refused before active-plan or lifecycle files were changed."]

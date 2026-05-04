@@ -29,6 +29,7 @@ RELATIONSHIP_STATUS_FIELDS = {
     "related_roadmap_item",
     "verification_summary",
 }
+IMPLEMENTATION_TAIL_FIELDS = ("archived_plan", "implemented_by")
 OPEN_THREAD_FRONTMATTER_FIELDS = {
     "contains",
     "open_questions",
@@ -52,6 +53,8 @@ OPEN_THREAD_HEADING_MARKERS = (
 ENTRY_COVERAGE_HEADING = "entry coverage"
 ENTRY_COVERAGE_TERMINAL_STATUSES = {"implemented", "rejected", "superseded", "merged", "split", "archived"}
 ENTRY_COVERAGE_OPEN_STATUSES = {"accepted", "active", "blocked", "deferred", "incubating", "open", "pending", "todo"}
+TERMINAL_INCUBATION_STATUSES = {"implemented", "archived", "rejected", "superseded"}
+FINAL_DOCS_DECISIONS = {"updated", "not-needed"}
 
 
 @dataclass(frozen=True)
@@ -156,7 +159,7 @@ def memory_hygiene_dry_run_findings(inventory: Inventory, request: MemoryHygiene
             Finding(
                 "info",
                 "memory-hygiene-scan",
-                "relationship hygiene scan is read-only and reports stale links, missing reciprocal links, orphan notes, text-input audit posture, entry coverage, split suggestions, and safe cleanup candidates",
+                "relationship hygiene scan is read-only and reports stale links, missing reciprocal links, orphan notes, text-input audit posture, entry coverage, split suggestions, incubation cleanup advisor classifications, and safe cleanup candidates",
             )
         )
         errors = _request_errors(inventory, request)
@@ -556,7 +559,13 @@ def incubation_closeout_plan(
     except OSError as exc:
         return None, [Finding("error", "relationship-writeback-refused", f"source could not be read: {exc}", source_rel)]
 
-    blockers = incubation_archive_blockers(source_text)
+    closeout_can_mark_implemented = bool(
+        archived_plan and verification_summary and docs_decision in FINAL_DOCS_DECISIONS
+    )
+    blockers = incubation_archive_blockers(
+        source_text,
+        ignore_stale_implementation_tail=closeout_can_mark_implemented,
+    )
     if not archived_plan:
         blockers = (*blockers, "missing archived plan")
     if not verification_summary:
@@ -587,7 +596,7 @@ def incubation_closeout_plan(
     )
 
 
-def incubation_archive_blockers(text: str) -> tuple[str, ...]:
+def incubation_archive_blockers(text: str, *, ignore_stale_implementation_tail: bool = False) -> tuple[str, ...]:
     blockers: list[str] = []
     frontmatter = parse_frontmatter(text)
     for key in OPEN_THREAD_FRONTMATTER_FIELDS:
@@ -598,6 +607,8 @@ def incubation_archive_blockers(text: str) -> tuple[str, ...]:
     if frontmatter.has_frontmatter:
         body = "\n".join(text.splitlines()[max(frontmatter.body_start_line - 1, 0) :])
     coverage_report = incubation_entry_coverage_report(text)
+    if not ignore_stale_implementation_tail:
+        blockers.extend(_active_implementation_tail_blockers(frontmatter.data, coverage_report))
     if len(coverage_report.entries) > 1:
         blockers.extend(_entry_coverage_archive_blockers(coverage_report))
     else:
@@ -619,6 +630,7 @@ def relationship_hygiene_scan_findings(inventory: Inventory) -> list[Finding]:
     findings: list[Finding] = []
     findings.extend(_roadmap_relationship_findings(inventory, roadmap_items))
     findings.extend(_incubation_relationship_findings(inventory, roadmap_items))
+    findings.extend(_incubation_cleanup_advisor_findings(inventory, roadmap_items))
     if not findings:
         findings.append(Finding("info", "relationship-scan-ok", "no relationship hygiene findings were found"))
     return findings
@@ -852,6 +864,16 @@ def _incubation_relationship_findings(inventory: Inventory, roadmap_items: dict[
             findings.append(Finding("warn", "relationship-active-incubation-closed", f"closed incubation note is still in the active incubation lane with status {status!r}", surface.rel_path))
         if not any(_frontmatter_value_is_nonempty(value) for value in relation_values):
             findings.append(Finding("warn", "relationship-orphan-incubation", "incubation note has no roadmap, plan, archive, rejection, or supersession relationship metadata", surface.rel_path))
+        coverage_report = incubation_entry_coverage_report(surface.content)
+        for blocker in _active_implementation_tail_blockers(data, coverage_report):
+            findings.append(
+                Finding(
+                    "warn",
+                    "relationship-active-incubation-stale-implementation-tail",
+                    blocker,
+                    surface.rel_path,
+                )
+            )
         findings.extend(_incubation_entry_coverage_findings(surface.rel_path, surface.content))
         findings.extend(_incubation_split_suggestion_findings(surface.rel_path, surface.content))
         source_item = items_by_source.get(surface.rel_path)
@@ -859,7 +881,17 @@ def _incubation_relationship_findings(inventory: Inventory, roadmap_items: dict[
         item_fields = roadmap_items.get(item_id) if item_id else None
         if not item_fields or str(item_fields.get("status") or "") != "done":
             continue
-        blockers = incubation_archive_blockers(surface.content)
+        structurally_covered = False
+        item_fields = roadmap_items.get(item_id) if item_id else None
+        if item_fields:
+            archived_plan = _normalize_rel(item_fields.get("archived_plan"))
+            verification = str(item_fields.get("verification_summary") or "").strip()
+            docs_decision = str(item_fields.get("docs_decision") or "").strip()
+            structurally_covered = bool(archived_plan and verification and docs_decision in FINAL_DOCS_DECISIONS)
+        blockers = incubation_archive_blockers(
+            surface.content,
+            ignore_stale_implementation_tail=structurally_covered,
+        )
         if blockers:
             findings.append(
                 Finding(
@@ -870,20 +902,204 @@ def _incubation_relationship_findings(inventory: Inventory, roadmap_items: dict[
                 )
             )
             continue
-        archived_plan = _normalize_rel(item_fields.get("archived_plan"))
-        verification = str(item_fields.get("verification_summary") or "").strip()
-        docs_decision = str(item_fields.get("docs_decision") or "").strip()
-        if archived_plan and verification and docs_decision in {"updated", "not-needed"}:
+        if structurally_covered:
             archive_rel = _default_incubation_archive_rel(surface.rel_path)
             findings.append(
                 Finding(
                     "info",
                     "relationship-auto-archive-candidate",
-                    f"single-entry incubation note is structurally covered by roadmap item {item_id!r}; safe cleanup command: mylittleharness memory-hygiene --dry-run --source {surface.rel_path} --archive-to {archive_rel} --repair-links",
+                    f"single-entry incubation note is structurally covered by roadmap item {item_id!r}; safe cleanup command: mylittleharness memory-hygiene --dry-run --source {surface.rel_path} --status implemented --archive-to {archive_rel} --repair-links",
                     surface.rel_path,
                 )
             )
     return findings
+
+
+def _incubation_cleanup_advisor_findings(inventory: Inventory, roadmap_items: dict[str, dict[str, object]]) -> list[Finding]:
+    surfaces = [
+        surface
+        for surface in sorted(inventory.present_surfaces, key=lambda item: item.rel_path)
+        if surface.rel_path.startswith(f"{INCUBATION_DIR_REL}/") and surface.path.suffix.lower() == ".md"
+    ]
+    if not surfaces:
+        return []
+
+    items_by_source: dict[str, tuple[str, dict[str, object]]] = {}
+    for item_id, fields in roadmap_items.items():
+        source = _normalize_rel(fields.get("source_incubation"))
+        if source:
+            items_by_source[source] = (item_id, fields)
+
+    findings: list[Finding] = []
+    counts = {"archive": 0, "keep": 0, "ambiguous": 0}
+    for surface in surfaces:
+        data = surface.frontmatter.data
+        status = str(data.get("status") or "").strip().casefold()
+        relation_values = [data.get(field) for field in RELATIONSHIP_STATUS_FIELDS]
+        related_item = str(data.get("related_roadmap_item") or "")
+        source_item = items_by_source.get(surface.rel_path)
+        item_id = related_item or (source_item[0] if source_item else "")
+        item_fields = roadmap_items.get(item_id) if item_id else None
+        roadmap_status = str(item_fields.get("status") or "").strip().casefold() if item_fields else ""
+        archived_plan = _normalize_rel(item_fields.get("archived_plan")) if item_fields else ""
+        verification = str(item_fields.get("verification_summary") or "").strip() if item_fields else ""
+        docs_decision = str(item_fields.get("docs_decision") or "").strip() if item_fields else ""
+        structurally_covered = roadmap_status == "done" and bool(archived_plan and verification and docs_decision in FINAL_DOCS_DECISIONS)
+        blockers = incubation_archive_blockers(
+            surface.content,
+            ignore_stale_implementation_tail=structurally_covered,
+        )
+        archive_rel = _default_incubation_archive_rel(surface.rel_path)
+        link_repairs = _planned_link_repairs(inventory, surface.rel_path, archive_rel)
+
+        if link_repairs:
+            findings.append(
+                Finding(
+                    "info",
+                    "incubation-cleanup-link-repair-candidate",
+                    f"exact source-path references appear in {len(link_repairs)} lifecycle file(s); include --repair-links when archiving {surface.rel_path}",
+                    surface.rel_path,
+                )
+            )
+
+        followup_markers = _incubation_followup_markers(surface.content)
+        if followup_markers:
+            findings.append(
+                Finding(
+                    "info",
+                    "incubation-cleanup-followup-extraction",
+                    f"extract or explicitly cover follow-up material before cleanup: {', '.join(followup_markers)}",
+                    surface.rel_path,
+                )
+            )
+
+        entry_coverage_blockers = _entry_coverage_cleanup_blockers(surface.content)
+        if entry_coverage_blockers:
+            findings.append(
+                Finding(
+                    "info",
+                    "incubation-cleanup-entry-coverage-needed",
+                    f"entry coverage must be terminal before whole-file cleanup: {', '.join(entry_coverage_blockers)}",
+                    surface.rel_path,
+                )
+            )
+
+        archive_status = _archive_candidate_status(status, structurally_covered)
+        if not blockers and (structurally_covered or status in ALLOWED_STATUS_VALUES):
+            counts["archive"] += 1
+            status_flag = "" if archive_status == "archived" else f" --status {archive_status}"
+            findings.append(
+                Finding(
+                    "info",
+                    "incubation-cleanup-archive-candidate",
+                    f"preview safe cleanup: mylittleharness memory-hygiene --dry-run --source {surface.rel_path}{status_flag} --archive-to {archive_rel} --repair-links",
+                    surface.rel_path,
+                )
+            )
+            continue
+
+        if not item_id and not any(_frontmatter_value_is_nonempty(value) for value in relation_values):
+            counts["ambiguous"] += 1
+            findings.append(
+                Finding(
+                    "warn",
+                    "incubation-cleanup-ambiguous",
+                    "incubation note has no route relationship metadata; classify it as roadmap, research, rejected, superseded, or explicitly kept before cleanup",
+                    surface.rel_path,
+                )
+            )
+            continue
+
+        counts["keep"] += 1
+        reason = _incubation_keep_active_reason(item_id, roadmap_status, blockers, status)
+        findings.append(Finding("info", "incubation-cleanup-keep-active", f"keep active: {reason}", surface.rel_path))
+
+    findings.append(
+        Finding(
+            "info",
+            "incubation-cleanup-advisor-summary",
+            (
+                f"classified {len(surfaces)} active incubation note(s): "
+                f"{counts['archive']} archive candidate(s), {counts['keep']} keep-active, {counts['ambiguous']} ambiguous"
+            ),
+        )
+    )
+    return findings
+
+
+def _incubation_keep_active_reason(item_id: str, roadmap_status: str, blockers: tuple[str, ...], status: str) -> str:
+    if blockers:
+        if item_id and roadmap_status:
+            return f"roadmap item {item_id!r} is {roadmap_status}; cleanup blockers remain: {', '.join(blockers)}"
+        return f"cleanup blockers remain: {', '.join(blockers)}"
+    if item_id and roadmap_status:
+        return f"roadmap item {item_id!r} is {roadmap_status}, not done with final closeout evidence"
+    if status and status not in TERMINAL_INCUBATION_STATUSES:
+        return f"frontmatter status is {status!r}"
+    return "no safe archive proof was found"
+
+
+def _archive_candidate_status(status: str, structurally_covered: bool) -> str:
+    if status in ALLOWED_STATUS_VALUES:
+        return status
+    if structurally_covered:
+        return "implemented"
+    return "archived"
+
+
+def _active_implementation_tail_blockers(data: dict[str, object], coverage_report: EntryCoverageReport) -> tuple[str, ...]:
+    fields = _stale_implementation_tail_fields(data)
+    if not fields:
+        return ()
+    status = str(data.get("status") or "").strip().casefold().replace("_", "-")
+    if status in ALLOWED_STATUS_VALUES or _entry_coverage_is_terminal(coverage_report):
+        return ()
+    status_label = status or "missing"
+    return (
+        (
+            f"active incubation status {status_label!r} carries stale implementation tail field(s): "
+            f"{', '.join(fields)}; add terminal Entry Coverage or set status implemented before archive"
+        ),
+    )
+
+
+def _stale_implementation_tail_fields(data: dict[str, object]) -> tuple[str, ...]:
+    return tuple(field for field in IMPLEMENTATION_TAIL_FIELDS if _frontmatter_value_is_nonempty(data.get(field)))
+
+
+def _entry_coverage_is_terminal(report: EntryCoverageReport) -> bool:
+    if not report.entries or not report.coverage or report.errors:
+        return False
+    entry_ids = {entry.entry_id for entry in report.entries}
+    coverage_by_id = {record.entry_id: record for record in report.coverage}
+    if set(coverage_by_id) != entry_ids:
+        return False
+    return all(not _entry_coverage_record_blockers(record) for record in report.coverage)
+
+
+def _entry_coverage_cleanup_blockers(text: str) -> tuple[str, ...]:
+    report = incubation_entry_coverage_report(text)
+    if len(report.entries) > 1:
+        return tuple(_entry_coverage_archive_blockers(report))
+    return tuple(_explicit_open_entry_coverage_blockers(report))
+
+
+def _incubation_followup_markers(text: str) -> tuple[str, ...]:
+    markers: list[str] = []
+    frontmatter = parse_frontmatter(text)
+    for key in OPEN_THREAD_FRONTMATTER_FIELDS:
+        if _frontmatter_value_is_nonempty(frontmatter.data.get(key)):
+            markers.append(f"frontmatter {key}")
+    body = text
+    if frontmatter.has_frontmatter:
+        body = "\n".join(text.splitlines()[max(frontmatter.body_start_line - 1, 0) :])
+    for heading in re.findall(r"(?m)^#{2,6}\s+(.+?)\s*$", body):
+        normalized = re.sub(r"\s+", " ", heading.casefold()).strip()
+        if any(marker in normalized for marker in OPEN_THREAD_HEADING_MARKERS):
+            markers.append(f"heading {heading.strip()!r}")
+    if re.search(r"(?m)^\s*[-*]\s+\[\s\]\s+", body):
+        markers.append("unchecked task list item")
+    return tuple(dict.fromkeys(markers))
 
 
 def incubation_entry_coverage_report(text: str) -> EntryCoverageReport:

@@ -8,4 +8,6 @@ Roadmap-backed plans should keep the executable one-slice contract in active-pla
 
 Roadmap-backed plan synthesis may report bundle rationale, split boundary, `target_artifact_pressure`, and `phase_pressure` in dry-run/apply output and generated `Plan Synthesis Notes`. These are advisory sizing signals only; they cannot approve repair, closeout, archive, commit, rollback, lifecycle decisions, or future mutations.
 
+When roadmap metadata carries enough target-artifact, verification, or spec pressure, generated plans should include a `Phase Outline` and concrete phase sections with `write_scope`, `verification_gates`, docs-decision handling, and state-transfer expectations. Low-pressure roadmap plans may stay one current phase only when `Plan Synthesis Notes` records an explicit one-shot rationale and stop condition for scope expansion.
+
 Read-only grain diagnostics may inspect active plans for missing slice metadata, target-artifact gaps, vague write scope, generic verification, over-atomic slices, giant brittle slices, and unsafe auto-continuation posture. They are calibration inputs only and do not rewrite plans or promote numeric thresholds into hard gates.

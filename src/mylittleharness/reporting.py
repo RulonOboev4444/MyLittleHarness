@@ -1,8 +1,35 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+from typing import TextIO
 
 from .models import Finding
+
+
+def emit_text(text: str, stream: TextIO | None = None) -> None:
+    target = sys.stdout if stream is None else stream
+    payload = f"{text}\n"
+    try:
+        target.write(payload)
+        target.flush()
+    except UnicodeEncodeError:
+        encoding = getattr(target, "encoding", None) or "ascii"
+        fallback, fallback_encoding = _encoding_safe_payload(payload, encoding)
+        buffer = getattr(target, "buffer", None)
+        if buffer is not None:
+            buffer.write(fallback)
+            buffer.flush()
+            return
+        target.write(fallback.decode(fallback_encoding))
+        target.flush()
+
+
+def _encoding_safe_payload(text: str, encoding: str) -> tuple[bytes, str]:
+    try:
+        return text.encode(encoding, errors="backslashreplace"), encoding
+    except LookupError:
+        return text.encode("ascii", errors="backslashreplace"), "ascii"
 
 
 def render_report(command: str, root: Path, result: str, sources: list[str], findings: list[Finding], suggestions: list[str]) -> str:

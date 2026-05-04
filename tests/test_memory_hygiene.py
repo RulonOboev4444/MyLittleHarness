@@ -217,6 +217,9 @@ class MemoryHygieneTests(unittest.TestCase):
             self.assertEqual(before, snapshot_tree(root))
             self.assertIn("relationship-missing-reciprocal", rendered)
             self.assertIn("relationship-auto-archive-candidate", rendered)
+            self.assertIn("incubation-cleanup-archive-candidate", rendered)
+            self.assertIn("incubation-cleanup-link-repair-candidate", rendered)
+            self.assertIn("incubation-cleanup-advisor-summary", rendered)
             self.assertIn("relationship-scan-read-only", rendered)
             self.assertIn("cli-text-audit-summary", rendered)
 
@@ -241,9 +244,168 @@ class MemoryHygieneTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(before, snapshot_tree(root))
             self.assertIn("relationship-entry-coverage-needed", rendered)
+            self.assertIn("incubation-cleanup-entry-coverage-needed", rendered)
             self.assertIn("entry coverage 2026-05-02 is incubating", rendered)
             self.assertIn("relationship-semantic-split-suggestion", rendered)
             self.assertIn("heuristic no-write suggestion", rendered)
+
+    def test_scan_classifies_keep_active_followups_and_ambiguous_notes_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            source = make_incubation_source(
+                root,
+                body_extra="\n## Follow-up\n\n- [ ] Route the second thread.\n",
+            )
+            write_relationship_roadmap(root, source.relative_to(root).as_posix(), status="accepted")
+            (root / "project/plan-incubation/loose.md").write_text(
+                "---\n"
+                'topic: "Loose"\n'
+                'status: "incubating"\n'
+                'created: "2026-05-01"\n'
+                "---\n"
+                "# Loose\n\n"
+                "Unrouted idea.\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "memory-hygiene", "--dry-run", "--scan"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("incubation-cleanup-keep-active", rendered)
+            self.assertIn("roadmap item 'relation-test' is accepted", rendered)
+            self.assertIn("incubation-cleanup-followup-extraction", rendered)
+            self.assertIn("unchecked task list item", rendered)
+            self.assertIn("incubation-cleanup-ambiguous", rendered)
+            self.assertIn("2 active incubation note(s)", rendered)
+
+    def test_scan_warns_and_keeps_active_incubation_with_stale_implementation_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            source = make_incubation_source(
+                root,
+                frontmatter_extra=(
+                    'archived_plan: "project/archive/plans/covered.md"\n'
+                    'implemented_by: "project/archive/plans/covered.md"\n'
+                ),
+            )
+            source_rel = source.relative_to(root).as_posix()
+            write_relationship_roadmap(
+                root,
+                source_rel,
+                status="accepted",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "memory-hygiene", "--dry-run", "--scan"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("relationship-active-incubation-stale-implementation-tail", rendered)
+            self.assertIn("active incubation status 'incubating' carries stale implementation tail field(s): archived_plan, implemented_by", rendered)
+            self.assertIn("incubation-cleanup-keep-active", rendered)
+            self.assertIn("cleanup blockers remain", rendered)
+            self.assertNotIn("incubation-cleanup-archive-candidate", rendered)
+
+    def test_terminal_entry_coverage_allows_stale_implementation_tail_archive_preview(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            source = make_incubation_source(
+                root,
+                frontmatter_extra=(
+                    'archived_plan: "project/archive/plans/covered.md"\n'
+                    'implemented_by: "project/archive/plans/covered.md"\n'
+                ),
+                body_extra=(
+                    "\n## Entry Coverage\n\n"
+                    "- `2026-05-01`: `implemented` via project/archive/plans/covered.md\n"
+                ),
+            )
+            write_relationship_roadmap(
+                root,
+                source.relative_to(root).as_posix(),
+                status="done",
+                archived_plan="project/archive/plans/covered.md",
+                verification_summary="terminal coverage passed",
+                docs_decision="updated",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "memory-hygiene", "--dry-run", "--scan"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertNotIn("relationship-active-incubation-stale-implementation-tail", rendered)
+            self.assertIn("incubation-cleanup-archive-candidate", rendered)
+            self.assertIn("preview safe cleanup", rendered)
+
+    def test_implemented_status_allows_stale_implementation_tail_archive_preview(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            source = make_incubation_source(
+                root,
+                frontmatter_extra=(
+                    'archived_plan: "project/archive/plans/covered.md"\n'
+                    'implemented_by: "project/archive/plans/covered.md"\n'
+                ),
+            )
+            source.write_text(source.read_text(encoding="utf-8").replace('status: "incubating"', 'status: "implemented"'), encoding="utf-8")
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "memory-hygiene", "--dry-run", "--scan"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertNotIn("relationship-active-incubation-stale-implementation-tail", rendered)
+            self.assertIn("incubation-cleanup-archive-candidate", rendered)
+
+    def test_intake_apply_writes_unambiguous_explicit_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            target = "project/plan-incubation/route-incoming-notes.md"
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "intake",
+                        "--apply",
+                        "--text",
+                        "Future idea: route incoming notes before they become incubation clutter.",
+                        "--title",
+                        "Route Incoming Notes",
+                        "--target",
+                        target,
+                    ]
+                )
+
+            self.assertEqual(code, 0)
+            target_text = (root / target).read_text(encoding="utf-8")
+            self.assertIn('title: "Route Incoming Notes"', target_text)
+            self.assertIn('status: "incubating"', target_text)
+            self.assertIn('route: "incubation"', target_text)
+            self.assertIn('intake_source: "--text"', target_text)
+            self.assertIn("# Route Incoming Notes", target_text)
+            self.assertIn("Future idea: route incoming notes", target_text)
+            rendered = output.getvalue()
+            self.assertIn("intake-written", rendered)
+            self.assertIn("classify input as incubation", rendered)
+            self.assertIn("does not approve lifecycle movement", rendered)
 
     def test_archive_covered_writes_entry_coverage_and_archives_in_one_apply(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

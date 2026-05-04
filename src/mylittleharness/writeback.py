@@ -8,7 +8,13 @@ from pathlib import Path
 from .atomic_files import AtomicFileDelete, AtomicFileWrite, FileTransactionError, apply_file_transaction
 from .inventory import Inventory, Surface
 from .lifecycle_focus import sync_current_focus_block
-from .memory_hygiene import RelationshipUpdatePlan, incubation_closeout_plan
+from .memory_hygiene import (
+    ARCHIVE_INCUBATION_DIR_REL,
+    RelationshipUpdatePlan,
+    incubation_closeout_plan,
+    incubation_entry_coverage_report,
+    relationship_update_plan,
+)
 from .models import Finding
 from .roadmap import ROADMAP_STATUS_VALUES, RoadmapPlan, make_roadmap_request, roadmap_item_fields, roadmap_plans_for_requests
 
@@ -33,6 +39,7 @@ DOCS_DECISION_VALUES = {"updated", "not-needed", "uncertain"}
 PHASE_STATUS_VALUES = {"pending", "active", "in_progress", "blocked", "complete", "skipped", "paused"}
 PHASE_BODY_COMPLETE_STATUS = "done"
 PHASE_BODY_STATUS_VALUES = {*PHASE_STATUS_VALUES, PHASE_BODY_COMPLETE_STATUS}
+PHASE_HANDOFF_TERMINAL_STATUS_VALUES = {"complete", "done", "skipped"}
 COMPLETED_CLOSEOUT_REQUIRED_FIELDS = ("docs_decision", "state_writeback", "verification", "commit_decision")
 INCOMPLETE_CLOSEOUT_VALUES = {"", "pending", "uncertain", "unknown", "tbd", "todo"}
 DEFAULT_PLAN_REL = "project/implementation-plan.md"
@@ -46,11 +53,15 @@ _CLOSEOUT_BODY_SECTION_TITLES = frozenset(
         "closeout facts",
         "closeout summary",
         "closeout writeback",
+        "docs decision",
         "mlh closeout",
         "mlh closeout fields",
         "mlh closeout facts",
         "mlh closeout summary",
         "mlh closeout writeback",
+        "state transfer",
+        "state transfer facts",
+        "state transfer summary",
     }
 )
 
@@ -78,6 +89,22 @@ class WritebackFact:
 
 
 @dataclass(frozen=True)
+class PhaseBodyStatusFact:
+    phase: str
+    value: str
+    source: str
+    line: int
+
+
+@dataclass(frozen=True)
+class PhaseHandoffFact:
+    field: str
+    value: str
+    source: str
+    line: int | None = None
+
+
+@dataclass(frozen=True)
 class CloseoutIdentity:
     plan_id: str = ""
     active_plan: str = ""
@@ -102,6 +129,7 @@ class WritebackRequest:
     from_active_plan: bool = False
     roadmap_item: str = ""
     roadmap_status: str = ""
+    archive_retarget_skip_rels: tuple[str, ...] = ()
     input_errors: tuple[str, ...] = ()
 
 
@@ -152,6 +180,7 @@ def make_writeback_request(
     from_active_plan: bool = False,
     roadmap_item: str | None = None,
     roadmap_status: str | None = None,
+    archive_retarget_skip_rels: tuple[str, ...] | list[str] = (),
     **values: str | None,
 ) -> WritebackRequest:
     input_errors = tuple(_text_field_input_errors(values))
@@ -173,6 +202,7 @@ def make_writeback_request(
         from_active_plan=from_active_plan,
         roadmap_item=_normalized_item_id(roadmap_item),
         roadmap_status=_normalized_status(roadmap_status),
+        archive_retarget_skip_rels=tuple(_dedupe_nonempty(_normalize_rel(rel) for rel in archive_retarget_skip_rels)),
         input_errors=input_errors,
     )
 
@@ -189,6 +219,19 @@ def closeout_values_are_complete(values: dict[str, str]) -> bool:
         if not _closeout_value_is_complete(values.get(field, "")):
             return False
     return True
+
+
+def missing_complete_closeout_fields(values: dict[str, str]) -> tuple[str, ...]:
+    missing: list[str] = []
+    docs_decision = values.get("docs_decision", "")
+    if docs_decision not in {"updated", "not-needed"}:
+        missing.append("docs_decision")
+    for field in COMPLETED_CLOSEOUT_REQUIRED_FIELDS:
+        if field == "docs_decision":
+            continue
+        if not _closeout_value_is_complete(values.get(field, "")):
+            missing.append(field)
+    return tuple(missing)
 
 
 def state_writeback_facts(state: Surface | None) -> dict[str, WritebackFact]:
@@ -255,6 +298,106 @@ def active_plan_phase_body_status_fact(plan: Surface | None, active_phase: str) 
     return WritebackFact(field="phase_status", value=status, source=plan.rel_path, line=status_index + 1)
 
 
+def active_plan_preceding_phase_body_status_facts(plan: Surface | None, active_phase: str) -> tuple[PhaseBodyStatusFact, ...]:
+    if plan is None or not plan.exists or not active_phase:
+        return ()
+    lines = plan.content.splitlines(keepends=True)
+    blocks = _phase_blocks_from_lines(lines)
+    active_index = _phase_block_index(lines, blocks, active_phase)
+    if active_index is None:
+        return ()
+    facts: list[PhaseBodyStatusFact] = []
+    for block, title in blocks[:active_index]:
+        status_index = _phase_status_line_index(lines, block)
+        if status_index is None:
+            continue
+        status = _phase_status_line_value(lines[status_index])
+        if not status:
+            continue
+        facts.append(
+            PhaseBodyStatusFact(
+                phase=_phase_block_label(lines, block, title),
+                value=status,
+                source=plan.rel_path,
+                line=status_index + 1,
+            )
+        )
+    return tuple(facts)
+
+
+def active_plan_completed_phase_handoff_facts(inventory: Inventory) -> tuple[PhaseHandoffFact, ...]:
+    state = inventory.state
+    state_data = state.frontmatter.data if state and state.exists else {}
+    if state_data.get("plan_status") != "active":
+        return ()
+    if str(state_data.get("phase_status") or "") != "pending":
+        return ()
+    active_phase = str(state_data.get("active_phase") or "")
+    plan = inventory.active_plan_surface
+    if not active_phase or plan is None or not plan.exists:
+        return ()
+
+    facts: list[PhaseHandoffFact] = []
+    body_fact = active_plan_phase_body_status_fact(plan, active_phase)
+    if body_fact and _is_phase_handoff_terminal_status(body_fact.value):
+        facts.append(
+            PhaseHandoffFact(
+                field=f"phase block {active_phase} status",
+                value=body_fact.value,
+                source=body_fact.source,
+                line=body_fact.line,
+            )
+        )
+
+    if plan.frontmatter.has_frontmatter:
+        for field in ("phase_status", "status"):
+            value = str(plan.frontmatter.data.get(field) or "")
+            if _is_phase_handoff_terminal_status(value):
+                facts.append(PhaseHandoffFact(field=f"frontmatter {field}", value=value, source=plan.rel_path))
+    return tuple(facts)
+
+
+def active_plan_completed_phase_handoff_findings(
+    inventory: Inventory,
+    *,
+    code: str = "active-plan-completed-phase-handoff",
+    requested_phase_status: str = "",
+) -> list[Finding]:
+    facts = active_plan_completed_phase_handoff_facts(inventory)
+    if not facts:
+        return []
+
+    state = inventory.state
+    state_data = state.frontmatter.data if state and state.exists else {}
+    active_phase = str(state_data.get("active_phase") or "")
+    fact_summary = "; ".join(f"{fact.field}={fact.value!r}" for fact in facts)
+    if requested_phase_status == "complete":
+        severity = "info"
+        action = (
+            "the requested phase_status complete is the reviewed lifecycle synchronization path for that handoff evidence"
+        )
+    else:
+        severity = "warn"
+        action = (
+            "review verification evidence, then run writeback --apply --phase-status complete to synchronize lifecycle, "
+            "or restore the derived active-plan copy if the phase is still pending"
+        )
+    first_fact = facts[0]
+    return [
+        Finding(
+            severity,
+            code,
+            (
+                f"project-state active_phase is {active_phase!r} with phase_status 'pending', but repo-visible active-plan "
+                f"handoff evidence records {fact_summary}; {action}; this does not treat chat handoff text as authority "
+                "and does not approve closeout, archive, roadmap done-status, next-plan opening, staging, or commit"
+            ),
+            first_fact.source,
+            first_fact.line,
+        )
+    ]
+
+
 def writeback_dry_run_findings(inventory: Inventory, request: WritebackRequest) -> list[Finding]:
     findings = [
         Finding("info", "writeback-dry-run", "writeback proposal only; no files were written"),
@@ -266,6 +409,13 @@ def writeback_dry_run_findings(inventory: Inventory, request: WritebackRequest) 
     ]
     request, harvest_findings, harvest_errors = _writeback_request_with_active_plan_facts(inventory, request, apply=False)
     findings.extend(harvest_findings)
+    findings.extend(
+        active_plan_completed_phase_handoff_findings(
+            inventory,
+            code="writeback-completed-phase-handoff-sync",
+            requested_phase_status=request.lifecycle.get("phase_status", ""),
+        )
+    )
     errors = _writeback_preflight_errors(inventory, request)
     errors.extend(harvest_errors)
     if errors:
@@ -330,7 +480,7 @@ def writeback_dry_run_findings(inventory: Inventory, request: WritebackRequest) 
     route_retarget_plans = _archive_route_retarget_plans(
         inventory,
         archive_plan.archive_rel_path if archive_plan else "",
-        skip_rels=_incubation_plan_source_rels(incubation_plan),
+        skip_rels=(*_incubation_plan_source_rels(incubation_plan), *request.archive_retarget_skip_rels),
     )
     if archive_plan:
         findings.extend(_archive_plan_findings(inventory, archive_plan, apply=False))
@@ -344,6 +494,9 @@ def writeback_dry_run_findings(inventory: Inventory, request: WritebackRequest) 
             )
         )
         findings.append(_phase_execution_boundary_finding(planned_lifecycle, inventory.state.rel_path if inventory.state else None, apply=False))
+        advancement_finding = _phase_advancement_finding(inventory, planned_lifecycle, inventory.state.rel_path if inventory.state else None, apply=False)
+        if advancement_finding:
+            findings.append(advancement_finding)
         ready_finding = _ready_for_closeout_boundary_finding(planned_lifecycle, inventory.state.rel_path if inventory.state else None, apply=False)
         if ready_finding:
             findings.append(ready_finding)
@@ -410,6 +563,7 @@ def writeback_apply_findings(inventory: Inventory, request: WritebackRequest) ->
             planned,
             request.lifecycle,
             _requested_or_current_active_phase(inventory, request.lifecycle),
+            _phase_advancement_completed_phase(inventory, request.lifecycle),
         )
         plan_changes = (plan, plan_text, sync_findings)
     else:
@@ -446,6 +600,13 @@ def writeback_apply_findings(inventory: Inventory, request: WritebackRequest) ->
         _planned_closeout_finding(planned),
     ]
     findings.extend(harvest_findings)
+    findings.extend(
+        active_plan_completed_phase_handoff_findings(
+            inventory,
+            code="writeback-completed-phase-handoff-sync",
+            requested_phase_status=request.lifecycle.get("phase_status", ""),
+        )
+    )
     findings.extend(_closeout_writeback_plan_findings(closeout_plan, apply=True))
     if request.lifecycle:
         findings.append(
@@ -457,6 +618,9 @@ def writeback_apply_findings(inventory: Inventory, request: WritebackRequest) ->
             )
         )
         findings.append(_phase_execution_boundary_finding(request.lifecycle, state.rel_path, apply=True))
+        advancement_finding = _phase_advancement_finding(inventory, request.lifecycle, state.rel_path, apply=True)
+        if advancement_finding:
+            findings.append(advancement_finding)
         ready_finding = _ready_for_closeout_boundary_finding(request.lifecycle, state.rel_path, apply=True)
         if ready_finding:
             findings.append(ready_finding)
@@ -585,13 +749,30 @@ def _writeback_request_with_active_plan_facts(
             Finding("error", "writeback-refused", "--from-active-plan requires a readable active plan", DEFAULT_PLAN_REL)
         ]
     facts = active_plan_body_facts(plan)
+    active_plan_values = {field: fact.value for field, fact in facts.items()}
     state_fallback = False
     finding_source = source
-    if facts:
-        harvested = {field: fact.value for field, fact in facts.items()}
+    candidate = dict(active_plan_values)
+    candidate.update(request.closeout)
+    if active_plan_values and closeout_values_are_complete(candidate):
+        harvested = active_plan_values
     else:
         harvested, fallback_errors = _state_closeout_authority_facts(inventory)
         if fallback_errors:
+            if active_plan_values:
+                missing = ", ".join(missing_complete_closeout_fields(candidate))
+                return request, [], [
+                    Finding(
+                        "error",
+                        "writeback-refused",
+                        (
+                            "--from-active-plan found incomplete active-plan closeout facts; "
+                            f"missing fields: {missing or '<none>'}; no complete matching project-state closeout authority was available"
+                        ),
+                        source,
+                    ),
+                    *fallback_errors,
+                ]
             return request, [], fallback_errors
         state_fallback = True
         finding_source = inventory.state.rel_path if inventory.state else DEFAULT_STATE_REL
@@ -604,9 +785,26 @@ def _writeback_request_with_active_plan_facts(
     message = f"{verb} closeout facts from {origin}: {fields}"
     if override_fields:
         message += f"; same-request fields override harvested values: {override_fields}"
+    findings = []
+    if state_fallback and active_plan_values:
+        missing = ", ".join(missing_complete_closeout_fields(candidate))
+        active_fields = ", ".join(field for field in CLOSEOUT_WRITEBACK_FIELDS if field in active_plan_values)
+        findings.append(
+            Finding(
+                "info",
+                "writeback-from-active-plan-incomplete",
+                (
+                    "active-plan closeout facts were incomplete "
+                    f"(fields: {active_fields or '<none>'}; missing: {missing or '<none>'}); "
+                    "using project-state closeout authority fallback"
+                ),
+                source,
+            )
+        )
+    findings.append(Finding("info", "writeback-from-active-plan", message, finding_source))
     return (
         replace(request, closeout=_ordered_closeout_values(merged)),
-        [Finding("info", "writeback-from-active-plan", message, finding_source)],
+        findings,
         [],
     )
 
@@ -625,11 +823,15 @@ def _state_closeout_authority_facts(inventory: Inventory) -> tuple[dict[str, str
             )
         ]
     if not closeout_values_are_complete(harvested):
+        missing = ", ".join(missing_complete_closeout_fields(harvested))
         return {}, [
             Finding(
                 "error",
                 "writeback-refused",
-                "--from-active-plan fallback found incomplete project-state closeout facts; supply complete closeout facts explicitly",
+                (
+                    "--from-active-plan fallback found incomplete project-state closeout facts; "
+                    f"missing fields: {missing or '<none>'}; supply complete closeout facts explicitly"
+                ),
                 source,
             )
         ]
@@ -732,7 +934,7 @@ def _writeback_archive_apply_findings(inventory: Inventory, request: WritebackRe
     route_retarget_plans = _archive_route_retarget_plans(
         inventory,
         archive_plan.archive_rel_path,
-        skip_rels=_incubation_plan_source_rels(incubation_plan),
+        skip_rels=(*_incubation_plan_source_rels(incubation_plan), *request.archive_retarget_skip_rels),
     )
     state_text = _state_text_with_writeback(state.content, planned, lifecycle_values, closeout_plan.identity)
     active_plan_lifecycle = _active_plan_lifecycle_values(inventory, request, lifecycle_values)
@@ -741,6 +943,7 @@ def _writeback_archive_apply_findings(inventory: Inventory, request: WritebackRe
         planned,
         active_plan_lifecycle,
         _requested_or_current_active_phase(inventory, active_plan_lifecycle),
+        "",
     )
     findings: list[Finding] = [
         Finding("info", "writeback-apply", "closeout/state writeback apply started"),
@@ -1050,6 +1253,24 @@ def _phase_execution_boundary_finding(lifecycle_values: dict[str, str], source: 
     )
 
 
+def _phase_advancement_finding(inventory: Inventory, lifecycle_values: dict[str, str], source: str | None, apply: bool) -> Finding | None:
+    completed_phase = _phase_advancement_completed_phase(inventory, lifecycle_values)
+    next_phase = lifecycle_values.get("active_phase", "")
+    if not completed_phase or not next_phase:
+        return None
+    verb = "completed" if apply else "would complete"
+    return Finding(
+        "info",
+        "writeback-phase-advancement",
+        (
+            f"{verb} active-plan phase block {completed_phase!r} and advance project-state active_phase to {next_phase!r} "
+            "with phase_status pending in one lifecycle writeback; this does not authorize auto_continue, closeout, archive, "
+            "roadmap done-status, next-plan opening, staging, or commit"
+        ),
+        source,
+    )
+
+
 def _ready_for_closeout_boundary_finding(lifecycle_values: dict[str, str], source: str | None, apply: bool) -> Finding | None:
     if lifecycle_values.get("phase_status") != "complete":
         return None
@@ -1213,6 +1434,20 @@ def _writeback_incubation_plan(
     source_incubation = _normalize_rel(str(fields.get("source_incubation") or ""))
     if not source_incubation:
         return None, []
+    if source_incubation.startswith(f"{ARCHIVE_INCUBATION_DIR_REL}/"):
+        return relationship_update_plan(
+            inventory,
+            source_incubation,
+            {
+                "related_roadmap": "project/roadmap.md",
+                "related_roadmap_item": request.roadmap_item,
+                "related_plan": archive_rel_path,
+                "archived_plan": archive_rel_path,
+                "implemented_by": archive_rel_path,
+                "verification_summary": request.closeout.get("verification", ""),
+                "docs_decision": request.closeout.get("docs_decision", ""),
+            },
+        )
     return incubation_closeout_plan(
         inventory,
         source_incubation,
@@ -1344,15 +1579,44 @@ def _archive_route_retarget_updates(surface: Surface, archive_rel_path: str) -> 
     related_plan = _normalize_rel(str(data.get("related_plan") or ""))
     if related_plan == DEFAULT_PLAN_REL:
         updates["related_plan"] = archive_rel_path
-        for field in ("archived_plan", "implemented_by"):
-            value = _normalize_rel(str(data.get(field) or ""))
-            if value in {"", DEFAULT_PLAN_REL}:
-                updates[field] = archive_rel_path
+        updates.update(_archive_route_implementation_updates(surface, archive_rel_path, add_missing=True))
         return updates
+    updates.update(_archive_route_implementation_updates(surface, archive_rel_path, add_missing=False))
+    return updates
+
+
+def _archive_route_implementation_updates(surface: Surface, archive_rel_path: str, *, add_missing: bool) -> dict[str, str]:
+    if surface.memory_route == "incubation" and not _incubation_route_has_implementation_coverage(surface):
+        return _unproven_incubation_implementation_field_updates(surface, archive_rel_path)
+
+    data = surface.frontmatter.data
+    updates: dict[str, str] = {}
     for field in ("archived_plan", "implemented_by"):
-        if _normalize_rel(str(data.get(field) or "")) == DEFAULT_PLAN_REL:
+        value = _normalize_rel(str(data.get(field) or ""))
+        if value == DEFAULT_PLAN_REL or (add_missing and value == ""):
             updates[field] = archive_rel_path
     return updates
+
+
+def _unproven_incubation_implementation_field_updates(surface: Surface, archive_rel_path: str) -> dict[str, str]:
+    updates: dict[str, str] = {}
+    for field in ("archived_plan", "implemented_by"):
+        value = _normalize_rel(str(surface.frontmatter.data.get(field) or ""))
+        if value in {DEFAULT_PLAN_REL, archive_rel_path}:
+            updates[field] = ""
+    return updates
+
+
+def _incubation_route_has_implementation_coverage(surface: Surface) -> bool:
+    report = incubation_entry_coverage_report(surface.content)
+    if not report.entries or report.errors:
+        return False
+    coverage_by_id = {record.entry_id: record for record in report.coverage}
+    for entry in report.entries:
+        record = coverage_by_id.get(entry.entry_id)
+        if record is None or record.status != "implemented" or not record.detail:
+            return False
+    return True
 
 
 def _route_retarget_plan_with_updated_text(plan: RouteRetargetPlan, updated_text: str) -> RouteRetargetPlan:
@@ -1452,6 +1716,15 @@ def _state_compaction_findings(plan: StateCompactionPlan, apply: bool) -> list[F
     ]
     if plan.archive_rel_path:
         findings.append(Finding("info", "state-auto-compaction-target", f"target archive path: {plan.archive_rel_path}", plan.archive_rel_path))
+    if posture in {"would run", "ran"}:
+        findings.append(
+            Finding(
+                "info",
+                "state-auto-compaction-selection-policy",
+                "selection scans the whole project-state and archives older/non-current sections; it keeps current focus, role map, closeout authority, and the latest relevant update instead of trimming only the newest note",
+                DEFAULT_STATE_REL,
+            )
+        )
     if plan.kept_sections:
         findings.append(Finding("info", "state-auto-compaction-kept-sections", f"sections that would stay: {', '.join(plan.kept_sections)}", DEFAULT_STATE_REL))
     if plan.archived_sections:
@@ -1850,6 +2123,7 @@ def _active_plan_sync_plan_findings(
         closeout_values,
         lifecycle_values,
         _requested_or_current_active_phase(inventory, lifecycle_values),
+        _phase_advancement_completed_phase(inventory, lifecycle_values),
     )
     if apply:
         return findings
@@ -1876,6 +2150,7 @@ def _active_plan_text_with_synced_values(
     closeout_values: dict[str, str],
     lifecycle_values: dict[str, str],
     active_phase: str,
+    completed_phase: str = "",
 ) -> tuple[str, list[Finding]]:
     text = plan.content
     findings: list[Finding] = []
@@ -1933,7 +2208,31 @@ def _active_plan_text_with_synced_values(
                 plan.rel_path,
             )
         )
-    phase_text, phase_finding = _active_plan_text_with_phase_body_status(text, plan.rel_path, active_phase, lifecycle_values)
+    phase_text, phase_findings = _active_plan_text_with_phase_body_statuses(text, plan.rel_path, active_phase, lifecycle_values, completed_phase)
+    text = phase_text
+    findings.extend(phase_findings)
+    return text, findings
+
+
+def _active_plan_text_with_phase_body_statuses(
+    text: str,
+    rel_path: str,
+    active_phase: str,
+    lifecycle_values: dict[str, str],
+    completed_phase: str,
+) -> tuple[str, list[Finding]]:
+    findings: list[Finding] = []
+    if completed_phase and completed_phase != active_phase:
+        completed_text, completed_finding = _active_plan_text_with_phase_body_status(
+            text,
+            rel_path,
+            completed_phase,
+            {"phase_status": "complete"},
+        )
+        text = completed_text
+        if completed_finding:
+            findings.append(completed_finding)
+    phase_text, phase_finding = _active_plan_text_with_phase_body_status(text, rel_path, active_phase, lifecycle_values)
     text = phase_text
     if phase_finding:
         findings.append(phase_finding)
@@ -2024,29 +2323,76 @@ def _requested_or_current_active_phase(inventory: Inventory, lifecycle_values: d
     return ""
 
 
+def _phase_advancement_completed_phase(inventory: Inventory, lifecycle_values: dict[str, str]) -> str:
+    if lifecycle_values.get("phase_status") != "pending":
+        return ""
+    requested_active_phase = lifecycle_values.get("active_phase", "")
+    if not requested_active_phase:
+        return ""
+    state = inventory.state
+    if not state or not state.exists:
+        return ""
+    current_active_phase = str(state.frontmatter.data.get("active_phase") or "")
+    if not current_active_phase or current_active_phase == requested_active_phase:
+        return ""
+    return current_active_phase
+
+
 def _find_phase_block(text: str, active_phase: str) -> PhaseBlockSpan | None:
     target = active_phase.strip()
     if not target:
         return None
     lines = text.splitlines(keepends=True)
+    candidates = [
+        block
+        for block, title in _phase_blocks_from_lines(lines)
+        if _phase_block_matches(lines, block, title, target)
+    ]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda block: (block.end_index - block.start_index, block.start_index))
+
+
+def _phase_blocks_from_lines(lines: list[str]) -> list[tuple[PhaseBlockSpan, str]]:
     headings: list[tuple[int, int, str]] = []
     for index, line in enumerate(lines):
         match = re.match(r"^(#{2,6})\s+(.+?)\s*#*\s*(?:\r?\n)?$", line)
         if match:
             headings.append((index, len(match.group(1)), match.group(2).strip()))
-    candidates: list[PhaseBlockSpan] = []
+    blocks: list[tuple[PhaseBlockSpan, str]] = []
     for heading_index, (start, level, title) in enumerate(headings):
         end = len(lines)
         for next_start, next_level, _next_title in headings[heading_index + 1 :]:
             if next_level <= level:
                 end = next_start
                 break
-        block = PhaseBlockSpan(active_phase=target, start_index=start, end_index=end)
-        if _phase_heading_matches(title, target) or _phase_block_has_id(lines, block, target):
-            candidates.append(block)
+        blocks.append((PhaseBlockSpan(active_phase=title, start_index=start, end_index=end), title))
+    return blocks
+
+
+def _phase_block_index(lines: list[str], blocks: list[tuple[PhaseBlockSpan, str]], active_phase: str) -> int | None:
+    target = active_phase.strip()
+    candidates = [
+        (index, block)
+        for index, (block, title) in enumerate(blocks)
+        if _phase_block_matches(lines, block, title, target)
+    ]
     if not candidates:
         return None
-    return min(candidates, key=lambda block: (block.end_index - block.start_index, block.start_index))
+    index, _block = min(candidates, key=lambda item: (item[1].end_index - item[1].start_index, item[1].start_index))
+    return index
+
+
+def _phase_block_matches(lines: list[str], block: PhaseBlockSpan, title: str, active_phase: str) -> bool:
+    return _phase_heading_matches(title, active_phase) or _phase_block_has_id(lines, block, active_phase)
+
+
+def _phase_block_label(lines: list[str], block: PhaseBlockSpan, title: str) -> str:
+    for line in lines[block.start_index + 1 : block.end_index]:
+        match = re.match(r"^\s*[-*]\s*id\s*:\s*(.+?)\s*(?:\r?\n)?$", line, re.IGNORECASE)
+        if match:
+            return _strip_inline_code(match.group(1).strip())
+    return _strip_inline_code(title)
 
 
 def _phase_heading_matches(title: str, active_phase: str) -> bool:
@@ -2292,6 +2638,10 @@ def _normalized_status(value: object) -> str:
 
 def _normalized_item_id(value: object) -> str:
     return str(value or "").strip().casefold().replace("_", "-")
+
+
+def _is_phase_handoff_terminal_status(value: object) -> bool:
+    return _strip_inline_code(str(value or "")).casefold() in PHASE_HANDOFF_TERMINAL_STATUS_VALUES
 
 
 def _closeout_value_is_complete(value: object) -> bool:

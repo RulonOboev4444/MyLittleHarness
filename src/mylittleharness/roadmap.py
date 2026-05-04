@@ -3,7 +3,7 @@ from __future__ import annotations
 import ast
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .atomic_files import AtomicFileWrite, FileTransactionError, apply_file_transaction
@@ -13,8 +13,16 @@ from .models import Finding
 
 
 ROADMAP_REL = "project/roadmap.md"
+DEFAULT_PLAN_REL = "project/implementation-plan.md"
 ROADMAP_STATUS_VALUES = {"proposed", "accepted", "active", "blocked", "done", "deferred", "rejected", "superseded"}
 DOCS_DECISION_VALUES = {"updated", "not-needed", "uncertain"}
+TERMINAL_QUEUE_STATUSES = {"done", "rejected", "superseded"}
+FUTURE_QUEUE_FIELD = "future_execution_slice_queue"
+FUTURE_QUEUE_TITLE = "Future Execution Slice Queue"
+ARCHIVED_HISTORY_FIELD = "archived_completed_history"
+ARCHIVED_HISTORY_TITLE = "Archived Completed History"
+DETAILED_DONE_TAIL_LIMIT = 4
+ACCEPTED_ITEM_ORDER_FIELD = "accepted_item_order"
 ITEM_ID_LIST_FIELDS = ("dependencies", "slice_members", "slice_dependencies", "supersedes", "superseded_by")
 PATH_LIST_FIELDS = ("related_specs",)
 ARTIFACT_LIST_FIELDS = ("target_artifacts",)
@@ -76,6 +84,7 @@ class RoadmapItem:
     fields: dict[str, object]
     start: int
     end: int
+    style: str = "canonical"
 
 
 @dataclass(frozen=True)
@@ -85,6 +94,8 @@ class RoadmapPlan:
     target_rel: str
     target_path: Path
     changed_fields: tuple[str, ...]
+    reordered_item_ids: tuple[str, ...]
+    compacted_item_ids: tuple[str, ...]
     current_text: str
     updated_text: str
     relationship_plan: RelationshipUpdatePlan | None = None
@@ -229,7 +240,7 @@ def roadmap_item_fields(inventory: Inventory, item_id: str) -> dict[str, object]
         text = target_path.read_text(encoding="utf-8")
     except OSError:
         return {}
-    parse_result = _parse_roadmap_items(text)
+    parse_result = _parse_roadmap_items_for_sync(text)
     if parse_result[1]:
         return {}
     _items_start, _items_end, items = parse_result[0]
@@ -245,7 +256,7 @@ def roadmap_slice_contract_for_item(inventory: Inventory, item_id: str) -> Roadm
         text = target_path.read_text(encoding="utf-8")
     except OSError:
         return None
-    parse_result = _parse_roadmap_items(text)
+    parse_result = _parse_roadmap_items_for_sync(text)
     if parse_result[1]:
         return None
     _items_start, _items_end, items = parse_result[0]
@@ -284,7 +295,7 @@ def roadmap_synthesis_report_for_item(inventory: Inventory, item_id: str) -> Roa
         text = target_path.read_text(encoding="utf-8")
     except OSError:
         return None
-    parse_result = _parse_roadmap_items(text)
+    parse_result = _parse_roadmap_items_for_sync(text)
     if parse_result[1]:
         return None
     _items_start, _items_end, items = parse_result[0]
@@ -339,6 +350,12 @@ def roadmap_synthesis_report_for_item(inventory: Inventory, item_id: str) -> Roa
     split_signals.append("bundle/split output is advisory and cannot approve lifecycle movement")
 
     verification_summary_count = sum(1 for _, item in covered_items if _field_scalar(item.fields, "verification_summary"))
+    recommended_phase_count = _recommended_phase_count(
+        covered_count=len(covered),
+        target_count=len(target_artifacts),
+        related_spec_count=len(related_specs),
+        verification_summary_count=verification_summary_count,
+    )
     return RoadmapSynthesisReport(
         primary_roadmap_item=normalized_item_id,
         execution_slice=execution_slice,
@@ -358,7 +375,7 @@ def roadmap_synthesis_report_for_item(inventory: Inventory, item_id: str) -> Roa
         phase_pressure=(
             f"{len(domain_contexts)} {_plural('domain context', len(domain_contexts))} and "
             f"{verification_summary_count} {_plural('verification summary', verification_summary_count)}; "
-            "generated plans still start with one explicit current phase"
+            f"candidate plan outline: {recommended_phase_count} {_plural('phase', recommended_phase_count)} or explicit one-shot rationale"
         ),
     )
 
@@ -482,7 +499,7 @@ def _roadmap_plan_from_text(
     *,
     allowed_missing_paths: set[str],
 ) -> tuple[RoadmapPlan | None, list[Finding]]:
-    parse_result = _parse_roadmap_items(text)
+    parse_result = _parse_roadmap_items_for_sync(text)
     if parse_result[1]:
         return None, parse_result[1]
     items_start, items_end, items = parse_result[0]
@@ -509,9 +526,19 @@ def _roadmap_plan_from_text(
         )
         if relationship_errors:
             return None, relationship_errors
+        relationship_plan = _relationship_plan_without_queued_active_plan_leak(inventory, request, relationship_plan)
 
     lines = text.splitlines(keepends=True)
     if request.action == "add":
+        if items_start < 0:
+            return None, [
+                Finding(
+                    "error",
+                    "roadmap-refused",
+                    "legacy top-level roadmap sections support update only; add requires a canonical ## Items section",
+                    ROADMAP_REL,
+                )
+            ]
         fields = _new_item_fields(request)
         block = _render_item_block(request.title, fields)
         insert_at = items_end
@@ -525,10 +552,28 @@ def _roadmap_plan_from_text(
         fields = _updated_item_fields(existing.fields, request)
         changed_fields = tuple(field for field in STANDARD_FIELDS if existing.fields.get(field, _empty_field_value(field)) != fields.get(field, _empty_field_value(field)))
         if changed_fields:
-            block = _render_item_block(existing.title, fields)
+            block = (
+                _render_updated_legacy_item_block(lines[existing.start : existing.end], changed_fields, fields)
+                if existing.style == "legacy"
+                else _render_item_block(existing.title, fields)
+            )
             updated_text = "".join([*lines[: existing.start], block, *lines[existing.end :]])
         else:
             updated_text = text
+
+    updated_text, reordered_item_ids = _order_accepted_item_blocks(updated_text)
+    if reordered_item_ids:
+        changed_fields = (*changed_fields, ACCEPTED_ITEM_ORDER_FIELD)
+
+    refreshed_text = _refresh_future_execution_slice_queue(updated_text)
+    if refreshed_text != updated_text:
+        changed_fields = (*changed_fields, FUTURE_QUEUE_FIELD)
+        updated_text = refreshed_text
+
+    refreshed_text, compacted_item_ids = _refresh_archived_completed_history(updated_text)
+    if refreshed_text != updated_text:
+        changed_fields = (*changed_fields, ARCHIVED_HISTORY_FIELD)
+        updated_text = refreshed_text
 
     return (
         RoadmapPlan(
@@ -537,6 +582,8 @@ def _roadmap_plan_from_text(
             target_rel=ROADMAP_REL,
             target_path=target_path,
             changed_fields=changed_fields,
+            reordered_item_ids=reordered_item_ids,
+            compacted_item_ids=compacted_item_ids,
             current_text=text,
             updated_text=updated_text,
             relationship_plan=relationship_plan,
@@ -681,12 +728,270 @@ def _parse_roadmap_items(text: str) -> tuple[tuple[int, int, dict[str, RoadmapIt
     return (items_heading + 1, items_end, items), []
 
 
+def _parse_roadmap_items_for_sync(text: str) -> tuple[tuple[int, int, dict[str, RoadmapItem]], list[Finding]]:
+    parse_result = _parse_roadmap_items(text)
+    if not parse_result[1]:
+        return parse_result
+    findings = parse_result[1]
+    if len(findings) != 1 or "must contain a ## Items section" not in findings[0].message:
+        return parse_result
+
+    legacy_result = _parse_legacy_roadmap_items(text)
+    if legacy_result[1] or not legacy_result[0][2]:
+        return parse_result
+    return legacy_result
+
+
+def _parse_legacy_roadmap_items(text: str) -> tuple[tuple[int, int, dict[str, RoadmapItem]], list[Finding]]:
+    lines = text.splitlines(keepends=True)
+    content_start = 0
+    if lines and lines[0].strip() == "---":
+        closing_index = None
+        for index, line in enumerate(lines[1:], start=1):
+            if line.strip() == "---":
+                closing_index = index
+                break
+        if closing_index is None:
+            return (0, 0, {}), [Finding("error", "roadmap-refused", "project/roadmap.md frontmatter is malformed", ROADMAP_REL)]
+        content_start = closing_index + 1
+
+    block_starts = [index for index in range(content_start, len(lines)) if _legacy_item_heading_match(lines[index])]
+    if not block_starts:
+        return (0, 0, {}), []
+
+    items: dict[str, RoadmapItem] = {}
+    errors: list[Finding] = []
+    for position, start in enumerate(block_starts):
+        end = block_starts[position + 1] if position + 1 < len(block_starts) else len(lines)
+        heading_match = _legacy_item_heading_match(lines[start])
+        assert heading_match is not None
+        heading_id = _normalized_item_id(heading_match.group("id"))
+        title = re.sub(r"^##\s+", "", lines[start].strip()).strip()
+        fields = _parse_legacy_item_fields(lines[start:end])
+        item_id = _normalized_item_id(fields.get("id") or heading_id)
+        if not item_id:
+            errors.append(Finding("error", "roadmap-refused", f"legacy roadmap section lacks an id field: {title}", ROADMAP_REL, start + 1))
+            continue
+        if item_id in items:
+            errors.append(Finding("error", "roadmap-refused", f"duplicate roadmap item id: {item_id}", ROADMAP_REL, start + 1))
+            continue
+        fields["id"] = item_id
+        items[item_id] = RoadmapItem(title=title, fields=fields, start=start, end=end, style="legacy")
+    if errors:
+        return (0, 0, {}), errors
+    return (-1, len(lines), items), []
+
+
+def _legacy_item_heading_match(line: str) -> re.Match[str] | None:
+    return re.match(r"^##\s+(?P<id>RM-[0-9]+)\b.*$", line.strip(), re.IGNORECASE)
+
+
+def _refresh_future_execution_slice_queue(text: str) -> str:
+    lines = text.splitlines(keepends=True)
+    bounds = _h2_section_bounds(lines, FUTURE_QUEUE_TITLE)
+    if bounds is None:
+        return text
+
+    parse_result = _parse_roadmap_items(text)
+    if parse_result[1]:
+        return text
+    _items_start, _items_end, items = parse_result[0]
+
+    start, end = bounds
+    body = lines[start + 1 : end]
+    kept_body: list[str] = []
+    removed_completed_bullets = 0
+    remaining_queue_bullets = 0
+    for line in body:
+        item_ids = _future_queue_bullet_item_ids(line)
+        if item_ids:
+            known_statuses = [_normalized_status(items[item_id].fields.get("status")) for item_id in item_ids if item_id in items]
+            if len(known_statuses) == len(item_ids) and all(status in TERMINAL_QUEUE_STATUSES for status in known_statuses):
+                removed_completed_bullets += 1
+                continue
+            remaining_queue_bullets += 1
+        kept_body.append(line)
+
+    if not removed_completed_bullets:
+        return text
+
+    if remaining_queue_bullets:
+        replacement = [lines[start], *kept_body]
+    else:
+        replacement = [
+            lines[start],
+            "\n",
+            "No future execution slice is currently queued in this roadmap. Completed or retired slice history lives in archived plans and in terminal item metadata below.\n",
+            "\n",
+            "Open the next slice only through an explicit plan request or accepted roadmap update. Incubation notes remain possible inputs, not queued work by themselves.\n",
+            "\n",
+        ]
+    return "".join([*lines[:start], *replacement, *lines[end:]])
+
+
+def _refresh_archived_completed_history(text: str) -> tuple[str, tuple[str, ...]]:
+    parse_result = _parse_roadmap_items(text)
+    if parse_result[1]:
+        return text, ()
+    items_start, _items_end, items = parse_result[0]
+    done_items = [
+        (item_id, item)
+        for item_id, item in sorted(items.items(), key=lambda row: (row[1].start, row[0]))
+        if _normalized_status(item.fields.get("status")) == "done"
+    ]
+    excess = len(done_items) - DETAILED_DONE_TAIL_LIMIT
+    if excess <= 0:
+        return text, ()
+
+    to_compact: list[tuple[str, RoadmapItem]] = []
+    for item_id, item in done_items:
+        if excess <= 0:
+            break
+        if not _roadmap_item_has_compaction_evidence(item):
+            continue
+        to_compact.append((item_id, item))
+        excess -= 1
+    if not to_compact:
+        return text, ()
+
+    lines = text.splitlines(keepends=True)
+    compacted_ids = tuple(item_id for item_id, _item in to_compact)
+    remove_ranges = tuple((item.start, item.end) for _item_id, item in to_compact)
+    kept_lines = [line for index, line in enumerate(lines) if not any(start <= index < end for start, end in remove_ranges)]
+    history_entries = _compacted_history_entries(lines, to_compact)
+    if history_entries:
+        kept_lines = _with_archived_history_entries(kept_lines, history_entries, fallback_insert_at=items_start)
+    return "".join(kept_lines), compacted_ids
+
+
+def _roadmap_item_has_compaction_evidence(item: RoadmapItem) -> bool:
+    archived_plan = _field_scalar(item.fields, "archived_plan")
+    docs_decision = _field_scalar(item.fields, "docs_decision")
+    return (
+        archived_plan.startswith("project/archive/plans/")
+        and bool(_field_scalar(item.fields, "verification_summary"))
+        and docs_decision in {"updated", "not-needed"}
+    )
+
+
+def _compacted_history_entries(lines: list[str], items: list[tuple[str, RoadmapItem]]) -> list[str]:
+    bounds = _h2_section_bounds(lines, ARCHIVED_HISTORY_TITLE)
+    existing_history = "".join(lines[bounds[0] + 1 : bounds[1]]) if bounds else ""
+    entries: list[str] = []
+    for item_id, item in items:
+        if f"`{item_id}`" in existing_history:
+            continue
+        archived_plan = _field_scalar(item.fields, "archived_plan")
+        entries.append(f"- Compacted done roadmap item `{item_id}`: archived plan `{archived_plan}`.\n")
+    return entries
+
+
+def _with_archived_history_entries(lines: list[str], entries: list[str], *, fallback_insert_at: int) -> list[str]:
+    bounds = _h2_section_bounds(lines, ARCHIVED_HISTORY_TITLE)
+    if bounds is None:
+        section = [
+            "## Archived Completed History\n",
+            "\n",
+            "Detailed done roadmap item blocks compacted out of the live tail remain available through archived plans.\n",
+            "\n",
+            *entries,
+            "\n",
+        ]
+        insert_at = max(0, min(fallback_insert_at, len(lines)))
+        if insert_at > 0 and lines[insert_at - 1].strip():
+            section.insert(0, "\n")
+        return [*lines[:insert_at], *section, *lines[insert_at:]]
+
+    _start, end = bounds
+    insertion = [*entries]
+    if end > 0 and lines[end - 1].strip():
+        insertion.insert(0, "\n")
+    insertion.append("\n")
+    return [*lines[:end], *insertion, *lines[end:]]
+
+
+def _h2_section_bounds(lines: list[str], title: str) -> tuple[int, int] | None:
+    start = None
+    title_pattern = re.compile(rf"^##\s+{re.escape(title)}\s*$")
+    for index, line in enumerate(lines):
+        if title_pattern.match(line.strip()):
+            start = index
+            break
+    if start is None:
+        return None
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        if re.match(r"^##\s+\S", lines[index].strip()):
+            end = index
+            break
+    return start, end
+
+
+def _future_queue_bullet_item_ids(line: str) -> tuple[str, ...]:
+    if not re.match(r"^\s*-\s+", line):
+        return ()
+    match = re.search(r"\bItems:\s*(.+)$", line)
+    if not match:
+        return ()
+    return tuple(_dedupe_nonempty(_normalized_item_id(value) for value in re.findall(r"`([^`]+)`", match.group(1))))
+
+
+def _order_accepted_item_blocks(text: str) -> tuple[str, tuple[str, ...]]:
+    parse_result = _parse_roadmap_items(text)
+    if parse_result[1]:
+        return text, ()
+    _items_start, _items_end, items = parse_result[0]
+    item_entries = sorted(items.items(), key=lambda row: (row[1].start, row[0]))
+    accepted_entries = [
+        (item_id, item)
+        for item_id, item in item_entries
+        if _normalized_status(item.fields.get("status")) == "accepted"
+    ]
+    if len(accepted_entries) < 2:
+        return text, ()
+
+    ordered_entries = sorted(accepted_entries, key=lambda row: (_order_sort_key(row[1]), row[1].start, row[0]))
+    original_ids = tuple(item_id for item_id, _item in accepted_entries)
+    ordered_ids = tuple(item_id for item_id, _item in ordered_entries)
+    if original_ids == ordered_ids:
+        return text, ()
+
+    lines = text.splitlines(keepends=True)
+    rebuilt: list[str] = []
+    cursor = 0
+    ordered_index = 0
+    for _item_id, item in item_entries:
+        rebuilt.extend(lines[cursor : item.start])
+        if _normalized_status(item.fields.get("status")) == "accepted":
+            _ordered_item_id, ordered_item = ordered_entries[ordered_index]
+            rebuilt.extend(lines[ordered_item.start : ordered_item.end])
+            ordered_index += 1
+        else:
+            rebuilt.extend(lines[item.start : item.end])
+        cursor = item.end
+    rebuilt.extend(lines[cursor:])
+    moved_ids = tuple(item_id for index, item_id in enumerate(ordered_ids) if original_ids[index] != item_id)
+    return "".join(rebuilt), moved_ids
+
+
+def _order_sort_key(item: RoadmapItem) -> tuple[int, int | str]:
+    order = item.fields.get("order")
+    if isinstance(order, int):
+        return (0, order)
+    try:
+        return (0, int(str(order).strip()))
+    except ValueError:
+        return (1, str(order or ""))
+
+
 def _covered_item_ids(items: dict[str, RoadmapItem], normalized_item_id: str, primary: RoadmapItem) -> tuple[str, ...]:
     primary_fields = primary.fields
     execution_slice = _normalized_item_id(primary_fields.get("execution_slice"))
-    explicit_members = _field_list(primary_fields, "slice_members")
+    explicit_members = tuple(_normalized_item_id(value) for value in _field_list(primary_fields, "slice_members"))
     if explicit_members:
-        members = explicit_members
+        members = tuple(member for member in explicit_members if member in items)
+        if not members:
+            members = (normalized_item_id,)
     elif execution_slice:
         members = tuple(
             roadmap_item_id
@@ -720,6 +1025,44 @@ def _parse_item_fields(lines: list[str]) -> dict[str, object]:
     for key in LIST_FIELDS:
         fields.setdefault(key, [])
     return fields
+
+
+def _parse_legacy_item_fields(lines: list[str]) -> dict[str, object]:
+    fields: dict[str, object] = {}
+    for index, line in enumerate(lines):
+        match = re.match(r"^([A-Za-z0-9_-]+):\s*(.*?)\s*$", line.strip())
+        if not match:
+            continue
+        key = match.group(1)
+        raw = match.group(2).strip()
+        if key in LIST_FIELDS:
+            fields[key] = _parse_legacy_list_field(lines, index, raw)
+        elif key == "order":
+            try:
+                fields[key] = int(_strip_quotes(raw))
+            except ValueError:
+                fields[key] = _strip_quotes(raw)
+        else:
+            fields[key] = _strip_quotes(raw)
+    for key in LIST_FIELDS:
+        fields.setdefault(key, [])
+    return fields
+
+
+def _parse_legacy_list_field(lines: list[str], index: int, raw: str) -> list[str]:
+    if raw:
+        parsed = _parse_list_value(raw)
+        if parsed:
+            return parsed
+        scalar = _strip_quotes(raw)
+        return [scalar] if scalar and scalar != "[]" else []
+    values: list[str] = []
+    for line in lines[index + 1 :]:
+        match = re.match(r"^\s*-\s+(.+?)\s*$", line)
+        if not match:
+            break
+        values.append(_strip_quotes(match.group(1).strip()))
+    return values
 
 
 def _parse_list_value(raw: str) -> list[str]:
@@ -793,6 +1136,73 @@ def _render_item_block(title: str, fields: dict[str, object]) -> str:
         lines.append(f"- `{key}`: `{rendered}`\n")
     lines.append("\n")
     return "".join(lines)
+
+
+def _render_updated_legacy_item_block(block_lines: list[str], changed_fields: tuple[str, ...], fields: dict[str, object]) -> str:
+    updated_lines = list(block_lines)
+    newline = "\r\n" if any(line.endswith("\r\n") for line in block_lines) else "\n"
+    for field in changed_fields:
+        replacement = _render_legacy_field(field, fields.get(field, _empty_field_value(field)), newline)
+        spans = _legacy_field_spans(updated_lines)
+        span = spans.get(field)
+        if span:
+            start, end = span
+            updated_lines[start:end] = replacement
+            continue
+        insert_at = _legacy_field_insert_index(updated_lines)
+        updated_lines[insert_at:insert_at] = replacement
+    return "".join(updated_lines)
+
+
+def _legacy_field_spans(lines: list[str]) -> dict[str, tuple[int, int]]:
+    spans: dict[str, tuple[int, int]] = {}
+    index = 0
+    while index < len(lines):
+        match = re.match(r"^([A-Za-z0-9_-]+):\s*(.*?)\s*$", lines[index].strip())
+        if not match:
+            index += 1
+            continue
+        key = match.group(1)
+        end = index + 1
+        while end < len(lines) and re.match(r"^\s*-\s+.+\s*$", lines[end]):
+            end += 1
+        spans[key] = (index, end)
+        index = end
+    return spans
+
+
+def _legacy_field_insert_index(lines: list[str]) -> int:
+    index = len(lines)
+    while index > 0 and not lines[index - 1].strip():
+        index -= 1
+    return index
+
+
+def _render_legacy_field(field: str, value: object, newline: str) -> list[str]:
+    if field in LIST_FIELDS:
+        values = _field_value_list(value)
+        if not values:
+            return [f"{field}: []{newline}"]
+        return [f"{field}:{newline}", *(f'  - "{_legacy_quoted_value(item)}"{newline}' for item in values)]
+    if field == "order":
+        rendered = str(value if value not in (None, "") else 0)
+        return [f"{field}: {rendered}{newline}"]
+    return [f'{field}: "{_legacy_quoted_value(str(value or ""))}"{newline}']
+
+
+def _field_value_list(value: object) -> list[str]:
+    if value in (None, ""):
+        return []
+    if isinstance(value, str):
+        parsed = _parse_list_value(value) if value.startswith("[") and value.endswith("]") else [value]
+        return [str(item) for item in parsed if str(item).strip()]
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value if str(item).strip()]
+    return [str(value)]
+
+
+def _legacy_quoted_value(value: object) -> str:
+    return str(value or "").replace("\\", "\\\\").replace('"', '\\"')
 
 
 def _relationship_errors(
@@ -878,6 +1288,24 @@ def _plan_findings(plan: RoadmapPlan, apply: bool) -> list[Finding]:
     else:
         message = "no roadmap fields would change" if not apply else "no roadmap fields changed"
         findings.append(Finding("info", "roadmap-noop", message, plan.target_rel))
+    if plan.compacted_item_ids:
+        findings.append(
+            Finding(
+                "info",
+                "roadmap-live-tail-compaction",
+                f"{prefix}compact done roadmap item block(s): {', '.join(plan.compacted_item_ids)}",
+                plan.target_rel,
+            )
+        )
+    if plan.reordered_item_ids:
+        findings.append(
+            Finding(
+                "info",
+                "roadmap-order-aware-insertion",
+                f"{prefix}order accepted roadmap item block(s): {', '.join(plan.reordered_item_ids)}",
+                plan.target_rel,
+            )
+        )
     if plan.relationship_plan:
         findings.extend(_relationship_plan_findings(plan.relationship_plan, apply))
     return findings
@@ -897,6 +1325,85 @@ def _relationship_plan_findings(plan: RelationshipUpdatePlan, apply: bool) -> li
     else:
         findings.append(Finding("info", "roadmap-relationship-noop", "source incubation relationship metadata already matches requested roadmap item", plan.source_rel))
     return findings
+
+
+def _relationship_plan_without_queued_active_plan_leak(
+    inventory: Inventory,
+    request: RoadmapRequest,
+    plan: RelationshipUpdatePlan | None,
+) -> RelationshipUpdatePlan | None:
+    if plan is None:
+        return None
+    if request.related_plan == DEFAULT_PLAN_REL or _roadmap_item_owned_by_active_plan(inventory, request.item_id):
+        return plan
+    if not _source_text_is_fix_candidate(plan.current_text):
+        return plan
+    if _frontmatter_scalar(plan.current_text, "related_plan") != DEFAULT_PLAN_REL:
+        return plan
+
+    updated_text, changed = _text_with_empty_frontmatter_scalar(plan.updated_text, "related_plan")
+    if not changed:
+        return plan
+    changed_fields = tuple(_dedupe_nonempty((*plan.changed_fields, "related_plan")))
+    return replace(plan, updated_text=updated_text, changed_fields=changed_fields)
+
+
+def _roadmap_item_owned_by_active_plan(inventory: Inventory, item_id: str) -> bool:
+    state = inventory.state
+    if state is None or not state.exists or not state.frontmatter.has_frontmatter or state.frontmatter.errors:
+        return False
+    state_data = state.frontmatter.data
+    if str(state_data.get("plan_status") or "").strip() != "active":
+        return False
+    if _normalize_rel(state_data.get("active_plan")) != DEFAULT_PLAN_REL:
+        return False
+    plan = inventory.active_plan_surface
+    if plan is None or not plan.exists or plan.path.is_symlink() or not plan.path.is_file():
+        return False
+    if not plan.frontmatter.has_frontmatter or plan.frontmatter.errors:
+        return False
+
+    normalized_item_id = _normalized_item_id(item_id)
+    plan_data = plan.frontmatter.data
+    owned_items = {
+        _normalized_item_id(plan_data.get("primary_roadmap_item")),
+        _normalized_item_id(plan_data.get("related_roadmap_item")),
+    }
+    owned_items.update(_normalized_item_id(value) for value in _frontmatter_list_values(plan_data.get("covered_roadmap_items")))
+    return normalized_item_id in owned_items
+
+
+def _source_text_is_fix_candidate(text: str) -> bool:
+    return "[MLH-Fix-Candidate]" in text
+
+
+def _frontmatter_scalar(text: str, key: str) -> str:
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return ""
+    for line in lines[1:]:
+        if line.strip() == "---":
+            return ""
+        match = re.match(rf"^{re.escape(key)}:\s*(.*?)\s*$", line)
+        if match:
+            return _strip_quotes(match.group(1).strip())
+    return ""
+
+
+def _text_with_empty_frontmatter_scalar(text: str, key: str) -> tuple[str, bool]:
+    lines = text.splitlines(keepends=True)
+    if not lines or lines[0].strip() != "---":
+        return text, False
+    for index, line in enumerate(lines[1:], start=1):
+        if line.strip() == "---":
+            return text, False
+        match = re.match(rf"^({re.escape(key)}):(.*?)(\r?\n)?$", line)
+        if not match:
+            continue
+        newline = match.group(3) or ("\n" if line.endswith("\n") else "")
+        lines[index] = f'{key}: ""{newline}'
+        return "".join(lines), True
+    return text, False
 
 
 def _relationship_tmp_path(plan: RelationshipUpdatePlan | None) -> Path | None:
@@ -1065,6 +1572,31 @@ def _plural(label: str, count: int) -> str:
     return label if count == 1 else f"{label}s"
 
 
+def _recommended_phase_count(
+    *,
+    covered_count: int,
+    target_count: int,
+    related_spec_count: int,
+    verification_summary_count: int,
+) -> int:
+    pressure = 0
+    if covered_count > 1:
+        pressure += 1
+    if target_count >= 4:
+        pressure += 2
+    elif target_count > 1:
+        pressure += 1
+    if related_spec_count > 1:
+        pressure += 1
+    if verification_summary_count > 0:
+        pressure += 1
+    if pressure <= 1:
+        return 1
+    if pressure <= 2:
+        return 2
+    return 3
+
+
 def _dedupe_nonempty(values) -> list[str]:
     seen: set[str] = set()
     deduped: list[str] = []
@@ -1103,6 +1635,22 @@ def _normalized_item_id(value: object) -> str:
 
 def _normalize_rel(value: object) -> str:
     return str(value or "").replace("\\", "/").strip().strip("/")
+
+
+def _frontmatter_list_values(value: object) -> tuple[str, ...]:
+    if value in (None, "", [], ()):
+        return ()
+    if isinstance(value, str):
+        return (value,)
+    if isinstance(value, (list, tuple, set)):
+        return tuple(str(item) for item in value if str(item).strip())
+    return (str(value),)
+
+
+def _strip_quotes(value: str) -> str:
+    if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+        return value[1:-1]
+    return value
 
 
 def _rel_has_absolute_or_parent_parts(rel_path: str) -> bool:

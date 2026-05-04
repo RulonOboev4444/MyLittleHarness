@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .inventory import Inventory, Surface
+from .parsing import Frontmatter, extract_headings, extract_path_refs, parse_frontmatter
+from .routes import classify_memory_route
 
 
 ROOT_RELATIVE_LINK_PREFIXES = (
@@ -75,6 +77,10 @@ ROADMAP_ITEM_RELATIONSHIP_FIELDS = {
     "supersedes",
     "superseded_by",
 }
+COLD_MEMORY_GLOBS = (
+    ("project/archive/plans/*.md", "archived-plan"),
+    ("project/archive/reference/**/*.md", "archive-reference"),
+)
 
 
 @dataclass(frozen=True)
@@ -170,10 +176,12 @@ class LinkResolution:
 
 
 def build_projection(inventory: Inventory) -> Projection:
-    sources = tuple(_source_record(surface) for surface in inventory.surfaces)
-    links = tuple(_local_link_records(inventory))
-    fan_in = tuple(_fan_in_records(inventory, links))
-    relationship_nodes, relationship_edges = _relationship_graph_records(inventory)
+    projection_surfaces = tuple(_projection_surfaces(inventory))
+    projection_surface_by_rel = {surface.rel_path: surface for surface in projection_surfaces}
+    sources = tuple(_source_record(surface) for surface in projection_surfaces)
+    links = tuple(_local_link_records(inventory, projection_surfaces))
+    fan_in = tuple(_fan_in_records(projection_surface_by_rel, links))
+    relationship_nodes, relationship_edges = _relationship_graph_records(inventory, projection_surfaces, projection_surface_by_rel)
     readable_count = len([source for source in sources if source.readable])
     hashed_count = len([source for source in sources if source.content_hash is not None])
     summary = ProjectionSummary(
@@ -196,6 +204,76 @@ def build_projection(inventory: Inventory) -> Projection:
         relationship_nodes=tuple(relationship_nodes),
         relationship_edges=tuple(relationship_edges),
         summary=summary,
+    )
+
+
+def _projection_surfaces(inventory: Inventory) -> list[Surface]:
+    surfaces: list[Surface] = []
+    seen: set[str] = set()
+    for surface in inventory.surfaces:
+        surfaces.append(surface)
+        seen.add(surface.rel_path)
+    for surface in _cold_memory_surfaces(inventory):
+        if surface.rel_path in seen:
+            continue
+        surfaces.append(surface)
+        seen.add(surface.rel_path)
+    return sorted(surfaces, key=lambda item: item.rel_path)
+
+
+def _cold_memory_surfaces(inventory: Inventory) -> list[Surface]:
+    surfaces: list[Surface] = []
+    root = inventory.root
+    for pattern, role in COLD_MEMORY_GLOBS:
+        for path in sorted(root.glob(pattern)):
+            if path.is_symlink() or not path.is_file():
+                continue
+            try:
+                rel_path = path.relative_to(root).as_posix()
+            except ValueError:
+                continue
+            surfaces.append(_read_projection_surface(root, rel_path, role, path))
+    return surfaces
+
+
+def _read_projection_surface(root: Path, rel_path: str, role: str, path: Path) -> Surface:
+    try:
+        content = path.read_text(encoding="utf-8")
+        read_error = None
+    except UnicodeDecodeError:
+        content = path.read_text(encoding="utf-8", errors="replace")
+        read_error = "decoded with replacement characters"
+    except OSError as exc:
+        route = classify_memory_route(rel_path, role)
+        return Surface(
+            root=root,
+            rel_path=rel_path,
+            role=role,
+            required=False,
+            path=path,
+            exists=True,
+            read_error=str(exc),
+            memory_route=route.route_id,
+            memory_route_target=route.target,
+            memory_route_authority=route.authority,
+        )
+    frontmatter = parse_frontmatter(content) if path.suffix.lower() == ".md" else Frontmatter.empty()
+    route = classify_memory_route(rel_path, role)
+    return Surface(
+        root=root,
+        rel_path=rel_path,
+        role=role,
+        required=False,
+        path=path,
+        exists=True,
+        content=content,
+        read_error=read_error,
+        frontmatter=frontmatter,
+        headings=extract_headings(content) if path.suffix.lower() == ".md" else [],
+        links=extract_path_refs(content),
+        memory_route=route.route_id,
+        memory_route_target=route.target,
+        memory_route_authority=route.authority,
     )
 
 
@@ -311,10 +389,12 @@ def _source_record(surface: Surface) -> ProjectionSourceRecord:
     )
 
 
-def _local_link_records(inventory: Inventory) -> list[ProjectionLinkRecord]:
+def _local_link_records(inventory: Inventory, surfaces: tuple[Surface, ...]) -> list[ProjectionLinkRecord]:
     records: list[ProjectionLinkRecord] = []
     seen: set[tuple[str, str, int]] = set()
-    for surface in inventory.present_surfaces:
+    for surface in surfaces:
+        if not surface.exists:
+            continue
         if surface.role == "package-mirror":
             continue
         for link in surface.links:
@@ -348,7 +428,7 @@ def _local_link_records(inventory: Inventory) -> list[ProjectionLinkRecord]:
     return sorted(records, key=lambda record: (record.source, record.line, record.target))
 
 
-def _fan_in_records(inventory: Inventory, records: tuple[ProjectionLinkRecord, ...]) -> list[ProjectionFanInRecord]:
+def _fan_in_records(surface_by_rel: dict[str, Surface], records: tuple[ProjectionLinkRecord, ...]) -> list[ProjectionFanInRecord]:
     inbound: dict[str, list[ProjectionLinkRecord]] = {}
     for record in records:
         inbound.setdefault(record.target, []).append(record)
@@ -370,19 +450,25 @@ def _fan_in_records(inventory: Inventory, records: tuple[ProjectionLinkRecord, .
                 inbound_count=len(target_records),
                 status=status,
                 sources=tuple(_unique_sorted(record.source for record in target_records)),
-                source=target if target in inventory.surface_by_rel else None,
+                source=target if target in surface_by_rel else None,
             )
         )
     return fan_in
 
 
-def _relationship_graph_records(inventory: Inventory) -> tuple[list[ProjectionRelationshipNode], list[ProjectionRelationshipEdge]]:
+def _relationship_graph_records(
+    inventory: Inventory,
+    surfaces: tuple[Surface, ...],
+    surface_by_rel: dict[str, Surface],
+) -> tuple[list[ProjectionRelationshipNode], list[ProjectionRelationshipEdge]]:
     roadmap_items = _roadmap_items(inventory)
     item_ids = set(roadmap_items)
     nodes: dict[str, ProjectionRelationshipNode] = {}
     edges: set[ProjectionRelationshipEdge] = set()
 
-    for surface in inventory.present_surfaces:
+    for surface in surfaces:
+        if not surface.exists:
+            continue
         if surface.role == "package-mirror":
             continue
         node = ProjectionRelationshipNode(
@@ -404,6 +490,7 @@ def _relationship_graph_records(inventory: Inventory) -> tuple[list[ProjectionRe
                     surface.rel_path,
                     key_lines.get(field),
                     inventory,
+                    surface_by_rel,
                     item_ids,
                 )
                 if edge:
@@ -428,6 +515,7 @@ def _relationship_graph_records(inventory: Inventory) -> tuple[list[ProjectionRe
                     "project/roadmap.md",
                     None,
                     inventory,
+                    surface_by_rel,
                     item_ids,
                 )
                 if edge:
@@ -464,12 +552,13 @@ def _relationship_edge(
     source_path: str,
     line: int | None,
     inventory: Inventory,
+    surface_by_rel: dict[str, Surface],
     roadmap_item_ids: set[str],
 ) -> ProjectionRelationshipEdge | None:
     normalized = _normalized_relationship_target(target, relation)
     if not normalized:
         return None
-    status = _relationship_target_status(inventory, normalized, roadmap_item_ids, relation)
+    status = _relationship_target_status(inventory, surface_by_rel, normalized, roadmap_item_ids, relation)
     return ProjectionRelationshipEdge(
         source=source,
         target=normalized,
@@ -489,7 +578,13 @@ def _normalized_relationship_target(target: str, relation: str) -> str:
     return normalized_link_path(clean) or clean
 
 
-def _relationship_target_status(inventory: Inventory, target: str, roadmap_item_ids: set[str], relation: str = "") -> str:
+def _relationship_target_status(
+    inventory: Inventory,
+    surface_by_rel: dict[str, Surface],
+    target: str,
+    roadmap_item_ids: set[str],
+    relation: str = "",
+) -> str:
     if target.startswith("project/roadmap.md#"):
         item_id = target.split("#", 1)[1]
         return "present" if item_id in roadmap_item_ids else "missing"
@@ -501,8 +596,8 @@ def _relationship_target_status(inventory: Inventory, target: str, roadmap_item_
             target = rel_target
     if relation == "target_artifacts" and _is_product_target_artifact_rel(target):
         return "product-target"
-    if target in inventory.surface_by_rel:
-        return "present" if inventory.surface_by_rel[target].exists else "missing"
+    if target in surface_by_rel:
+        return "present" if surface_by_rel[target].exists else "missing"
     if (inventory.root / target).exists():
         return "present"
     return "missing"

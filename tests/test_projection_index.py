@@ -16,7 +16,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from mylittleharness.cli import main
 from mylittleharness.projection_artifacts import ARTIFACT_DIR_REL
 from mylittleharness.projection_index import INDEX_NAME, INDEX_REL_PATH, INDEX_SCHEMA_VERSION
-from tests.test_cli import make_root
+from tests.test_cli import make_operating_root, make_root
 
 
 class ProjectionIndexTests(unittest.TestCase):
@@ -238,6 +238,38 @@ class ProjectionIndexTests(unittest.TestCase):
             self.assertIn("projection-index-query-current", stale_rendered)
             self.assertIn("search-match", stale_rendered)
             self.assertIn("search-path-reference", stale_rendered)
+
+    def test_unified_query_finds_source_verified_cold_memory_routes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            archived_plan = root / "project/archive/plans/2026-05-03-cold-retrieval.md"
+            archived_plan.write_text(
+                "---\n"
+                'status: "complete"\n'
+                'related_verification: "project/archive/reference/verification/2026-05-03-cold-proof.md"\n'
+                "---\n"
+                "# Cold Retrieval\n\n"
+                "ColdMemoryNeedle archived plan proof.\n",
+                encoding="utf-8",
+            )
+            proof_path = root / "project/archive/reference/verification/2026-05-03-cold-proof.md"
+            proof_path.parent.mkdir(parents=True, exist_ok=True)
+            proof_path.write_text("# Cold Proof\n\nColdMemoryNeedle verification record.\n", encoding="utf-8")
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "intelligence", "--focus", "search", "--query", "ColdMemoryNeedle", "--limit", "5"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("navigation-cache-index-refresh", rendered)
+            self.assertIn("projection-index-query-current", rendered)
+            self.assertIn("projection-exact-search-source-only", rendered)
+            self.assertIn("full-text-match", rendered)
+            self.assertIn("search-match", rendered)
+            self.assertIn("verification=source-verified", rendered)
+            self.assertIn("project/archive/plans/2026-05-03-cold-retrieval.md", rendered)
+            self.assertIn("project/archive/reference/verification/2026-05-03-cold-proof.md", rendered)
 
     def test_full_text_plain_multi_term_query_relaxes_to_or_search(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

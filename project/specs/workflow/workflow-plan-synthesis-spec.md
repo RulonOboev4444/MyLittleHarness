@@ -256,7 +256,9 @@ When an active plan opens from a roadmap item that belongs to a roadmap executio
 
 When roadmap slice metadata is available, plan synthesis should make bundle/split decisions inspectable without making them authoritative. Dry-run/apply reports may include bundle rationale, split boundary, target-artifact pressure, and phase pressure; generated plans may mirror those values under `Plan Synthesis Notes`. Target-artifact pressure is a report-only sizing signal, not a calibrated threshold or hard gate, and the synthesis report cannot approve lifecycle movement, closeout, archive, repair, commit, rollback, or future mutation.
 
-Read-only grain diagnostics may later inspect generated plans for missing slice metadata, missing target artifacts, vague write scope, generic verification gates, over-atomic slices, giant brittle slices, and unsafe auto-continuation posture. Those diagnostics are calibration inputs for future planning behavior only; they do not rewrite plans, split slices, or promote numeric thresholds into refusal gates.
+Generated roadmap-backed plans should use those signals to write either a `Phase Outline` with concrete phase sections or an explicit one-shot rationale. A phase outline is expected when multiple target artifacts, verification summaries, related specs, or grouped roadmap items create execution pressure; a one-shot rationale is expected only when artifact and verification pressure are low and the plan records when to stop before scope expansion.
+
+Read-only grain diagnostics may later inspect generated plans for missing slice metadata, missing target artifacts, vague write scope, generic verification gates, under-decomposed single-phase plans, over-atomic slices, giant brittle slices, and unsafe auto-continuation posture. Those diagnostics are calibration inputs for future planning behavior only; they do not rewrite plans, split slices, or promote numeric thresholds into refusal gates.
 
 ## One-Plan Rule
 

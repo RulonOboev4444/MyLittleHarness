@@ -215,7 +215,7 @@ class PackageMetadataTests(unittest.TestCase):
         self.assertIn("A Codex skill, generated docs-impact report, IDE rule, MCP client, hook, or CI result may help route attention", metadata)
         self.assertIn("it cannot be required for the decision and cannot store the only copy of the decision", metadata)
         self.assertIn("marked closeout writeback block in `project/project-state.md`", metadata)
-        self.assertIn("exact active-plan closeout bullets inside explicit closeout summary/facts/fields sections", metadata)
+        self.assertIn("exact active-plan closeout bullets inside explicit Docs Decision, State Transfer, or closeout summary/facts/fields sections", metadata)
         self.assertIn("schema examples, roadmap fields, and closeout checklist items are not derived closeout copies", metadata)
         self.assertIn("`writeback --apply` synchronizes requested derived copies", docs_readme)
         self.assertIn("Optional `--roadmap-item` sync uses only same-request closeout facts", docs_readme)
@@ -229,6 +229,7 @@ class PackageMetadataTests(unittest.TestCase):
         self.assertIn("ready-for-closeout boundary", metadata)
         self.assertIn("post-writeback plus compact-only operating-memory compaction", docs_readme)
         self.assertIn("`writeback --dry-run|--apply --compact-only`", docs_readme)
+        self.assertIn("State compaction selection scans the whole `project/project-state.md`", docs_readme)
         self.assertIn("default 250-line threshold", metadata)
 
     def test_optional_adapter_docs_reject_skill_owned_memory(self) -> None:
@@ -242,6 +243,37 @@ class PackageMetadataTests(unittest.TestCase):
         ):
             self.assertIn(expected, adapter)
         self.assertIn("must not store the only copy of accepted decisions, current focus, docs decisions, repair approval, verification, or closeout evidence", readme)
+
+    def test_default_mcp_agent_tooling_docs_are_optional_and_read_only(self) -> None:
+        template = (ROOT / "src/mylittleharness/templates/operating-root/AGENTS.md").read_text(encoding="utf-8")
+        docs_readme = (ROOT / "docs/README.md").read_text(encoding="utf-8")
+        cli_spec = (ROOT / "docs/specs/attach-repair-status-cli.md").read_text(encoding="utf-8")
+        projection_spec = (ROOT / "docs/specs/generated-state-and-projections.md").read_text(encoding="utf-8")
+
+        self.assertLessEqual(len(template.splitlines()), 20)
+        for doc in (template, docs_readme, cli_spec, projection_spec):
+            self.assertIn("mylittleharness.read_projection", doc)
+            self.assertIn("repo-visible files", doc)
+        for expected in (
+            "`adapter --client-config`",
+            "no-write default-active MCP client configuration",
+            "adapter inspection/client-config/stdio serving",
+        ):
+            self.assertIn(expected, docs_readme)
+        for expected in (
+            "`adapter --client-config --target mcp-read-projection`",
+            "default-active agent tooling",
+            "does not write user config",
+            "Missing adapter mode, unknown target, or `--transport` with `--client-config` remain argparse usage failures",
+        ):
+            self.assertIn(expected, cli_spec)
+        for expected in (
+            "`adapter --client-config --target mcp-read-projection`",
+            "without writing user config",
+            "agents should use it as an optional read/projection helper before or alongside CLI/file reads",
+            "cannot approve lifecycle decisions",
+        ):
+            self.assertIn(expected, projection_spec)
 
     def test_rule_context_drift_docs_keep_check_compact(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -294,6 +326,7 @@ class PackageMetadataTests(unittest.TestCase):
             "auto-compaction posture",
             "post-writeback operating-memory compaction",
             "compact-only state-history compaction",
+            "safe whole-state history compaction",
             "project/archive/reference/project-state-history-YYYY-MM-DD",
             "explicit ready-for-closeout `writeback --apply --phase-status complete`",
             "`--product-source-root <path>`",
@@ -327,16 +360,23 @@ class PackageMetadataTests(unittest.TestCase):
             "`--archive-covered --entry-coverage <entry-id: status destination>`",
             "roadmap --dry-run --action add --item-id <id>",
             "`roadmap --apply`",
+            "intake --dry-run",
+            "`intake --apply`",
             "reciprocal source-incubation",
             "coverage-aware incubation auto-archive",
             "Route metadata diagnostics are read-only validation",
             "route-metadata-frontmatter",
+            "cold memory routes",
+            "archived plans under `project/archive/plans/*.md`",
+            "archived reference material under `project/archive/reference/**/*.md`",
         ):
             self.assertIn(expected, cli_spec)
 
         pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        self.assertIn("cold archived-plan/reference retrieval", pyproject["project"]["description"])
         self.assertIn("route metadata", pyproject["project"]["description"])
         self.assertIn("roadmap routes", pyproject["project"]["description"])
+        self.assertIn("hidden intake route advisor", pyproject["project"]["description"])
         self.assertIn("hidden incubate same-topic note rail", pyproject["project"]["description"])
         self.assertIn("hidden deterministic plan synthesis rail", pyproject["project"]["description"])
         self.assertIn("roadmap slice frontmatter", pyproject["project"]["description"])
@@ -358,7 +398,7 @@ class PackageMetadataTests(unittest.TestCase):
         self.assertIn("fix-candidate tagging", pyproject["project"]["description"])
         self.assertIn("archive-covered Entry Coverage transactions", pyproject["project"]["description"])
         self.assertIn("plan-identity carry/replace guardrail", pyproject["project"]["description"])
-        self.assertIn("post-writeback and compact-only state compaction", pyproject["project"]["description"])
+        self.assertIn("post-writeback and compact-only whole-state compaction", pyproject["project"]["description"])
         self.assertIn("optional proof/evidence route records", pyproject["project"]["description"])
         self.assertIn("report-only grain diagnostics and archived-plan calibration samples", pyproject["project"]["description"])
 
@@ -385,8 +425,13 @@ class PackageMetadataTests(unittest.TestCase):
             self.assertIn("closeout", doc)
         self.assertIn("active-plan-auto-continue", readme)
         self.assertIn("writeback-phase-execution-boundary", metadata)
+        self.assertIn("writeback --apply --active-phase <next-phase> --phase-status pending", metadata)
+        self.assertIn("writeback --active-phase <next-phase> --phase-status pending", closeout_template)
         self.assertIn("verification success alone does not authorize the next phase", rollout_template)
         self.assertIn("Closeout preparation remains an explicit boundary", closeout_template)
+        self.assertIn("Phase Outline", plan_synthesis_template)
+        self.assertIn("one-shot rationale", plan_synthesis_template)
+        self.assertIn("under-decomposed", rollout_template)
 
     def test_operating_root_agents_template_stays_compact_while_routing_is_cli_visible(self) -> None:
         template = (ROOT / "src/mylittleharness/templates/operating-root/AGENTS.md").read_text(encoding="utf-8")

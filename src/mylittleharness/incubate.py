@@ -7,14 +7,36 @@ from datetime import date
 from hashlib import sha256
 from pathlib import Path
 
+from .atomic_files import AtomicFileWrite, FileTransactionError, apply_file_transaction
 from .inventory import Inventory
 from .models import Finding
+from .parsing import parse_frontmatter
 
 
 INCUBATION_DIR_REL = "project/plan-incubation"
 INCUBATION_SOURCE = "incubate cli"
+DEFAULT_PLAN_REL = "project/implementation-plan.md"
+ROADMAP_REL = "project/roadmap.md"
 NON_AUTHORITY_NOTE = (
     "incubation is temporary synthesis; promoted research/spec/plan/state remains authority when accepted."
+)
+RELATIONSHIP_FIELDS = (
+    "related_plan",
+    "related_roadmap",
+    "related_roadmap_item",
+    "source_incubation",
+    "source_research",
+    "promoted_to",
+    "archived_to",
+    "implemented_by",
+    "archived_plan",
+    "supersedes",
+    "superseded_by",
+    "merged_into",
+    "merged_from",
+    "split_from",
+    "split_to",
+    "rejected_by",
 )
 _RESERVED_SLUGS = {
     "aux",
@@ -42,9 +64,17 @@ class IncubationTarget:
     topic: str
     note: str
     note_source: str
+    fix_candidate: bool
     slug: str
     rel_path: str
     path: Path
+
+
+@dataclass(frozen=True)
+class IncubationWritePlan:
+    text: str
+    relationship_fields: tuple[str, ...] = ()
+    relationship_skip: str = ""
 
 
 def make_incubate_request(topic: str | None, note: str | None, note_source: str = "--note", fix_candidate: bool = False) -> IncubateRequest:
@@ -79,9 +109,11 @@ def incubate_dry_run_findings(inventory: Inventory, request: IncubateRequest) ->
         )
         return findings
     assert target is not None
+    write_plan = _incubation_write_plan(inventory, target, existed=target.path.exists())
     findings.append(_note_body_finding(target))
     if request.fix_candidate:
         findings.append(Finding("info", "incubate-fix-candidate", "would record note with [MLH-Fix-Candidate] tag", target.rel_path))
+    findings.extend(_relationship_findings(target, write_plan, apply=False))
     findings.append(_note_posture_finding(target, apply=False))
     findings.extend(_boundary_findings())
     findings.append(
@@ -103,13 +135,13 @@ def incubate_apply_findings(inventory: Inventory, request: IncubateRequest) -> l
     assert target is not None
 
     existed = target.path.exists()
+    write_plan = _incubation_write_plan(inventory, target, existed=existed)
+    tmp_path = target.path.with_name(f".{target.path.name}.incubate.tmp")
+    backup_path = target.path.with_name(f".{target.path.name}.incubate.backup")
     try:
-        target.path.parent.mkdir(parents=True, exist_ok=True)
-        if existed:
-            with target.path.open("a", encoding="utf-8") as handle:
-                handle.write(_append_entry(target.note))
-        else:
-            target.path.write_text(_new_note_text(target), encoding="utf-8")
+        cleanup_warnings = apply_file_transaction(
+            (AtomicFileWrite(target.path, tmp_path, write_plan.text, backup_path),)
+        )
     except OSError as exc:
         return [Finding("error", "incubate-refused", f"incubate apply failed before all target writes completed: {exc}", target.rel_path)]
 
@@ -119,6 +151,7 @@ def incubate_apply_findings(inventory: Inventory, request: IncubateRequest) -> l
         *_target_findings(target, apply=True),
         _note_body_finding(target),
         *([Finding("info", "incubate-fix-candidate", "recorded note with [MLH-Fix-Candidate] tag", target.rel_path)] if request.fix_candidate else []),
+        *_relationship_findings(target, write_plan, apply=True),
         _note_posture_finding(target, apply=True, existed=existed),
         *_boundary_findings(),
         Finding(
@@ -128,6 +161,8 @@ def incubate_apply_findings(inventory: Inventory, request: IncubateRequest) -> l
             target.rel_path,
         ),
     ]
+    for warning in cleanup_warnings:
+        findings.append(Finding("warn", "incubate-backup-cleanup", warning, target.rel_path))
     return findings
 
 
@@ -140,6 +175,7 @@ def _incubation_target(inventory: Inventory, request: IncubateRequest) -> Incuba
         topic=request.topic,
         note=request.note,
         note_source=request.note_source,
+        fix_candidate=request.fix_candidate,
         slug=slug,
         rel_path=rel_path,
         path=inventory.root / rel_path,
@@ -264,8 +300,108 @@ def _boundary_findings() -> list[Finding]:
     ]
 
 
-def _new_note_text(target: IncubationTarget) -> str:
+def _incubation_write_plan(inventory: Inventory, target: IncubationTarget, *, existed: bool) -> IncubationWritePlan:
+    relationships = _known_active_relationships(inventory, target)
+    if not existed:
+        return IncubationWritePlan(
+            text=_new_note_text(target, relationships),
+            relationship_fields=tuple(relationships),
+            relationship_skip="" if relationships else "no active plan relationship facts were structurally known",
+        )
+
+    current_text = target.path.read_text(encoding="utf-8")
+    updated_text = current_text
+    relationship_fields: tuple[str, ...] = ()
+    relationship_skip = ""
+    if relationships:
+        updated_text, relationship_fields, relationship_skip = _text_with_relationships_if_unclaimed(current_text, relationships)
+    else:
+        relationship_skip = "no active plan relationship facts were structurally known"
+    return IncubationWritePlan(
+        text=updated_text + _append_entry(target.note),
+        relationship_fields=relationship_fields,
+        relationship_skip=relationship_skip,
+    )
+
+
+def _known_active_relationships(inventory: Inventory, target: IncubationTarget) -> dict[str, str]:
+    state = inventory.state
+    if state is None or not state.exists or not state.frontmatter.has_frontmatter or state.frontmatter.errors:
+        return {}
+    state_data = state.frontmatter.data
+    if str(state_data.get("plan_status") or "").strip() != "active":
+        return {}
+    active_plan = _normalize_rel(state_data.get("active_plan"))
+    if active_plan != DEFAULT_PLAN_REL:
+        return {}
+    plan = inventory.active_plan_surface
+    if plan is None or not plan.exists or plan.path.is_symlink() or not plan.path.is_file():
+        return {}
+
+    relationships = {"related_plan": DEFAULT_PLAN_REL}
+    if not plan.frontmatter.has_frontmatter or plan.frontmatter.errors:
+        return {} if target.fix_candidate else relationships
+
+    plan_data = plan.frontmatter.data
+    roadmap_item = _normalized_item_id(plan_data.get("primary_roadmap_item") or plan_data.get("related_roadmap_item"))
+    if target.fix_candidate and not _target_matches_active_plan(target, plan_data, roadmap_item):
+        return {}
+    if roadmap_item:
+        relationships["related_roadmap_item"] = roadmap_item
+        roadmap = inventory.root / ROADMAP_REL
+        if roadmap.is_file() and not roadmap.is_symlink():
+            relationships["related_roadmap"] = ROADMAP_REL
+    return relationships
+
+
+def _target_matches_active_plan(target: IncubationTarget, plan_data: dict[str, object], roadmap_item: str) -> bool:
+    target_keys = {_normalized_item_id(target.topic), _normalized_item_id(target.slug)}
+    candidate_keys = {
+        roadmap_item,
+        _normalized_item_id(plan_data.get("related_roadmap_item")),
+        _normalized_item_id(plan_data.get("primary_roadmap_item")),
+        _normalized_item_id(plan_data.get("execution_slice")),
+        _normalized_item_id(plan_data.get("plan_id")),
+        _normalized_item_id(plan_data.get("title")),
+    }
+    for item in _frontmatter_list_values(plan_data.get("covered_roadmap_items")):
+        candidate_keys.add(_normalized_item_id(item))
+    return bool(target_keys & {key for key in candidate_keys if key})
+
+
+def _text_with_relationships_if_unclaimed(text: str, relationships: dict[str, str]) -> tuple[str, tuple[str, ...], str]:
+    frontmatter = parse_frontmatter(text)
+    if not frontmatter.has_frontmatter:
+        return text, (), "existing note has no frontmatter; relationship metadata was left unchanged"
+    if frontmatter.errors:
+        return text, (), "existing note frontmatter is malformed; relationship metadata was left unchanged"
+    if any(_frontmatter_value_is_nonempty(frontmatter.data.get(field)) for field in RELATIONSHIP_FIELDS):
+        return text, (), "existing note already has relationship metadata; relationship metadata was left unchanged"
+
+    updates = dict(relationships)
+    updates["updated"] = date.today().isoformat()
+    return _text_with_frontmatter_scalars(text, updates), tuple(relationships), ""
+
+
+def _relationship_findings(target: IncubationTarget, plan: IncubationWritePlan, apply: bool) -> list[Finding]:
+    if plan.relationship_fields:
+        prefix = "" if apply else "would "
+        return [
+            Finding(
+                "info",
+                "incubate-relationship-sync",
+                f"{prefix}record known active-plan relationship metadata: {', '.join(plan.relationship_fields)}",
+                target.rel_path,
+            )
+        ]
+    if plan.relationship_skip and apply:
+        return [Finding("info", "incubate-relationship-skipped", plan.relationship_skip, target.rel_path)]
+    return []
+
+
+def _new_note_text(target: IncubationTarget, relationships: dict[str, str] | None = None) -> str:
     today = date.today().isoformat()
+    relationship_lines = _relationship_frontmatter_lines(relationships or {})
     return (
         "---\n"
         f'topic: "{_yaml_double_quoted_value(target.topic)}"\n'
@@ -273,6 +409,7 @@ def _new_note_text(target: IncubationTarget) -> str:
         f'created: "{today}"\n'
         f'updated: "{today}"\n'
         f'source: "{INCUBATION_SOURCE}"\n'
+        f"{relationship_lines}"
         "---\n"
         f"# {target.topic}\n\n"
         "## Provenance\n\n"
@@ -318,10 +455,72 @@ def _normalized_note(value: object) -> str:
     return str(value or "").strip()
 
 
+def _normalized_item_id(value: object) -> str:
+    return str(value or "").strip().casefold().replace("_", "-")
+
+
 def _fix_candidate_note(note: str) -> str:
     if note.lstrip().startswith("[MLH-Fix-Candidate]"):
         return note
     return f"[MLH-Fix-Candidate] {note}".strip()
+
+
+def _relationship_frontmatter_lines(relationships: dict[str, str]) -> str:
+    return "".join(f'{key}: "{_yaml_double_quoted_value(value)}"\n' for key, value in relationships.items() if value)
+
+
+def _text_with_frontmatter_scalars(text: str, updates: dict[str, str]) -> str:
+    if not updates:
+        return text
+    lines = text.splitlines(keepends=True)
+    if not lines or lines[0].strip() != "---":
+        return text
+    closing_index = None
+    for index, line in enumerate(lines[1:], start=1):
+        if line.strip() == "---":
+            closing_index = index
+            break
+    if closing_index is None:
+        return text
+
+    seen: set[str] = set()
+    for index in range(1, closing_index):
+        match = re.match(r"^([A-Za-z0-9_-]+):(.*?)(\r?\n)?$", lines[index])
+        if not match:
+            continue
+        key = match.group(1)
+        if key not in updates:
+            continue
+        newline = match.group(3) or ("\n" if lines[index].endswith("\n") else "")
+        lines[index] = f'{key}: "{_yaml_double_quoted_value(updates[key])}"{newline}'
+        seen.add(key)
+
+    missing = [key for key in updates if key not in seen]
+    if missing:
+        lines[closing_index:closing_index] = [f'{key}: "{_yaml_double_quoted_value(updates[key])}"\n' for key in missing]
+    return "".join(lines)
+
+
+def _frontmatter_value_is_nonempty(value: object) -> bool:
+    if value in (None, "", [], ()):
+        return False
+    if isinstance(value, (list, tuple, set)):
+        return any(_frontmatter_value_is_nonempty(item) for item in value)
+    return bool(str(value).strip())
+
+
+def _frontmatter_list_values(value: object) -> tuple[str, ...]:
+    if value in (None, "", [], ()):
+        return ()
+    if isinstance(value, str):
+        return (value,)
+    if isinstance(value, (list, tuple, set)):
+        return tuple(str(item) for item in value if str(item).strip())
+    return (str(value),)
+
+
+def _normalize_rel(value: object) -> str:
+    return str(value or "").replace("\\", "/").strip().strip("/")
 
 
 def _yaml_double_quoted_value(value: str) -> str:

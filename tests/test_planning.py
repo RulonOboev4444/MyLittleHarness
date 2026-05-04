@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from mylittleharness.planning import make_plan_request, render_implementation_plan
+from mylittleharness.roadmap import RoadmapSliceContract, RoadmapSynthesisReport
 
 
 class PlanningTests(unittest.TestCase):
@@ -87,6 +88,104 @@ class PlanningTests(unittest.TestCase):
             "remove-item -recurse",
         ):
             self.assertNotIn(forbidden, rendered)
+
+    def test_renderer_decomposes_roadmap_plan_when_artifact_pressure_exists(self) -> None:
+        request = make_plan_request(
+            "Generated Plan Phase Synthesis",
+            "Create meaningful generated plan phases.",
+            "Use roadmap metadata.",
+            roadmap_item="generated-plan-phase-synthesis",
+        )
+        contract = RoadmapSliceContract(
+            primary_roadmap_item="generated-plan-phase-synthesis",
+            execution_slice="generated-plan-phase-synthesis",
+            slice_goal="Synthesize meaningful phases.",
+            covered_roadmap_items=("generated-plan-phase-synthesis",),
+            domain_context="Synthesize meaningful phases.",
+            target_artifacts=(
+                "src/mylittleharness/planning.py",
+                "src/mylittleharness/grain.py",
+                "tests/test_planning.py",
+                "tests/test_cli.py",
+                "project/specs/workflow/workflow-plan-synthesis-spec.md",
+                "src/mylittleharness/templates/workflow/workflow-plan-synthesis-spec.md",
+            ),
+            execution_policy="current-phase-only",
+            closeout_boundary="explicit implementation plan closeout only",
+            source_incubation="project/plan-incubation/generated-plan-phase-synthesis-gap.md",
+            source_research="project/research/2026-05-02-plan-roadmap-hygiene-cross-distillate.md",
+            related_specs=("project/specs/workflow/workflow-plan-synthesis-spec.md",),
+        )
+        report = RoadmapSynthesisReport(
+            primary_roadmap_item="generated-plan-phase-synthesis",
+            execution_slice="generated-plan-phase-synthesis",
+            covered_roadmap_items=("generated-plan-phase-synthesis",),
+            domain_contexts=("Synthesize meaningful phases.",),
+            target_artifacts=contract.target_artifacts,
+            related_specs=contract.related_specs,
+            source_inputs=(contract.source_incubation, contract.source_research),
+            bundle_signals=("no shared slice signals beyond the requested roadmap item",),
+            split_signals=("bundle/split output is advisory and cannot approve lifecycle movement",),
+            in_slice_dependencies=(),
+            verification_summary_count=1,
+            target_artifact_pressure="6 target artifacts across 1 roadmap item; report-only sizing signal, not a hard gate",
+            phase_pressure="1 domain context and 1 verification summary; candidate plan outline: 3 phases or explicit one-shot rationale",
+        )
+
+        rendered = render_implementation_plan(request, today=date(2026, 5, 1), slice_contract=contract, synthesis_report=report)
+
+        self.assertIn("### Phase Outline", rendered)
+        self.assertIn("### phase-1-implementation", rendered)
+        self.assertIn("### phase-2-verification-and-docs", rendered)
+        self.assertIn("### phase-3-integration-and-state-transfer", rendered)
+        self.assertIn("- write_scope: `src/mylittleharness/planning.py`, `src/mylittleharness/grain.py`", rendered)
+        self.assertIn("tests/test_planning.py tests/test_cli.py", rendered)
+        self.assertIn("current-phase-only execution", rendered)
+        self.assertNotIn("Generated as one explicit current phase", rendered)
+
+    def test_renderer_records_one_shot_rationale_for_low_pressure_roadmap_plan(self) -> None:
+        request = make_plan_request(
+            "Tiny Plan",
+            "Create a small roadmap-backed plan.",
+            None,
+            roadmap_item="tiny-plan",
+            only_requested_item=True,
+        )
+        contract = RoadmapSliceContract(
+            primary_roadmap_item="tiny-plan",
+            execution_slice="tiny-plan",
+            slice_goal="Touch one product source file.",
+            covered_roadmap_items=("tiny-plan",),
+            domain_context="Touch one product source file.",
+            target_artifacts=("src/mylittleharness/planning.py",),
+            execution_policy="current-phase-only",
+            closeout_boundary="explicit closeout/writeback only",
+            source_incubation="",
+            source_research="",
+            related_specs=(),
+        )
+        report = RoadmapSynthesisReport(
+            primary_roadmap_item="tiny-plan",
+            execution_slice="tiny-plan",
+            covered_roadmap_items=("tiny-plan",),
+            domain_contexts=("Touch one product source file.",),
+            target_artifacts=contract.target_artifacts,
+            related_specs=(),
+            source_inputs=(),
+            bundle_signals=("only requested roadmap item was selected; roadmap slice siblings are not batched",),
+            split_signals=("bundle/split output is advisory and cannot approve lifecycle movement",),
+            in_slice_dependencies=(),
+            verification_summary_count=0,
+            target_artifact_pressure="1 target artifact across 1 roadmap item; report-only sizing signal, not a hard gate",
+            phase_pressure="1 domain context and 0 verification summaries; candidate plan outline: 1 phase or explicit one-shot rationale",
+        )
+
+        rendered = render_implementation_plan(request, today=date(2026, 5, 1), slice_contract=contract, synthesis_report=report)
+
+        self.assertIn("### One-Shot Rationale", rendered)
+        self.assertIn("Generated as one explicit current phase", rendered)
+        self.assertIn("### phase-1-implementation", rendered)
+        self.assertNotIn("### phase-2-verification-and-docs", rendered)
 
 
 if __name__ == "__main__":

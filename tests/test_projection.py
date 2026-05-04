@@ -141,6 +141,54 @@ class ProjectionTests(unittest.TestCase):
             self.assertTrue(target_edges)
             self.assertEqual({"product-target"}, {edge.status for edge in target_edges})
 
+    def test_projection_includes_cold_memory_routes_without_start_inventory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            archived_plan = root / "project/archive/plans/2026-05-03-cold-plan.md"
+            archived_plan.write_text(
+                "---\n"
+                'status: "complete"\n'
+                'related_research: "project/archive/reference/research/2026-05-03-cold-research.md"\n'
+                'related_decision: "project/archive/reference/decisions/2026-05-03-cold-decision.md"\n'
+                'related_adr: "project/archive/reference/adrs/0001-cold-adr.md"\n'
+                'related_verification: "project/archive/reference/verification/2026-05-03-cold-proof.md"\n'
+                "---\n"
+                "# Cold Plan\n\n"
+                "ColdMemoryNeedle plan evidence.\n",
+                encoding="utf-8",
+            )
+            for rel_path, title in (
+                ("project/archive/reference/research/2026-05-03-cold-research.md", "Cold Research"),
+                ("project/archive/reference/decisions/2026-05-03-cold-decision.md", "Cold Decision"),
+                ("project/archive/reference/adrs/0001-cold-adr.md", "Cold ADR"),
+                ("project/archive/reference/verification/2026-05-03-cold-proof.md", "Cold Proof"),
+            ):
+                path = root / rel_path
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(f"# {title}\n\nColdMemoryNeedle {title.lower()}.\n", encoding="utf-8")
+
+            inventory = load_inventory(root)
+            self.assertNotIn("project/archive/plans/2026-05-03-cold-plan.md", inventory.surface_by_rel)
+
+            projection = build_projection(inventory)
+            for rel_path in (
+                "project/archive/plans/2026-05-03-cold-plan.md",
+                "project/archive/reference/research/2026-05-03-cold-research.md",
+                "project/archive/reference/decisions/2026-05-03-cold-decision.md",
+                "project/archive/reference/adrs/0001-cold-adr.md",
+                "project/archive/reference/verification/2026-05-03-cold-proof.md",
+            ):
+                self.assertIn(rel_path, projection.source_by_path)
+                self.assertEqual(len(projection.source_by_path[rel_path].content_hash or ""), 64)
+
+            archive_edges = [
+                edge
+                for edge in projection.relationship_edges
+                if edge.source == "project/archive/plans/2026-05-03-cold-plan.md"
+            ]
+            self.assertEqual({"present"}, {edge.status for edge in archive_edges})
+            self.assertIn("project/archive/reference/verification/2026-05-03-cold-proof.md", {edge.target for edge in archive_edges})
+
     def test_projection_reports_missing_and_unreadable_source_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_root(Path(tmp), active=False, mirrors=False)
