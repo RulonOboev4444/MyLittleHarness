@@ -5,7 +5,7 @@ import hashlib
 from dataclasses import asdict
 from json import JSONDecodeError
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from .inventory import Inventory
 from .models import Finding
@@ -30,6 +30,10 @@ KNOWN_NON_JSON_PROJECTION_NAMES = (
     "search-index.sqlite3-shm",
     "search-index.sqlite3-wal",
 )
+ARTIFACT_DIRTY_MARKER_NAME = "artifacts.dirty.json"
+INDEX_DIRTY_MARKER_NAME = "index.dirty.json"
+CACHE_DIRTY_MARKER_NAMES = (ARTIFACT_DIRTY_MARKER_NAME, INDEX_DIRTY_MARKER_NAME)
+DIRTY_MARKER_SCHEMA_VERSION = 1
 PAYLOAD_HASH_ARTIFACT_NAMES = tuple(name for name in ARTIFACT_NAMES if name != "manifest.json")
 SOURCE_SET_ARTIFACT_NAMES = ("sources.json", "source-hashes.json")
 RECORD_SET_ARTIFACT_NAMES = ("links.json", "backlinks.json", "fan-in.json", "relationships.json", "summary.json")
@@ -46,6 +50,7 @@ def build_projection_artifacts(inventory: Inventory) -> list[Finding]:
     for name in ARTIFACT_NAMES:
         path = projection_dir / name
         _write_json(path, payloads[name])
+    clear_projection_cache_dirty_marker(inventory.root, ARTIFACT_DIRTY_MARKER_NAME)
 
     return [
         Finding("info", "projection-artifact-boundary", f"owned generated-output boundary: {ARTIFACT_DIR_REL}", ARTIFACT_DIR_REL),
@@ -87,7 +92,7 @@ def delete_projection_artifacts(inventory: Inventory) -> list[Finding]:
 
     deleted: list[str] = []
     blocked: list[Finding] = []
-    for name in ARTIFACT_NAMES:
+    for name in (*ARTIFACT_NAMES, ARTIFACT_DIRTY_MARKER_NAME):
         child = projection_dir / name
         if not child.exists():
             continue
@@ -116,7 +121,7 @@ def delete_projection_artifacts(inventory: Inventory) -> list[Finding]:
             *blocked,
         ]
 
-    for name in ARTIFACT_NAMES:
+    for name in (*ARTIFACT_NAMES, ARTIFACT_DIRTY_MARKER_NAME):
         child = projection_dir / name
         if not child.exists():
             continue
@@ -154,6 +159,14 @@ def inspect_projection_artifacts(inventory: Inventory, projection: Projection | 
 
     payloads: dict[str, Any] = {}
     findings.extend(_unexpected_artifact_findings(inventory.root))
+    findings.extend(
+        projection_cache_dirty_marker_findings(
+            inventory.root,
+            ARTIFACT_DIRTY_MARKER_NAME,
+            "projection-artifact-dirty",
+            "generated projection artifacts were marked dirty by a mutating workflow command; rebuild recommended",
+        )
+    )
     missing = [name for name in ARTIFACT_NAMES if not (projection_dir / name).is_file()]
     for name in missing:
         findings.append(
@@ -224,6 +237,100 @@ def inspect_projection_artifacts(inventory: Inventory, projection: Projection | 
     if not any(finding.severity == "warn" for finding in findings):
         findings.append(Finding("info", "projection-artifact-current", "generated projection artifacts match current source hashes and record counts"))
     return findings
+
+
+def mark_projection_cache_dirty(inventory: Inventory, changed_paths: Iterable[str], command: str) -> list[Finding]:
+    paths = tuple(sorted({_dirty_source_rel_path(path) for path in changed_paths if _dirty_source_rel_path(path)}))
+    if not paths:
+        return []
+
+    projection_dir = artifact_dir(inventory.root)
+    if not projection_dir.exists():
+        return []
+    preflight = _boundary_preflight(inventory.root, create=False)
+    boundary_errors = [finding for finding in preflight if finding.severity == "error"]
+    if boundary_errors:
+        reason = boundary_errors[0]
+        return [
+            Finding(
+                "warn",
+                "projection-cache-dirty-skipped",
+                f"generated projection cache dirty marker skipped because {reason.code}; source files remain authoritative",
+                reason.source or ARTIFACT_DIR_REL,
+                reason.line,
+            )
+        ]
+
+    payload = _dirty_marker_payload(command, paths)
+    written: list[str] = []
+    warnings: list[Finding] = []
+    for marker_name in CACHE_DIRTY_MARKER_NAMES:
+        marker_rel = f"{ARTIFACT_DIR_REL}/{marker_name}"
+        marker_path = projection_dir / marker_name
+        if marker_path.exists() and (marker_path.is_symlink() or marker_path.is_dir()):
+            warnings.append(
+                Finding(
+                    "warn",
+                    "projection-cache-dirty-skipped",
+                    f"generated projection cache dirty marker path is not a regular file: {marker_rel}",
+                    marker_rel,
+                )
+            )
+            continue
+        try:
+            _write_json(marker_path, payload)
+        except OSError as exc:
+            warnings.append(
+                Finding(
+                    "warn",
+                    "projection-cache-dirty-skipped",
+                    f"failed to write generated projection cache dirty marker {marker_rel}: {exc}",
+                    marker_rel,
+                )
+            )
+            continue
+        written.append(marker_rel)
+
+    if not written:
+        return warnings
+    return [
+        Finding(
+            "info",
+            "projection-cache-dirty",
+            (
+                f"marked disposable generated projection cache dirty after {command}; "
+                f"changed_paths={len(paths)}; markers={', '.join(written)}"
+            ),
+            ARTIFACT_DIR_REL,
+        ),
+        *warnings,
+    ]
+
+
+def projection_cache_dirty_marker_findings(root: Path, marker_name: str, code: str, message: str) -> list[Finding]:
+    marker_path = artifact_dir(root) / marker_name
+    marker_rel = f"{ARTIFACT_DIR_REL}/{marker_name}"
+    if not marker_path.exists():
+        return []
+    if marker_path.is_file() and not marker_path.is_symlink():
+        return [Finding("warn", code, message, marker_rel)]
+    return [
+        Finding(
+            "warn",
+            code,
+            f"generated projection cache dirty marker is malformed and can be deleted or rebuilt: {marker_rel}",
+            marker_rel,
+        )
+    ]
+
+
+def clear_projection_cache_dirty_marker(root: Path, marker_name: str) -> None:
+    marker_path = artifact_dir(root) / marker_name
+    if marker_path.exists() and marker_path.is_file() and not marker_path.is_symlink():
+        try:
+            marker_path.unlink()
+        except OSError:
+            pass
 
 
 def projection_artifact_path_query_findings(inventory: Inventory, projection: Projection, path_text: str | None) -> list[Finding]:
@@ -427,7 +534,7 @@ def artifact_payloads(inventory: Inventory, projection: Projection) -> dict[str,
 
 def _unexpected_artifact_findings(root: Path) -> list[Finding]:
     projection_dir = artifact_dir(root)
-    expected = set(ARTIFACT_NAMES) | set(KNOWN_NON_JSON_PROJECTION_NAMES)
+    expected = set(ARTIFACT_NAMES) | set(KNOWN_NON_JSON_PROJECTION_NAMES) | set(CACHE_DIRTY_MARKER_NAMES)
     findings: list[Finding] = []
     for child in sorted(projection_dir.iterdir(), key=lambda item: item.name.lower()):
         if child.name in expected:
@@ -705,6 +812,25 @@ def _write_json(path: Path, payload: Any) -> None:
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     tmp_path.write_text(rendered, encoding="utf-8")
     tmp_path.replace(path)
+
+
+def _dirty_marker_payload(command: str, paths: tuple[str, ...]) -> dict[str, Any]:
+    return {
+        "schema_version": DIRTY_MARKER_SCHEMA_VERSION,
+        "marker_kind": "mylittleharness-projection-cache-dirty",
+        "command": command,
+        "changed_paths": list(paths),
+        "authority": "repo-visible source files remain authoritative; this marker only invalidates disposable generated navigation cache",
+    }
+
+
+def _dirty_source_rel_path(value: str) -> str:
+    normalized = str(value or "").replace("\\", "/").strip().strip("/")
+    if not normalized or "\n" in normalized or ":" in normalized:
+        return ""
+    if normalized == ARTIFACT_DIR_REL or normalized.startswith(f"{ARTIFACT_DIR_REL}/"):
+        return ""
+    return normalized
 
 
 def _payload_hash(payload: Any) -> str:

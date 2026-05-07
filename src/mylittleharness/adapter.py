@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
+from pathlib import Path
 from typing import TextIO
 
 from . import __version__
-from .inventory import Inventory
+from .inventory import Inventory, RootLoadError, load_inventory
 from .models import Finding
 from .projection import Projection, build_projection
 from .projection_artifacts import inspect_projection_artifacts
@@ -16,6 +18,7 @@ MCP_READ_PROJECTION_TARGET = "mcp-read-projection"
 MCP_PROTOCOL_VERSION = "2025-11-25"
 MCP_READ_PROJECTION_TOOL = "mylittleharness.read_projection"
 MCP_READ_PROJECTION_SERVER_NAME = "mylittleharness"
+InventoryLoader = Callable[[Path | str], Inventory]
 
 
 def mcp_read_projection_sections(inventory: Inventory) -> list[tuple[str, list[Finding]]]:
@@ -29,7 +32,13 @@ def mcp_read_projection_sections(inventory: Inventory) -> list[tuple[str, list[F
     ]
 
 
-def mcp_read_projection_payload(inventory: Inventory) -> dict[str, object]:
+def mcp_read_projection_payload(
+    inventory: Inventory,
+    *,
+    default_root: Path | None = None,
+    requested_root: str | None = None,
+) -> dict[str, object]:
+    root_selection = _root_selection_payload(inventory, default_root or inventory.root, requested_root)
     sections = mcp_read_projection_sections(inventory)
     findings = [finding for _, section_findings in sections for finding in section_findings]
     return {
@@ -47,6 +56,7 @@ def mcp_read_projection_payload(inventory: Inventory) -> dict[str, object]:
             "path": str(inventory.root),
             "kind": inventory.root_kind,
         },
+        "rootSelection": root_selection,
         "status": _result_for(findings),
         "sources": inventory.sources_for_report(),
         "sections": [
@@ -63,8 +73,12 @@ def mcp_read_projection_payload(inventory: Inventory) -> dict[str, object]:
             "createsAdapterState": False,
             "authorizesLifecycle": False,
             "serveCommand": mcp_read_projection_serve_command(inventory),
-            "refreshPolicy": "adapter reports generated-input posture only; use intelligence or projection commands for explicit cache refresh",
+            "refreshPolicy": (
+                "tool calls reload the selected root inventory in memory; generated projection artifacts and SQLite indexes "
+                "remain optional inputs and are never refreshed by the adapter"
+            ),
             "fallback": "generic CLI and repo-visible files remain sufficient without MCP tooling",
+            "rootSelection": root_selection,
         },
     }
 
@@ -98,8 +112,19 @@ def mcp_read_projection_client_config(inventory: Inventory) -> dict[str, object]
         "tool": MCP_READ_PROJECTION_TOOL,
         "recommendedUse": (
             "call before or alongside CLI/file reads when route discovery, projection context, "
-            "relationship lookup, or impact checks would reduce navigation"
+            "relationship lookup, impact checks, or root selection would reduce navigation"
         ),
+        "toolInputSchema": _tool_input_schema(),
+        "rootSelection": {
+            "defaultRoot": str(inventory.root),
+            "toolArgument": "root",
+            "supportsPerCallRoot": True,
+            "refreshesInventoryPerCall": True,
+            "boundary": (
+                "per-call root selection reads another MLH-serviced root without installing scaffold, lifecycle debris, "
+                "generated cache authority, or another runtime layer"
+            ),
+        },
         "codex": {
             "configPath": "%USERPROFILE%\\.codex\\config.toml",
             "server": server,
@@ -118,7 +143,12 @@ def mcp_read_projection_client_config(inventory: Inventory) -> dict[str, object]
     }
 
 
-def serve_mcp_read_projection(inventory: Inventory, stdin: TextIO, stdout: TextIO) -> int:
+def serve_mcp_read_projection(
+    inventory: Inventory,
+    stdin: TextIO,
+    stdout: TextIO,
+    inventory_loader: InventoryLoader = load_inventory,
+) -> int:
     for line in stdin:
         raw = line.strip()
         if not raw:
@@ -128,7 +158,7 @@ def serve_mcp_read_projection(inventory: Inventory, stdin: TextIO, stdout: TextI
         except json.JSONDecodeError as exc:
             _write_message(stdout, _error_response(None, -32700, "Parse error", {"detail": str(exc)}))
             continue
-        response = _handle_jsonrpc_message(inventory, message)
+        response = _handle_jsonrpc_message(inventory, message, inventory_loader)
         if response is not None:
             _write_message(stdout, response)
     return 0
@@ -162,7 +192,7 @@ def _adapter_findings(inventory: Inventory) -> list[Finding]:
             "adapter-mcp-helper",
             (
                 "read-only MCP helper can be served with `mylittleharness --root <root> adapter --serve --target "
-                "mcp-read-projection --transport stdio`; generated inputs are reported as optional posture, not refreshed by the adapter"
+                "mcp-read-projection --transport stdio`; each tool call reloads the selected root inventory while generated inputs remain optional"
             ),
         ),
         Finding(
@@ -177,8 +207,16 @@ def _adapter_findings(inventory: Inventory) -> list[Finding]:
             "info",
             "adapter-agent-use",
             (
-                "agents should call `mylittleharness.read_projection` before or alongside CLI/file reads when projection "
-                "context helps navigation, relationship lookup, route discovery, or impact checks"
+                "agents should call `mylittleharness.read_projection` with optional root selection before or alongside CLI/file reads "
+                "when projection context helps navigation, relationship lookup, route discovery, or impact checks"
+            ),
+        ),
+        Finding(
+            "info",
+            "adapter-root-selection",
+            (
+                "mylittleharness.read_projection accepts optional `root` per call and reloads that MLH-serviced root read-only; "
+                "omitting `root` reloads the adapter startup root"
             ),
         ),
     ]
@@ -336,7 +374,19 @@ def _codex_mcp_toml(command: list[str]) -> str:
     )
 
 
-def _handle_jsonrpc_message(inventory: Inventory, message: object) -> dict[str, object] | None:
+def _root_selection_payload(inventory: Inventory, default_root: Path, requested_root: str | None) -> dict[str, object]:
+    return {
+        "defaultRoot": str(default_root),
+        "selectedRoot": str(inventory.root),
+        "requestedRoot": requested_root or "",
+        "toolArgument": "root",
+        "inventoryReloadedPerCall": True,
+        "writesFiles": False,
+        "authorizesLifecycle": False,
+    }
+
+
+def _handle_jsonrpc_message(inventory: Inventory, message: object, inventory_loader: InventoryLoader) -> dict[str, object] | None:
     if not isinstance(message, dict):
         return _error_response(None, -32600, "Invalid Request")
     request_id = message.get("id")
@@ -355,7 +405,7 @@ def _handle_jsonrpc_message(inventory: Inventory, message: object) -> dict[str, 
     if method == "tools/list":
         return _result_response(request_id, {"tools": [_tool_definition()]})
     if method == "tools/call":
-        return _tools_call_response(inventory, request_id, message.get("params"))
+        return _tools_call_response(inventory, request_id, message.get("params"), inventory_loader)
     return _error_response(request_id, -32601, f"Method not found: {method}")
 
 
@@ -370,9 +420,25 @@ def _initialize_result() -> dict[str, object]:
             "description": "Dependency-free read-only MCP stdio adapter for MyLittleHarness projection posture.",
         },
         "instructions": (
-            "Use the mylittleharness.read_projection tool as optional read/projection helper evidence only; "
+            "Use the mylittleharness.read_projection tool as optional root-aware read/projection helper evidence only; "
             "repo-visible files and the generic CLI remain authoritative."
         ),
+    }
+
+
+def _tool_input_schema() -> dict[str, object]:
+    return {
+        "type": "object",
+        "properties": {
+            "root": {
+                "type": "string",
+                "description": (
+                    "Optional filesystem path to an MLH-serviced root to read for this call. "
+                    "Omit to reload the adapter startup root."
+                ),
+            }
+        },
+        "additionalProperties": False,
     }
 
 
@@ -381,16 +447,17 @@ def _tool_definition() -> dict[str, object]:
         "name": MCP_READ_PROJECTION_TOOL,
         "title": "MyLittleHarness Read Projection",
         "description": (
-            "Return a source-bound, read-only projection summary for a MyLittleHarness root without copying source bodies "
-            "or approving lifecycle decisions."
+            "Return a source-bound, read-only projection summary for a selected MyLittleHarness root without copying source "
+            "bodies or approving lifecycle decisions."
         ),
-        "inputSchema": {"type": "object", "additionalProperties": False},
+        "inputSchema": _tool_input_schema(),
         "outputSchema": {
             "type": "object",
             "properties": {
                 "adapter": {"type": "object"},
                 "activation": {"type": "object"},
                 "root": {"type": "object"},
+                "rootSelection": {"type": "object"},
                 "status": {"type": "string"},
                 "sources": {"type": "array"},
                 "sections": {"type": "array"},
@@ -403,7 +470,12 @@ def _tool_definition() -> dict[str, object]:
     }
 
 
-def _tools_call_response(inventory: Inventory, request_id: object, params: object) -> dict[str, object]:
+def _tools_call_response(
+    inventory: Inventory,
+    request_id: object,
+    params: object,
+    inventory_loader: InventoryLoader,
+) -> dict[str, object]:
     if not isinstance(params, dict):
         return _error_response(request_id, -32602, "Invalid params: tools/call params must be an object")
     name = params.get("name")
@@ -412,26 +484,49 @@ def _tools_call_response(inventory: Inventory, request_id: object, params: objec
     arguments = params.get("arguments", {})
     if arguments is None:
         arguments = {}
-    if not isinstance(arguments, dict) or arguments:
-        return _result_response(
-            request_id,
-            {
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "Invalid arguments: mylittleharness.read_projection accepts only an empty object.",
-                    }
-                ],
-                "isError": True,
-            },
-        )
-    structured = mcp_read_projection_payload(inventory)
+    target_root, requested_root, error = _selected_root_argument(inventory, arguments)
+    if error:
+        return _tool_error_response(request_id, error)
+    try:
+        selected_inventory = inventory_loader(target_root)
+    except RootLoadError as exc:
+        return _tool_error_response(request_id, f"Invalid root: {exc}")
+
+    structured = mcp_read_projection_payload(
+        selected_inventory,
+        default_root=inventory.root,
+        requested_root=requested_root,
+    )
     return _result_response(
         request_id,
         {
             "content": [{"type": "text", "text": json.dumps(structured, sort_keys=True, indent=2, ensure_ascii=True)}],
             "structuredContent": structured,
             "isError": False,
+        },
+    )
+
+
+def _selected_root_argument(inventory: Inventory, arguments: object) -> tuple[Path | str, str | None, str | None]:
+    if not isinstance(arguments, dict):
+        return inventory.root, None, "Invalid arguments: mylittleharness.read_projection accepts an optional root string."
+    unknown = sorted(set(arguments) - {"root"})
+    if unknown:
+        return inventory.root, None, f"Invalid arguments: unknown field(s): {', '.join(unknown)}."
+    requested_root = arguments.get("root")
+    if requested_root in (None, ""):
+        return inventory.root, None, None
+    if not isinstance(requested_root, str):
+        return inventory.root, None, "Invalid arguments: root must be a string path when supplied."
+    return requested_root, requested_root, None
+
+
+def _tool_error_response(request_id: object, text: str) -> dict[str, object]:
+    return _result_response(
+        request_id,
+        {
+            "content": [{"type": "text", "text": text}],
+            "isError": True,
         },
     )
 

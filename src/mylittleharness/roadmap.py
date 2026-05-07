@@ -8,8 +8,14 @@ from pathlib import Path
 
 from .atomic_files import AtomicFileWrite, FileTransactionError, apply_file_transaction
 from .inventory import Inventory
-from .memory_hygiene import RelationshipUpdatePlan, relationship_update_plan
+from .memory_hygiene import (
+    ROADMAP_CURRENT_POSTURE_FIELD,
+    RelationshipUpdatePlan,
+    relationship_update_plan,
+    sync_roadmap_current_posture_section,
+)
 from .models import Finding
+from .reporting import RouteWriteEvidence, route_write_findings
 
 
 ROADMAP_REL = "project/roadmap.md"
@@ -17,16 +23,20 @@ DEFAULT_PLAN_REL = "project/implementation-plan.md"
 ROADMAP_STATUS_VALUES = {"proposed", "accepted", "active", "blocked", "done", "deferred", "rejected", "superseded"}
 DOCS_DECISION_VALUES = {"updated", "not-needed", "uncertain"}
 TERMINAL_QUEUE_STATUSES = {"done", "rejected", "superseded"}
+TERMINAL_RELATED_PLAN_STATUSES = {"blocked", "done", "rejected", "superseded"}
+ORDER_NAMESPACE_STATUSES = ("accepted", "proposed")
 FUTURE_QUEUE_FIELD = "future_execution_slice_queue"
 FUTURE_QUEUE_TITLE = "Future Execution Slice Queue"
 ARCHIVED_HISTORY_FIELD = "archived_completed_history"
 ARCHIVED_HISTORY_TITLE = "Archived Completed History"
+TERMINAL_RELATED_PLAN_RETARGET_FIELD = "terminal_related_plan_retarget"
 DETAILED_DONE_TAIL_LIMIT = 4
 ACCEPTED_ITEM_ORDER_FIELD = "accepted_item_order"
 ITEM_ID_LIST_FIELDS = ("dependencies", "slice_members", "slice_dependencies", "supersedes", "superseded_by")
 PATH_LIST_FIELDS = ("related_specs",)
 ARTIFACT_LIST_FIELDS = ("target_artifacts",)
 LIST_FIELDS = (*ITEM_ID_LIST_FIELDS, *PATH_LIST_FIELDS, *ARTIFACT_LIST_FIELDS)
+RELATED_INCUBATION_FIELD = "related_incubation"
 STANDARD_FIELDS = (
     "id",
     "status",
@@ -38,6 +48,7 @@ STANDARD_FIELDS = (
     "slice_closeout_boundary",
     "dependencies",
     "source_incubation",
+    RELATED_INCUBATION_FIELD,
     "source_research",
     "related_specs",
     "related_plan",
@@ -49,7 +60,17 @@ STANDARD_FIELDS = (
     "supersedes",
     "superseded_by",
 )
-PATH_FIELDS = {"source_incubation", "source_research", "related_plan", "archived_plan"}
+PATH_FIELDS = {"source_incubation", RELATED_INCUBATION_FIELD, "source_research", "related_plan", "archived_plan"}
+EMPTY_STRICT_ITEM_FIELDS = PATH_FIELDS
+SOURCE_INCUBATION_OWNERSHIP_FIELDS = (
+    "related_roadmap_item",
+    "related_roadmap",
+    "related_plan",
+    "promoted_to",
+    "implemented_by",
+    "archived_plan",
+    "archived_to",
+)
 
 
 @dataclass(frozen=True)
@@ -96,9 +117,12 @@ class RoadmapPlan:
     changed_fields: tuple[str, ...]
     reordered_item_ids: tuple[str, ...]
     compacted_item_ids: tuple[str, ...]
+    retargeted_terminal_item_ids: tuple[str, ...]
     current_text: str
     updated_text: str
     relationship_plan: RelationshipUpdatePlan | None = None
+    related_incubation_source: str = ""
+    related_incubation_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -114,6 +138,7 @@ class RoadmapSliceContract:
     source_incubation: str
     source_research: str
     related_specs: tuple[str, ...]
+    related_incubation: str = ""
 
 
 @dataclass(frozen=True)
@@ -131,6 +156,7 @@ class RoadmapSynthesisReport:
     verification_summary_count: int
     target_artifact_pressure: str
     phase_pressure: str
+    docs_update_count: int = 0
 
 
 def make_roadmap_request(
@@ -248,6 +274,163 @@ def roadmap_item_fields(inventory: Inventory, item_id: str) -> dict[str, object]
     return dict(item.fields) if item else {}
 
 
+def roadmap_item_title(inventory: Inventory, item_id: str) -> str:
+    target_path = inventory.root / ROADMAP_REL
+    if not target_path.is_file():
+        return ""
+    try:
+        text = target_path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    parse_result = _parse_roadmap_items_for_sync(text)
+    if parse_result[1]:
+        return ""
+    _items_start, _items_end, items = parse_result[0]
+    item = items.get(_normalized_item_id(item_id))
+    return str(item.title).strip() if item else ""
+
+
+def roadmap_source_incubation_consumers(
+    inventory: Inventory,
+    source_rel: str,
+    *,
+    live_only: bool = False,
+) -> tuple[str, ...]:
+    source_rel = _normalize_rel(source_rel)
+    if not source_rel:
+        return ()
+    target_path = inventory.root / ROADMAP_REL
+    if not target_path.is_file():
+        return ()
+    try:
+        text = target_path.read_text(encoding="utf-8")
+    except OSError:
+        return ()
+    parse_result = _parse_roadmap_items_for_sync(text)
+    if parse_result[1]:
+        return ()
+    _items_start, _items_end, items = parse_result[0]
+    consumers: list[str] = []
+    for item_id, item in items.items():
+        if _normalize_rel(_field_scalar(item.fields, "source_incubation")) != source_rel:
+            continue
+        status = _field_scalar(item.fields, "status").strip().casefold()
+        if live_only and status in TERMINAL_QUEUE_STATUSES:
+            continue
+        consumers.append(item_id)
+    return tuple(consumers)
+
+
+def active_plan_roadmap_item_ids(inventory: Inventory) -> tuple[str, ...]:
+    state = inventory.state
+    if state is None or not state.exists or not state.frontmatter.has_frontmatter or state.frontmatter.errors:
+        return ()
+    state_data = state.frontmatter.data
+    if str(state_data.get("plan_status") or "").strip() != "active":
+        return ()
+    if _normalize_rel(state_data.get("active_plan")) != DEFAULT_PLAN_REL:
+        return ()
+    plan = inventory.active_plan_surface
+    if plan is None or not plan.exists or plan.path.is_symlink() or not plan.path.is_file():
+        return ()
+    if not plan.frontmatter.has_frontmatter or plan.frontmatter.errors:
+        return ()
+
+    plan_data = plan.frontmatter.data
+    return tuple(
+        _dedupe_nonempty(
+            (
+                _normalized_item_id(plan_data.get("primary_roadmap_item")),
+                _normalized_item_id(plan_data.get("related_roadmap_item")),
+                *(_normalized_item_id(value) for value in _frontmatter_list_values(plan_data.get("covered_roadmap_items"))),
+            )
+        )
+    )
+
+
+def roadmap_text_with_terminal_related_plan_retargets(
+    text: str,
+    *,
+    active_item_ids: tuple[str, ...] = (),
+) -> tuple[str, tuple[str, ...]]:
+    parse_result = _parse_roadmap_items_for_sync(text)
+    if parse_result[1]:
+        return text, ()
+    _items_start, _items_end, items = parse_result[0]
+    active_ids = {_normalized_item_id(item_id) for item_id in active_item_ids if _normalized_item_id(item_id)}
+    edits: list[tuple[int, int, str, str]] = []
+    lines = text.splitlines(keepends=True)
+    for item_id, item in sorted(items.items(), key=lambda row: row[1].start, reverse=True):
+        if not _terminal_stale_active_plan_item(item_id, item, active_ids):
+            continue
+        fields = dict(item.fields)
+        archived_plan = _terminal_related_plan_retarget_value(fields)
+        fields["related_plan"] = archived_plan
+        if item.style == "legacy":
+            replacement = _render_updated_legacy_item_block(lines[item.start : item.end], ("related_plan",), fields)
+        else:
+            replacement = _render_item_block(item.title, fields)
+        edits.append((item.start, item.end, replacement, item_id))
+
+    if not edits:
+        return text, ()
+
+    for start, end, replacement, _item_id in edits:
+        lines[start:end] = [replacement]
+    retargeted = tuple(reversed([item_id for _start, _end, _replacement, item_id in edits]))
+    return "".join(lines), retargeted
+
+
+def roadmap_terminal_related_plan_findings(inventory: Inventory) -> list[Finding]:
+    if inventory.root_kind != "live_operating_root":
+        return []
+    target_path = inventory.root / ROADMAP_REL
+    if not target_path.is_file():
+        return []
+    try:
+        text = target_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return [Finding("warn", "roadmap-terminal-related-plan-read", f"project/roadmap.md could not be read for terminal related_plan diagnostics: {exc}", ROADMAP_REL)]
+    parse_result = _parse_roadmap_items_for_sync(text)
+    if parse_result[1]:
+        return []
+    _items_start, _items_end, items = parse_result[0]
+    active_ids = set(active_plan_roadmap_item_ids(inventory))
+    findings: list[Finding] = []
+    for item_id, item in sorted(items.items(), key=lambda row: (row[1].start, row[0])):
+        if not _terminal_stale_active_plan_item(item_id, item, active_ids):
+            continue
+        archived_plan = _terminal_related_plan_retarget_value(item.fields)
+        action = f"retarget to archived_plan {archived_plan!r}" if archived_plan else "clear related_plan"
+        status = _normalized_status(item.fields.get("status"))
+        findings.append(
+            Finding(
+                "warn",
+                "roadmap-terminal-stale-active-plan-link",
+                (
+                    f"terminal roadmap item {item_id!r} has status {status!r} and related_plan pointing at "
+                    f"{DEFAULT_PLAN_REL}; {action} before reusing the active implementation-plan route"
+                ),
+                ROADMAP_REL,
+                item.start + 1,
+            )
+        )
+    return findings
+
+
+def roadmap_order_namespace_findings(inventory: Inventory) -> list[Finding]:
+    if inventory.root_kind != "live_operating_root":
+        return []
+    target_path = inventory.root / ROADMAP_REL
+    if not target_path.is_file():
+        return []
+    try:
+        text = target_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return [Finding("warn", "roadmap-order-namespace-read", f"project/roadmap.md could not be read for order namespace diagnostics: {exc}", ROADMAP_REL)]
+    return _roadmap_order_namespace_findings_from_text(text)
+
+
 def roadmap_slice_contract_for_item(inventory: Inventory, item_id: str) -> RoadmapSliceContract | None:
     target_path = inventory.root / ROADMAP_REL
     if not target_path.is_file():
@@ -284,6 +467,7 @@ def roadmap_slice_contract_for_item(inventory: Inventory, item_id: str) -> Roadm
         source_incubation=_first_value_from_items([primary], "source_incubation"),
         source_research=_first_value_from_items(covered_items or [primary], "source_research"),
         related_specs=tuple(_dedupe_nonempty(_values_from_items(covered_items or [primary], "related_specs"))),
+        related_incubation=_first_value_from_items([primary], RELATED_INCUBATION_FIELD),
     )
 
 
@@ -313,6 +497,7 @@ def roadmap_synthesis_report_for_item(inventory: Inventory, item_id: str) -> Roa
         _dedupe_nonempty(
             [
                 *_values_from_items([item for _, item in covered_items], "source_incubation"),
+                *_values_from_items([item for _, item in covered_items], RELATED_INCUBATION_FIELD),
                 *_values_from_items([item for _, item in covered_items], "source_research"),
             ]
         )
@@ -322,7 +507,12 @@ def roadmap_synthesis_report_for_item(inventory: Inventory, item_id: str) -> Roa
     shared_targets = _shared_values([item for _, item in covered_items], "target_artifacts")
     shared_research = _shared_values([item for _, item in covered_items], "source_research")
     shared_incubation = _shared_values([item for _, item in covered_items], "source_incubation")
-    shared_sources = shared_research + tuple(value for value in shared_incubation if value not in shared_research)
+    shared_related_incubation = _shared_values([item for _, item in covered_items], RELATED_INCUBATION_FIELD)
+    shared_sources = shared_research + tuple(
+        value
+        for value in (*shared_incubation, *shared_related_incubation)
+        if value not in shared_research
+    )
     in_slice_dependencies = _in_slice_dependencies(covered_items, set(covered))
     external_dependencies = _external_dependencies(covered_items, set(covered))
 
@@ -350,11 +540,18 @@ def roadmap_synthesis_report_for_item(inventory: Inventory, item_id: str) -> Roa
     split_signals.append("bundle/split output is advisory and cannot approve lifecycle movement")
 
     verification_summary_count = sum(1 for _, item in covered_items if _field_scalar(item.fields, "verification_summary"))
+    docs_update_count = sum(1 for _, item in covered_items if _normalized_status(item.fields.get("docs_decision")) == "updated")
     recommended_phase_count = _recommended_phase_count(
         covered_count=len(covered),
         target_count=len(target_artifacts),
         related_spec_count=len(related_specs),
         verification_summary_count=verification_summary_count,
+        docs_update_count=docs_update_count,
+    )
+    docs_pressure = (
+        f" and {docs_update_count} docs update {_plural('decision', docs_update_count)}"
+        if docs_update_count
+        else ""
     )
     return RoadmapSynthesisReport(
         primary_roadmap_item=normalized_item_id,
@@ -374,9 +571,11 @@ def roadmap_synthesis_report_for_item(inventory: Inventory, item_id: str) -> Roa
         ),
         phase_pressure=(
             f"{len(domain_contexts)} {_plural('domain context', len(domain_contexts))} and "
-            f"{verification_summary_count} {_plural('verification summary', verification_summary_count)}; "
+            f"{verification_summary_count} {_plural('verification summary', verification_summary_count)}"
+            f"{docs_pressure}; "
             f"candidate plan outline: {recommended_phase_count} {_plural('phase', recommended_phase_count)} or explicit one-shot rationale"
         ),
+        docs_update_count=docs_update_count,
     )
 
 
@@ -390,6 +589,7 @@ def roadmap_dry_run_findings(inventory: Inventory, request: RoadmapRequest) -> l
     findings.append(Finding("info", "roadmap-action", f"requested action: {request.action or '<empty>'}; item_id: {request.item_id or '<empty>'}", ROADMAP_REL))
     if plan:
         findings.extend(_plan_findings(plan, apply=False))
+        findings.extend(_route_write_findings(plan, apply=False))
     if errors:
         findings.extend(_with_severity(errors, "warn"))
         findings.append(
@@ -425,6 +625,7 @@ def roadmap_apply_findings(inventory: Inventory, request: RoadmapRequest) -> lis
             _root_posture_finding(inventory),
             Finding("info", "roadmap-noop", "roadmap item already matches requested fields; no file was rewritten", plan.target_rel),
             *_plan_findings(plan, apply=True),
+            *_route_write_findings(plan, apply=True),
             *_boundary_findings(),
         ]
 
@@ -456,6 +657,7 @@ def roadmap_apply_findings(inventory: Inventory, request: RoadmapRequest) -> lis
         _root_posture_finding(inventory),
         Finding("info", "roadmap-written", f"updated roadmap item {plan.item_id!r} with action {plan.action!r}", plan.target_rel),
         *_plan_findings(plan, apply=True),
+        *_route_write_findings(plan, apply=True),
         *_boundary_findings(),
         Finding("info", "roadmap-validation-posture", "run check after apply to verify the live operating root remains healthy; roadmap output is not lifecycle approval", plan.target_rel),
     ]
@@ -514,19 +716,29 @@ def _roadmap_plan_from_text(
     if errors:
         return None, errors
     relationship_plan = None
+    related_incubation_source = ""
+    related_incubation_reason = ""
+    source_incubation_field: str | None = request.source_incubation if request.source_incubation else None
+    related_incubation_field: str | None = "" if request.source_incubation else None
     if request.source_incubation:
-        relationship_plan, relationship_errors = relationship_update_plan(
-            inventory,
-            request.source_incubation,
-            {
-                "related_roadmap": ROADMAP_REL,
-                "related_roadmap_item": request.item_id,
-                "promoted_to": ROADMAP_REL,
-            },
-        )
-        if relationship_errors:
-            return None, relationship_errors
-        relationship_plan = _relationship_plan_without_queued_active_plan_leak(inventory, request, relationship_plan)
+        related_incubation_reason = _reused_source_incubation_reason(inventory, request.source_incubation, request.item_id)
+        if related_incubation_reason:
+            related_incubation_source = request.source_incubation
+            related_incubation_field = related_incubation_source
+            source_incubation_field = ""
+        else:
+            relationship_plan, relationship_errors = relationship_update_plan(
+                inventory,
+                request.source_incubation,
+                {
+                    "related_roadmap": ROADMAP_REL,
+                    "related_roadmap_item": request.item_id,
+                    "promoted_to": ROADMAP_REL,
+                },
+            )
+            if relationship_errors:
+                return None, relationship_errors
+            relationship_plan = _relationship_plan_without_queued_active_plan_leak(inventory, request, relationship_plan)
 
     lines = text.splitlines(keepends=True)
     if request.action == "add":
@@ -539,18 +751,33 @@ def _roadmap_plan_from_text(
                     ROADMAP_REL,
                 )
             ]
-        fields = _new_item_fields(request)
+        fields = _new_item_fields(
+            request,
+            source_incubation=source_incubation_field,
+            related_incubation=related_incubation_source,
+        )
         block = _render_item_block(request.title, fields)
         insert_at = items_end
         if insert_at > 0 and lines[insert_at - 1].strip():
             block = "\n" + block
         updated_lines = [*lines[:insert_at], block, *lines[insert_at:]]
-        changed_fields = tuple(field for field in STANDARD_FIELDS if field in fields)
+        changed_fields = tuple(
+            field
+            for field in STANDARD_FIELDS
+            if field in fields and _should_render_item_field(field, fields.get(field, _empty_field_value(field)))
+        )
         updated_text = "".join(updated_lines)
     else:
         assert existing is not None
-        fields = _updated_item_fields(existing.fields, request)
+        fields = _updated_item_fields(
+            existing.fields,
+            request,
+            source_incubation=source_incubation_field,
+            related_incubation=related_incubation_field,
+        )
         changed_fields = tuple(field for field in STANDARD_FIELDS if existing.fields.get(field, _empty_field_value(field)) != fields.get(field, _empty_field_value(field)))
+        if changed_fields:
+            changed_fields = tuple(_dedupe_nonempty((*changed_fields, *_empty_strict_fields_present(existing.fields))))
         if changed_fields:
             block = (
                 _render_updated_legacy_item_block(lines[existing.start : existing.end], changed_fields, fields)
@@ -575,6 +802,19 @@ def _roadmap_plan_from_text(
         changed_fields = (*changed_fields, ARCHIVED_HISTORY_FIELD)
         updated_text = refreshed_text
 
+    refreshed_text, retargeted_terminal_item_ids = roadmap_text_with_terminal_related_plan_retargets(
+        updated_text,
+        active_item_ids=active_plan_roadmap_item_ids(inventory),
+    )
+    if refreshed_text != updated_text:
+        changed_fields = (*changed_fields, TERMINAL_RELATED_PLAN_RETARGET_FIELD)
+        updated_text = refreshed_text
+
+    refreshed_text = sync_roadmap_current_posture_section(updated_text)
+    if refreshed_text != updated_text:
+        changed_fields = (*changed_fields, ROADMAP_CURRENT_POSTURE_FIELD)
+        updated_text = refreshed_text
+
     return (
         RoadmapPlan(
             action=request.action,
@@ -584,9 +824,12 @@ def _roadmap_plan_from_text(
             changed_fields=changed_fields,
             reordered_item_ids=reordered_item_ids,
             compacted_item_ids=compacted_item_ids,
+            retargeted_terminal_item_ids=retargeted_terminal_item_ids,
             current_text=text,
             updated_text=updated_text,
             relationship_plan=relationship_plan,
+            related_incubation_source=related_incubation_source,
+            related_incubation_reason=related_incubation_reason,
         ),
         [],
     )
@@ -755,14 +998,15 @@ def _parse_legacy_roadmap_items(text: str) -> tuple[tuple[int, int, dict[str, Ro
             return (0, 0, {}), [Finding("error", "roadmap-refused", "project/roadmap.md frontmatter is malformed", ROADMAP_REL)]
         content_start = closing_index + 1
 
-    block_starts = [index for index in range(content_start, len(lines)) if _legacy_item_heading_match(lines[index])]
+    h2_starts = [index for index in range(content_start, len(lines)) if re.match(r"^##\s+\S", lines[index].strip())]
+    block_starts = [index for index in h2_starts if _legacy_item_heading_match(lines[index])]
     if not block_starts:
         return (0, 0, {}), []
 
     items: dict[str, RoadmapItem] = {}
     errors: list[Finding] = []
-    for position, start in enumerate(block_starts):
-        end = block_starts[position + 1] if position + 1 < len(block_starts) else len(lines)
+    for start in block_starts:
+        end = next((next_start for next_start in h2_starts if next_start > start), len(lines))
         heading_match = _legacy_item_heading_match(lines[start])
         assert heading_match is not None
         heading_id = _normalized_item_id(heading_match.group("id"))
@@ -798,35 +1042,12 @@ def _refresh_future_execution_slice_queue(text: str) -> str:
     _items_start, _items_end, items = parse_result[0]
 
     start, end = bounds
-    body = lines[start + 1 : end]
-    kept_body: list[str] = []
-    removed_completed_bullets = 0
-    remaining_queue_bullets = 0
-    for line in body:
-        item_ids = _future_queue_bullet_item_ids(line)
-        if item_ids:
-            known_statuses = [_normalized_status(items[item_id].fields.get("status")) for item_id in item_ids if item_id in items]
-            if len(known_statuses) == len(item_ids) and all(status in TERMINAL_QUEUE_STATUSES for status in known_statuses):
-                removed_completed_bullets += 1
-                continue
-            remaining_queue_bullets += 1
-        kept_body.append(line)
-
-    if not removed_completed_bullets:
-        return text
-
-    if remaining_queue_bullets:
-        replacement = [lines[start], *kept_body]
-    else:
-        replacement = [
-            lines[start],
-            "\n",
-            "No future execution slice is currently queued in this roadmap. Completed or retired slice history lives in archived plans and in terminal item metadata below.\n",
-            "\n",
-            "Open the next slice only through an explicit plan request or accepted roadmap update. Incubation notes remain possible inputs, not queued work by themselves.\n",
-            "\n",
-        ]
-    return "".join([*lines[:start], *replacement, *lines[end:]])
+    newline = "\r\n" if any(line.endswith("\r\n") for line in lines) else "\n"
+    accepted = _future_queue_status_items(items, "accepted")
+    proposed = _future_queue_status_items(items, "proposed")
+    replacement = [lines[start], *_future_queue_body_lines(accepted, proposed, newline)]
+    updated_text = "".join([*lines[:start], *replacement, *lines[end:]])
+    return text if updated_text == text else updated_text
 
 
 def _refresh_archived_completed_history(text: str) -> tuple[str, tuple[str, ...]]:
@@ -934,6 +1155,82 @@ def _future_queue_bullet_item_ids(line: str) -> tuple[str, ...]:
     if not match:
         return ()
     return tuple(_dedupe_nonempty(_normalized_item_id(value) for value in re.findall(r"`([^`]+)`", match.group(1))))
+
+
+def _future_queue_status_items(items: dict[str, RoadmapItem], status: str) -> tuple[tuple[str, RoadmapItem], ...]:
+    normalized_status = _normalized_status(status)
+    matching = [
+        (item_id, item)
+        for item_id, item in items.items()
+        if _normalized_status(item.fields.get("status")) == normalized_status
+    ]
+    return tuple(sorted(matching, key=lambda row: (_order_sort_key(row[1]), row[1].start, row[0])))
+
+
+def _future_queue_body_lines(
+    accepted: tuple[tuple[str, RoadmapItem], ...],
+    proposed: tuple[tuple[str, RoadmapItem], ...],
+    newline: str,
+) -> list[str]:
+    lines = [newline]
+    if accepted:
+        lines.append(f"{_future_queue_span_sentence('current accepted tail', accepted)}{newline}")
+        lines.append(newline)
+        lines.append(f"Accepted execution slice order:{newline}")
+        lines.extend(_future_queue_item_lines(accepted, newline))
+    else:
+        lines.append(
+            "No future execution slice is currently queued in this roadmap. Completed or retired slice history lives in archived plans and in terminal item metadata below."
+            f"{newline}"
+        )
+
+    if proposed:
+        lines.append(newline)
+        lines.append(f"{_future_queue_span_sentence('proposed later tail', proposed)} Proposed execution slices are not queued until accepted.{newline}")
+        lines.append(newline)
+        lines.append(f"Proposed execution slice order:{newline}")
+        lines.extend(_future_queue_item_lines(proposed, newline))
+
+    lines.append(newline)
+    lines.append(
+        "Open the next slice only through an explicit plan request or accepted roadmap update. Incubation notes remain possible inputs, not queued work by themselves."
+        f"{newline}"
+    )
+    lines.append(newline)
+    return lines
+
+
+def _future_queue_span_sentence(label: str, rows: tuple[tuple[str, RoadmapItem], ...]) -> str:
+    first_id, first_item = rows[0]
+    last_id, last_item = rows[-1]
+    if len(rows) == 1:
+        return f"The {label} contains `{first_id}` at order `{_future_queue_order_text(first_item)}`."
+    return (
+        f"The {label} starts at `{first_id}` at order `{_future_queue_order_text(first_item)}` "
+        f"and currently runs through `{last_id}` at order `{_future_queue_order_text(last_item)}`."
+    )
+
+
+def _future_queue_item_lines(rows: tuple[tuple[str, RoadmapItem], ...], newline: str) -> list[str]:
+    rendered: list[str] = []
+    for item_id, item in rows:
+        execution_slice = _normalized_item_id(item.fields.get("execution_slice")) or item_id
+        detail = _future_queue_detail(item)
+        suffix = f" - {detail}" if detail else ""
+        rendered.append(f"- order `{_future_queue_order_text(item)}`: `{item_id}` (`{execution_slice}`){suffix}{newline}")
+    return rendered
+
+
+def _future_queue_order_text(item: RoadmapItem) -> str:
+    value = item.fields.get("order")
+    if value in (None, ""):
+        return "unspecified"
+    return str(value).strip() or "unspecified"
+
+
+def _future_queue_detail(item: RoadmapItem) -> str:
+    detail = _field_scalar(item.fields, "slice_goal") or _field_scalar(item.fields, "carry_forward") or item.title
+    return re.sub(r"\s+", " ", detail.replace("`", "'").strip()).rstrip(".")
 
 
 def _order_accepted_item_blocks(text: str) -> tuple[str, tuple[str, ...]]:
@@ -1077,7 +1374,12 @@ def _parse_list_value(raw: str) -> list[str]:
     return [str(item) for item in value]
 
 
-def _new_item_fields(request: RoadmapRequest) -> dict[str, object]:
+def _new_item_fields(
+    request: RoadmapRequest,
+    *,
+    source_incubation: str | None = None,
+    related_incubation: str = "",
+) -> dict[str, object]:
     return {
         "id": request.item_id,
         "status": request.status,
@@ -1088,7 +1390,8 @@ def _new_item_fields(request: RoadmapRequest) -> dict[str, object]:
         "slice_dependencies": list(request.slice_dependencies),
         "slice_closeout_boundary": request.slice_closeout_boundary,
         "dependencies": list(request.dependencies),
-        "source_incubation": request.source_incubation,
+        "source_incubation": request.source_incubation if source_incubation is None else source_incubation,
+        RELATED_INCUBATION_FIELD: related_incubation,
         "source_research": request.source_research,
         "related_specs": list(request.related_specs),
         "related_plan": request.related_plan,
@@ -1102,7 +1405,13 @@ def _new_item_fields(request: RoadmapRequest) -> dict[str, object]:
     }
 
 
-def _updated_item_fields(current: dict[str, object], request: RoadmapRequest) -> dict[str, object]:
+def _updated_item_fields(
+    current: dict[str, object],
+    request: RoadmapRequest,
+    *,
+    source_incubation: str | None = None,
+    related_incubation: str | None = None,
+) -> dict[str, object]:
     fields = dict(current)
     for key in STANDARD_FIELDS:
         fields.setdefault(key, _empty_field_value(key))
@@ -1115,6 +1424,10 @@ def _updated_item_fields(current: dict[str, object], request: RoadmapRequest) ->
         if key in {"status", "order"} or not value:
             continue
         fields[key] = value
+    if source_incubation is not None:
+        fields["source_incubation"] = source_incubation
+    if related_incubation is not None:
+        fields[RELATED_INCUBATION_FIELD] = related_incubation
     if request.docs_decision:
         fields["docs_decision"] = request.docs_decision
     for key, values in _list_request_fields(request).items():
@@ -1127,6 +1440,8 @@ def _render_item_block(title: str, fields: dict[str, object]) -> str:
     lines = [f"### {title}\n", "\n"]
     for key in STANDARD_FIELDS:
         value = fields.get(key, _empty_field_value(key))
+        if not _should_render_item_field(key, value):
+            continue
         if key in LIST_FIELDS:
             rendered = json.dumps(list(value) if isinstance(value, list) else [], ensure_ascii=True)
         elif key == "order":
@@ -1136,6 +1451,24 @@ def _render_item_block(title: str, fields: dict[str, object]) -> str:
         lines.append(f"- `{key}`: `{rendered}`\n")
     lines.append("\n")
     return "".join(lines)
+
+
+def _should_render_item_field(field: str, value: object) -> bool:
+    if field in EMPTY_STRICT_ITEM_FIELDS and not _field_value_present(value):
+        return False
+    return True
+
+
+def _empty_strict_fields_present(fields: dict[str, object]) -> tuple[str, ...]:
+    return tuple(field for field in EMPTY_STRICT_ITEM_FIELDS if field in fields and not _field_value_present(fields.get(field)))
+
+
+def _field_value_present(value: object) -> bool:
+    if value in (None, "", [], ()):
+        return False
+    if isinstance(value, (list, tuple, set)):
+        return any(_field_value_present(item) for item in value)
+    return bool(str(value).strip())
 
 
 def _render_updated_legacy_item_block(block_lines: list[str], changed_fields: tuple[str, ...], fields: dict[str, object]) -> str:
@@ -1205,6 +1538,34 @@ def _legacy_quoted_value(value: object) -> str:
     return str(value or "").replace("\\", "\\\\").replace('"', '\\"')
 
 
+def _reused_source_incubation_reason(inventory: Inventory, source_rel: str, item_id: str) -> str:
+    source_path = inventory.root / source_rel
+    try:
+        text = source_path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+    related_item = _normalized_item_id(_frontmatter_scalar(text, "related_roadmap_item"))
+    if related_item:
+        if related_item == item_id:
+            return ""
+        return f"source incubation already records related_roadmap_item {related_item!r}"
+
+    related_plan = _normalize_rel(_frontmatter_scalar(text, "related_plan"))
+    if related_plan == DEFAULT_PLAN_REL and _roadmap_item_owned_by_active_plan(inventory, item_id):
+        return ""
+    if related_plan:
+        return f"source incubation already records related_plan {related_plan!r}"
+
+    for field in SOURCE_INCUBATION_OWNERSHIP_FIELDS:
+        if field in {"related_roadmap_item", "related_plan"}:
+            continue
+        value = _frontmatter_scalar(text, field)
+        if value:
+            return f"source incubation already records {field} {value!r}"
+    return ""
+
+
 def _relationship_errors(
     inventory: Inventory,
     request: RoadmapRequest,
@@ -1265,6 +1626,8 @@ def _path_relationship_errors(
 def _route_destination_allowed(field: str, rel_path: str) -> bool:
     if field == "source_incubation":
         return rel_path.startswith("project/plan-incubation/") or rel_path.startswith("project/archive/reference/incubation/")
+    if field == RELATED_INCUBATION_FIELD:
+        return rel_path.startswith("project/plan-incubation/") or rel_path.startswith("project/archive/reference/incubation/")
     if field == "source_research":
         return rel_path.startswith("project/research/") or rel_path.startswith("project/archive/reference/research/")
     if field == "related_specs":
@@ -1297,6 +1660,15 @@ def _plan_findings(plan: RoadmapPlan, apply: bool) -> list[Finding]:
                 plan.target_rel,
             )
         )
+    if plan.retargeted_terminal_item_ids:
+        findings.append(
+            Finding(
+                "info",
+                "roadmap-terminal-related-plan-retarget",
+                f"{prefix}retarget terminal roadmap related_plan link(s): {', '.join(plan.retargeted_terminal_item_ids)}",
+                plan.target_rel,
+            )
+        )
     if plan.reordered_item_ids:
         findings.append(
             Finding(
@@ -1306,9 +1678,30 @@ def _plan_findings(plan: RoadmapPlan, apply: bool) -> list[Finding]:
                 plan.target_rel,
             )
         )
+    findings.extend(_roadmap_order_namespace_findings_from_text(plan.updated_text))
+    if plan.related_incubation_source:
+        findings.append(
+            Finding(
+                "info",
+                "roadmap-related-incubation-source",
+                (
+                    f"{prefix}record reused source incubation as non-owning "
+                    f"{RELATED_INCUBATION_FIELD}: {plan.related_incubation_source}; "
+                    f"{plan.related_incubation_reason}; relationship metadata is left unchanged"
+                ),
+                plan.related_incubation_source,
+            )
+        )
     if plan.relationship_plan:
         findings.extend(_relationship_plan_findings(plan.relationship_plan, apply))
     return findings
+
+
+def _route_write_findings(plan: RoadmapPlan, apply: bool) -> list[Finding]:
+    writes = [RouteWriteEvidence(plan.target_rel, plan.current_text, plan.updated_text)]
+    if plan.relationship_plan:
+        writes.append(RouteWriteEvidence(plan.relationship_plan.target_rel, plan.relationship_plan.current_text, plan.relationship_plan.updated_text))
+    return route_write_findings("roadmap-route-write", tuple(writes), apply=apply)
 
 
 def _relationship_plan_findings(plan: RelationshipUpdatePlan, apply: bool) -> list[Finding]:
@@ -1325,6 +1718,92 @@ def _relationship_plan_findings(plan: RelationshipUpdatePlan, apply: bool) -> li
     else:
         findings.append(Finding("info", "roadmap-relationship-noop", "source incubation relationship metadata already matches requested roadmap item", plan.source_rel))
     return findings
+
+
+def _roadmap_order_namespace_findings_from_text(text: str) -> list[Finding]:
+    parse_result = _parse_roadmap_items_for_sync(text)
+    if parse_result[1]:
+        return []
+    _items_start, _items_end, items = parse_result[0]
+    findings: list[Finding] = []
+    for status in ORDER_NAMESPACE_STATUSES:
+        rows = tuple(
+            sorted(
+                (
+                    (item_id, item)
+                    for item_id, item in items.items()
+                    if _normalized_status(item.fields.get("status")) == status
+                ),
+                key=lambda row: (_order_sort_key(row[1]), row[1].start, row[0]),
+            )
+        )
+        if not rows:
+            continue
+        findings.append(
+            Finding(
+                "info",
+                "roadmap-order-namespace",
+                (
+                    f"status-scoped order namespace {status!r} {_order_namespace_span_text(rows)}; "
+                    "duplicate order values are checked only inside this status namespace"
+                ),
+                ROADMAP_REL,
+                rows[0][1].start + 1,
+            )
+        )
+        for order, duplicates in _duplicate_order_groups(rows):
+            findings.append(
+                Finding(
+                    "warn",
+                    "roadmap-order-namespace-duplicate",
+                    (
+                        f"status-scoped order namespace {status!r} reuses order {order!r} "
+                        f"for roadmap items: {', '.join(item_id for item_id, _item in duplicates)}"
+                    ),
+                    ROADMAP_REL,
+                    duplicates[1][1].start + 1,
+                )
+            )
+    return findings
+
+
+def _order_namespace_span_text(rows: tuple[tuple[str, RoadmapItem], ...]) -> str:
+    first_id, first_item = rows[0]
+    if len(rows) == 1:
+        return f"contains `{first_id}` at order `{_future_queue_order_text(first_item)}`"
+    last_id, last_item = rows[-1]
+    return (
+        f"starts at `{first_id}` at order `{_future_queue_order_text(first_item)}` "
+        f"and runs through `{last_id}` at order `{_future_queue_order_text(last_item)}`"
+    )
+
+
+def _duplicate_order_groups(rows: tuple[tuple[str, RoadmapItem], ...]) -> tuple[tuple[str, tuple[tuple[str, RoadmapItem], ...]], ...]:
+    buckets: dict[str, list[tuple[str, RoadmapItem]]] = {}
+    for item_id, item in rows:
+        order = _explicit_order_text(item)
+        if not order:
+            continue
+        buckets.setdefault(order, []).append((item_id, item))
+    return tuple(
+        (order, tuple(duplicates))
+        for order, duplicates in sorted(buckets.items(), key=lambda row: _order_text_sort_key(row[0]))
+        if len(duplicates) > 1
+    )
+
+
+def _explicit_order_text(item: RoadmapItem) -> str:
+    value = item.fields.get("order")
+    if value in (None, ""):
+        return ""
+    return str(value).strip()
+
+
+def _order_text_sort_key(value: str) -> tuple[int, int | str]:
+    try:
+        return (0, int(value))
+    except ValueError:
+        return (1, value)
 
 
 def _relationship_plan_without_queued_active_plan_leak(
@@ -1348,29 +1827,24 @@ def _relationship_plan_without_queued_active_plan_leak(
     return replace(plan, updated_text=updated_text, changed_fields=changed_fields)
 
 
-def _roadmap_item_owned_by_active_plan(inventory: Inventory, item_id: str) -> bool:
-    state = inventory.state
-    if state is None or not state.exists or not state.frontmatter.has_frontmatter or state.frontmatter.errors:
+def _terminal_stale_active_plan_item(item_id: str, item: RoadmapItem, active_item_ids: set[str]) -> bool:
+    status = _normalized_status(item.fields.get("status"))
+    if status not in TERMINAL_RELATED_PLAN_STATUSES:
         return False
-    state_data = state.frontmatter.data
-    if str(state_data.get("plan_status") or "").strip() != "active":
+    if _normalized_item_id(item_id) in active_item_ids:
         return False
-    if _normalize_rel(state_data.get("active_plan")) != DEFAULT_PLAN_REL:
-        return False
-    plan = inventory.active_plan_surface
-    if plan is None or not plan.exists or plan.path.is_symlink() or not plan.path.is_file():
-        return False
-    if not plan.frontmatter.has_frontmatter or plan.frontmatter.errors:
-        return False
+    return _normalize_rel(_field_scalar(item.fields, "related_plan")) == DEFAULT_PLAN_REL
 
-    normalized_item_id = _normalized_item_id(item_id)
-    plan_data = plan.frontmatter.data
-    owned_items = {
-        _normalized_item_id(plan_data.get("primary_roadmap_item")),
-        _normalized_item_id(plan_data.get("related_roadmap_item")),
-    }
-    owned_items.update(_normalized_item_id(value) for value in _frontmatter_list_values(plan_data.get("covered_roadmap_items")))
-    return normalized_item_id in owned_items
+
+def _terminal_related_plan_retarget_value(fields: dict[str, object]) -> str:
+    archived_plan = _normalize_rel(_field_scalar(fields, "archived_plan"))
+    if archived_plan.startswith("project/archive/plans/") and archived_plan != DEFAULT_PLAN_REL:
+        return archived_plan
+    return ""
+
+
+def _roadmap_item_owned_by_active_plan(inventory: Inventory, item_id: str) -> bool:
+    return _normalized_item_id(item_id) in set(active_plan_roadmap_item_ids(inventory))
 
 
 def _source_text_is_fix_candidate(text: str) -> bool:
@@ -1578,6 +2052,7 @@ def _recommended_phase_count(
     target_count: int,
     related_spec_count: int,
     verification_summary_count: int,
+    docs_update_count: int = 0,
 ) -> int:
     pressure = 0
     if covered_count > 1:
@@ -1590,6 +2065,8 @@ def _recommended_phase_count(
         pressure += 1
     if verification_summary_count > 0:
         pressure += 1
+    if docs_update_count > 0:
+        pressure += 2
     if pressure <= 1:
         return 1
     if pressure <= 2:

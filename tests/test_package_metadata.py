@@ -13,6 +13,10 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "build_backend"))
 
 from mylittleharness import __version__
+from mylittleharness.agent_roles import role_manifest as agent_role_manifest
+from mylittleharness.agent_roles import role_profile_for_id, roles_with_apply_authority
+from mylittleharness.command_discovery import command_intent_registry, command_suggestions_for_intent
+from mylittleharness.routes import route_manifest, route_protocol_for_id
 import mylittleharness_build
 
 
@@ -42,6 +46,8 @@ class PackageMetadataTests(unittest.TestCase):
                 names = set(wheel.namelist())
 
         self.assertIn("mylittleharness/templates/operating-root/AGENTS.md", names)
+        self.assertIn("mylittleharness/agent_roles.py", names)
+        self.assertIn("mylittleharness/command_discovery.py", names)
         self.assertIn("mylittleharness/templates/workflow/workflow-artifact-model-spec.md", names)
         self.assertIn("mylittleharness/templates/workflow/workflow-plan-synthesis-spec.md", names)
 
@@ -224,13 +230,14 @@ class PackageMetadataTests(unittest.TestCase):
         self.assertIn("Partial closeout updates may carry existing facts only when the recorded identity matches", metadata)
         self.assertIn("plan-identity carry/replace/refusal guardrail", cli_spec)
         self.assertIn("Lifecycle `phase_status = complete` becomes `done` in the phase body", docs_readme)
-        self.assertIn("Archive-active-plan refuses pending lifecycle state", cli_spec)
+        self.assertIn("Archive-active-plan refuses uncompleted lifecycle state", cli_spec)
+        self.assertIn("same reviewed writeback request supplies `--phase-status complete`", cli_spec)
         self.assertIn("synchronized completed `status`/`phase_status` derived copies", docs_readme)
         self.assertIn("ready-for-closeout boundary", metadata)
         self.assertIn("post-writeback plus compact-only operating-memory compaction", docs_readme)
         self.assertIn("`writeback --dry-run|--apply --compact-only`", docs_readme)
         self.assertIn("State compaction selection scans the whole `project/project-state.md`", docs_readme)
-        self.assertIn("default 250-line threshold", metadata)
+        self.assertIn("default 250-line or 25,000-character threshold", metadata)
 
     def test_optional_adapter_docs_reject_skill_owned_memory(self) -> None:
         adapter = (ROOT / "docs/specs/adapter-boundary.md").read_text(encoding="utf-8")
@@ -243,6 +250,159 @@ class PackageMetadataTests(unittest.TestCase):
         ):
             self.assertIn(expected, adapter)
         self.assertIn("must not store the only copy of accepted decisions, current focus, docs decisions, repair approval, verification, or closeout evidence", readme)
+
+    def test_v2_architecture_foundation_docs_reject_swarm_runtime(self) -> None:
+        docs_readme = (ROOT / "docs/README.md").read_text(encoding="utf-8")
+        authority = (ROOT / "docs/specs/authority-and-memory.md").read_text(encoding="utf-8")
+        metadata = (ROOT / "docs/specs/metadata-routing-and-evidence.md").read_text(encoding="utf-8")
+        adapter = (ROOT / "docs/specs/adapter-boundary.md").read_text(encoding="utf-8")
+
+        for expected in (
+            "V2 Architecture Direction",
+            "deterministic State around the target repository",
+            "Route manifests and structured findings come before role profiles",
+            "`manifest --inspect --json`",
+            "`role_manifest`",
+            "Product docs should continue rejecting `swarm run` as the first v2 command",
+        ):
+            self.assertIn(expected, docs_readme)
+        for expected in (
+            "V2 Agent Governance Foundation",
+            "route manifest and structured findings",
+            "role profiles describe allowed reads",
+            "No role profile carries direct apply authority",
+            "handoff packets and work claims",
+            "review tokens and approval packets",
+            "not imply `swarm run`, hidden queues, provider credentials, model gateway behavior",
+        ):
+            self.assertIn(expected, authority)
+        for expected in (
+            "V2 Governance Metadata",
+            "`gate_class`",
+            "`provider`",
+            "`model_id`",
+            "Reconcile output is proposal metadata only",
+            "must not silently edit accepted specs to match implementation",
+        ):
+            self.assertIn(expected, metadata)
+        for expected in (
+            "V2 External Orchestrator Boundary",
+            "`manifest --inspect --json` exposes `route_manifest` and advisory `role_manifest`",
+            "provider/model/tool routing is policy metadata before it is runtime ownership",
+            "optional relay adapters may transport approval packets only after core packets and review tokens exist",
+            "Do not add a hidden swarm runtime",
+        ):
+            self.assertIn(expected, adapter)
+
+    def test_route_manifest_protocol_shape_is_package_stable(self) -> None:
+        manifest = {row["route_id"]: row for row in route_manifest()}
+
+        self.assertIn("state", manifest)
+        self.assertIn("active-plan", manifest)
+        self.assertIn("agent-runs", manifest)
+        self.assertIn("generated-cache", manifest)
+        state = manifest["state"]
+        self.assertEqual("project/project-state.md", state["target"])
+        for key in (
+            "authority",
+            "start_path",
+            "mutability",
+            "human_gate",
+            "gate_class",
+            "human_gate_reason",
+            "allowed_decisions",
+            "advisory",
+        ):
+            self.assertIn(key, state)
+        self.assertEqual("lifecycle", state["gate_class"])
+        self.assertIn("writeback", state["allowed_decisions"])
+        protocol = route_protocol_for_id("generated-cache")
+        self.assertEqual("generated-rebuildable", protocol["mutability"])
+        self.assertFalse(protocol["human_gate"]["required"])
+        agent_runs = manifest["agent-runs"]
+        self.assertEqual("project/verification/agent-runs/*.md", agent_runs["target"])
+        self.assertEqual("evidence", agent_runs["gate_class"])
+        self.assertIn("record", agent_runs["allowed_decisions"])
+        self.assertTrue(agent_runs["advisory"])
+
+    def test_agent_role_manifest_protocol_shape_is_package_stable(self) -> None:
+        roles = {row["role_id"]: row for row in agent_role_manifest()}
+
+        for role_id in (
+            "intake-clerk",
+            "researcher",
+            "specifier",
+            "planner",
+            "coder",
+            "reviewer",
+            "verifier",
+            "devops-sandbox-operator",
+            "reconciler",
+            "archivist",
+            "governor",
+        ):
+            self.assertIn(role_id, roles)
+        self.assertEqual((), roles_with_apply_authority())
+        self.assertEqual("coder", role_profile_for_id("coder").role_id)
+        self.assertIsNone(role_profile_for_id("missing"))
+
+        coder = roles["coder"]
+        for key in (
+            "purpose",
+            "default_inputs",
+            "context_packet_requirements",
+            "required_outputs",
+            "output_packet_requirements",
+            "permissions",
+            "human_gates",
+            "forbidden_actions",
+            "stop_conditions",
+            "apply_authority",
+            "advisory",
+        ):
+            self.assertIn(key, coder)
+        self.assertFalse(coder["apply_authority"])
+        self.assertIn("changed_paths", coder["output_packet_requirements"])
+        self.assertIn("change lifecycle state", coder["forbidden_actions"])
+
+        permission = next(row for row in coder["permissions"] if row["route_id"] == "verification")
+        for key in (
+            "read",
+            "propose",
+            "apply",
+            "requires_human_gate",
+            "gate_class",
+            "mutability",
+            "allowed_decisions",
+            "human_gate",
+            "advisory",
+        ):
+            self.assertIn(key, permission)
+        self.assertTrue(permission["read"])
+        self.assertTrue(permission["propose"])
+        self.assertFalse(permission["apply"])
+        self.assertIsInstance(permission["human_gate"]["allowed_decisions"], list)
+        self.assertTrue(any(row["human_gate"]["required"] for row in roles["planner"]["permissions"]))
+
+    def test_command_discovery_registry_shape_is_package_stable(self) -> None:
+        registry = {entry.intent_id: entry for entry in command_intent_registry()}
+
+        for intent_id in (
+            "start-pass",
+            "repair-preview",
+            "open-active-plan",
+            "archive-active-plan",
+            "command-discovery",
+        ):
+            self.assertIn(intent_id, registry)
+            self.assertIn("mylittleharness --root <root>", registry[intent_id].first_safe_command)
+            self.assertTrue(registry[intent_id].boundary)
+
+        archive = command_suggestions_for_intent("archive active plan", limit=1)[0]
+        self.assertEqual("archive-active-plan", archive.intent_id)
+        self.assertIn("writeback --dry-run --archive-active-plan", archive.first_safe_command)
+        self.assertIn("--phase-status complete", archive.first_safe_command)
+        self.assertIn("does not stage, commit, push", archive.boundary)
 
     def test_default_mcp_agent_tooling_docs_are_optional_and_read_only(self) -> None:
         template = (ROOT / "src/mylittleharness/templates/operating-root/AGENTS.md").read_text(encoding="utf-8")
@@ -274,6 +434,19 @@ class PackageMetadataTests(unittest.TestCase):
             "cannot approve lifecycle decisions",
         ):
             self.assertIn(expected, projection_spec)
+        for expected in (
+            "optional string `root` tool argument",
+            "reloads the selected MLH-serviced root inventory",
+            "non-string `root` values",
+        ):
+            self.assertIn(expected, cli_spec)
+        for expected in (
+            "optional per-call `root` selection",
+            "switching inspection between MLH-serviced roots",
+            "reloads the selected root inventory in memory for each call",
+        ):
+            self.assertIn(expected, projection_spec)
+        self.assertNotIn("accepts only an empty-object tool argument shape", cli_spec)
 
     def test_rule_context_drift_docs_keep_check_compact(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -307,8 +480,8 @@ class PackageMetadataTests(unittest.TestCase):
             "## Command Classification",
             "| Public operator utility | `init`, `check`, `repair`, `detach` |",
             "| Hidden compatibility diagnostics | `status`, `validate`, `audit-links`, `context-budget`, `doctor` |",
-            "| Advanced and recovery diagnostics | `intelligence`, `projection`, `snapshot`, `adapter`, `preflight` |",
-            "| Closeout and reporting | `evidence`, `closeout` |",
+            "| Advanced and recovery diagnostics | `suggest --intent`, `intelligence`, `manifest --inspect`, `projection`, `snapshot`, `adapter`, `preflight` |",
+            "| Closeout and reporting | `evidence`, `evidence --record --dry-run`, `evidence --record --apply`, `closeout` |",
             "| Closeout/state writeback | `writeback --dry-run`, `writeback --apply` |",
             "| Incubation write rail | `incubate --dry-run`, `incubate --apply` |",
             "| Plan synthesis write rail | `plan --dry-run`, `plan --apply` |",
@@ -319,6 +492,11 @@ class PackageMetadataTests(unittest.TestCase):
             "`check --deep` is read-only",
             "optional `project/roadmap.md` sequencing",
             "`check --focus validation|links|context|hygiene|grain` is read-only",
+            "`suggest --intent <operator-action>`",
+            "command intent suggestions are advisory",
+            "manifest --inspect --json",
+            "role_manifest",
+            "required outputs, context/output packet requirements, gate classes, and human gates",
             "product-source target artifact references",
             "product-target-artifact",
             "report-only grain diagnostics",
@@ -347,6 +525,7 @@ class PackageMetadataTests(unittest.TestCase):
             "closeout_boundary",
             "plan-synthesis-bundle-rationale",
             "plan-synthesis-target-artifact-pressure",
+            "plan-docs-write-scope-impact",
             "Plan Synthesis Notes",
             "target_artifact_pressure",
             "phase_pressure",
@@ -363,6 +542,8 @@ class PackageMetadataTests(unittest.TestCase):
             "intake --dry-run",
             "`intake --apply`",
             "reciprocal source-incubation",
+            "non-owning `related_incubation`",
+            "relationship frontmatter block recovery",
             "coverage-aware incubation auto-archive",
             "Route metadata diagnostics are read-only validation",
             "route-metadata-frontmatter",
@@ -380,7 +561,9 @@ class PackageMetadataTests(unittest.TestCase):
         self.assertIn("hidden incubate same-topic note rail", pyproject["project"]["description"])
         self.assertIn("hidden deterministic plan synthesis rail", pyproject["project"]["description"])
         self.assertIn("roadmap slice frontmatter", pyproject["project"]["description"])
-        self.assertIn("bounded plan-synthesis rationale and target-artifact pressure reporting", pyproject["project"]["description"])
+        self.assertIn("bounded plan-synthesis rationale", pyproject["project"]["description"])
+        self.assertIn("target-artifact pressure reporting", pyproject["project"]["description"])
+        self.assertIn("docs write-scope impact reporting", pyproject["project"]["description"])
         self.assertIn("current-phase-only execution metadata", pyproject["project"]["description"])
         self.assertIn("explicit ready-for-closeout boundary", pyproject["project"]["description"])
         self.assertIn("explicit auto_continue stop-condition diagnostics", pyproject["project"]["description"])
@@ -392,6 +575,8 @@ class PackageMetadataTests(unittest.TestCase):
         self.assertIn("coverage-aware incubation auto-archive", pyproject["project"]["description"])
         self.assertIn("text audit and entry coverage suggestions", pyproject["project"]["description"])
         self.assertIn("reciprocal source-incubation metadata", pyproject["project"]["description"])
+        self.assertIn("non-owning source-incubation reuse provenance", pyproject["project"]["description"])
+        self.assertIn("relationship frontmatter block recovery", pyproject["project"]["description"])
         self.assertIn("hidden plan/writeback roadmap relationship sync", pyproject["project"]["description"])
         self.assertIn("project-state closeout authority fallback", pyproject["project"]["description"])
         self.assertIn("product_source_root writeback", pyproject["project"]["description"])
@@ -399,12 +584,14 @@ class PackageMetadataTests(unittest.TestCase):
         self.assertIn("archive-covered Entry Coverage transactions", pyproject["project"]["description"])
         self.assertIn("plan-identity carry/replace guardrail", pyproject["project"]["description"])
         self.assertIn("post-writeback and compact-only whole-state compaction", pyproject["project"]["description"])
-        self.assertIn("optional proof/evidence route records", pyproject["project"]["description"])
+        self.assertIn("optional proof/evidence and agent run evidence route records", pyproject["project"]["description"])
         self.assertIn("report-only grain diagnostics and archived-plan calibration samples", pyproject["project"]["description"])
+        self.assertIn("hidden deterministic command intent suggestions", pyproject["project"]["description"])
 
     def test_phase_execution_policy_docs_are_current_phase_only(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         docs_readme = (ROOT / "docs/README.md").read_text(encoding="utf-8")
+        cli_spec = (ROOT / "docs/specs/attach-repair-status-cli.md").read_text(encoding="utf-8")
         authority = (ROOT / "docs/specs/authority-and-memory.md").read_text(encoding="utf-8")
         metadata = (ROOT / "docs/specs/metadata-routing-and-evidence.md").read_text(encoding="utf-8")
         plan_synthesis = (ROOT / "project/specs/workflow/workflow-plan-synthesis-spec.md").read_text(encoding="utf-8")
@@ -429,6 +616,11 @@ class PackageMetadataTests(unittest.TestCase):
         self.assertIn("writeback --active-phase <next-phase> --phase-status pending", closeout_template)
         self.assertIn("verification success alone does not authorize the next phase", rollout_template)
         self.assertIn("Closeout preparation remains an explicit boundary", closeout_template)
+        self.assertIn("repo-visible verification command discovery", docs_readme)
+        self.assertIn("plan-verification-gate-unresolved", cli_spec)
+        self.assertIn("active-plan-verification-gate-toolchain-mismatch", metadata)
+        self.assertIn("UNRESOLVED", plan_synthesis_template)
+        self.assertIn("toolchain-mismatched verification gates", closeout_template)
         self.assertIn("Phase Outline", plan_synthesis_template)
         self.assertIn("one-shot rationale", plan_synthesis_template)
         self.assertIn("under-decomposed", rollout_template)
@@ -442,6 +634,8 @@ class PackageMetadataTests(unittest.TestCase):
 
         self.assertLessEqual(len(template.splitlines()), 20)
         self.assertIn("Use MLH lifecycle routes instead of ad hoc memory pockets", template)
+        self.assertNotIn("agent-operability micro-friction", template)
+        self.assertIn("opt-in `meta-feedback`", readme)
         self.assertNotIn("future-optional", template)
         for expected in (
             "`status`, `check`, and `intelligence --focus routes`",
@@ -459,6 +653,8 @@ class PackageMetadataTests(unittest.TestCase):
         self.assertIn("optional accepted-work sequencing lives at `project/roadmap.md`", template)
         self.assertIn("optional sequencing authority for accepted work", capability_roadmap)
         self.assertIn("accepted relationship vocabulary", capability_roadmap)
+        self.assertIn("`related_incubation`", capability_roadmap)
+        self.assertIn("relationship frontmatter block recovery", capability_roadmap)
         self.assertIn("project/archive/reference/incubation/**", capability_roadmap)
         self.assertIn("Coverage-aware incubation auto-archive is allowed only", capability_roadmap)
         self.assertIn("Entry Coverage", capability_roadmap)
@@ -475,6 +671,7 @@ class PackageMetadataTests(unittest.TestCase):
             self.assertIn("route-metadata", doc)
         self.assertIn("implemented read-only route metadata diagnostic path", metadata)
         self.assertIn("does not repair metadata", metadata)
+        self.assertIn("relationship frontmatter block recovery happens only", metadata)
         self.assertIn("intentionally excluded from repair proposals", cli_spec)
 
 

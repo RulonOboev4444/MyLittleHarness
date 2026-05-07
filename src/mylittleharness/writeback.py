@@ -10,18 +10,38 @@ from .inventory import Inventory, Surface
 from .lifecycle_focus import sync_current_focus_block
 from .memory_hygiene import (
     ARCHIVE_INCUBATION_DIR_REL,
+    ROADMAP_CURRENT_POSTURE_FIELD,
     RelationshipUpdatePlan,
     incubation_closeout_plan,
     incubation_entry_coverage_report,
     relationship_update_plan,
+    sync_roadmap_current_posture_section,
 )
 from .models import Finding
-from .roadmap import ROADMAP_STATUS_VALUES, RoadmapPlan, make_roadmap_request, roadmap_item_fields, roadmap_plans_for_requests
+from .parsing import parse_frontmatter
+from .reporting import (
+    RouteWriteEvidence,
+    render_work_result_capsule_line,
+    route_write_findings,
+    work_result_capsule_from_closeout_values,
+)
+from .roadmap import (
+    ROADMAP_STATUS_VALUES,
+    TERMINAL_RELATED_PLAN_RETARGET_FIELD,
+    RoadmapPlan,
+    active_plan_roadmap_item_ids,
+    make_roadmap_request,
+    roadmap_item_fields,
+    roadmap_plans_for_requests,
+    roadmap_source_incubation_consumers,
+    roadmap_text_with_terminal_related_plan_retargets,
+)
 
 
 WRITEBACK_BEGIN = "<!-- BEGIN mylittleharness-closeout-writeback v1 -->"
 WRITEBACK_END = "<!-- END mylittleharness-closeout-writeback v1 -->"
 STATE_COMPACTION_LINE_THRESHOLD = 250
+STATE_COMPACTION_CHAR_THRESHOLD = 25_000
 
 CLOSEOUT_WRITEBACK_FIELDS = (
     "worktree_start_state",
@@ -32,11 +52,13 @@ CLOSEOUT_WRITEBACK_FIELDS = (
     "commit_decision",
     "residual_risk",
     "carry_forward",
+    "work_result",
 )
 CLOSEOUT_IDENTITY_FIELDS = ("plan_id", "active_plan", "archived_plan")
 LIFECYCLE_WRITEBACK_FIELDS = ("active_phase", "phase_status", "last_archived_plan", "product_source_root")
 DOCS_DECISION_VALUES = {"updated", "not-needed", "uncertain"}
 PHASE_STATUS_VALUES = {"pending", "active", "in_progress", "blocked", "complete", "skipped", "paused"}
+UNSUCCESSFUL_ARCHIVE_ROADMAP_PHASE_STATUS = {"blocked": "blocked", "superseded": "skipped"}
 PHASE_BODY_COMPLETE_STATUS = "done"
 PHASE_BODY_STATUS_VALUES = {*PHASE_STATUS_VALUES, PHASE_BODY_COMPLETE_STATUS}
 PHASE_HANDOFF_TERMINAL_STATUS_VALUES = {"complete", "done", "skipped"}
@@ -77,6 +99,7 @@ _FIELD_LABELS = {
     "commit_decision": ("commit_decision", "commit decision"),
     "residual_risk": ("residual_risk", "residual risk", "residual risks"),
     "carry_forward": ("carry_forward", "carry-forward", "carry forward"),
+    "work_result": ("work_result", "work result", "work result capsule", "result capsule"),
 }
 
 
@@ -126,9 +149,11 @@ class WritebackRequest:
     lifecycle: dict[str, str]
     archive_active_plan: bool = False
     compact_only: bool = False
+    allow_auto_compaction: bool = False
     from_active_plan: bool = False
     roadmap_item: str = ""
     roadmap_status: str = ""
+    archived_plan: str = ""
     archive_retarget_skip_rels: tuple[str, ...] = ()
     input_errors: tuple[str, ...] = ()
 
@@ -177,9 +202,11 @@ class BodySectionSpan:
 def make_writeback_request(
     archive_active_plan: bool = False,
     compact_only: bool = False,
+    allow_auto_compaction: bool = False,
     from_active_plan: bool = False,
     roadmap_item: str | None = None,
     roadmap_status: str | None = None,
+    archived_plan: str | None = None,
     archive_retarget_skip_rels: tuple[str, ...] | list[str] = (),
     **values: str | None,
 ) -> WritebackRequest:
@@ -199,9 +226,11 @@ def make_writeback_request(
         lifecycle=lifecycle,
         archive_active_plan=archive_active_plan,
         compact_only=compact_only,
+        allow_auto_compaction=allow_auto_compaction,
         from_active_plan=from_active_plan,
         roadmap_item=_normalized_item_id(roadmap_item),
         roadmap_status=_normalized_status(roadmap_status),
+        archived_plan=_normalize_rel(_normalized_value(archived_plan)),
         archive_retarget_skip_rels=tuple(_dedupe_nonempty(_normalize_rel(rel) for rel in archive_retarget_skip_rels)),
         input_errors=input_errors,
     )
@@ -449,13 +478,18 @@ def writeback_dry_run_findings(inventory: Inventory, request: WritebackRequest) 
         return findings
 
     archive_plan = _archive_plan(inventory, request)
-    closeout_plan = _closeout_writeback_plan(inventory, request, archive_plan.archive_rel_path if archive_plan else None)
+    archive_context_rel = archive_plan.archive_rel_path if archive_plan else request.archived_plan or None
+    closeout_plan = _closeout_writeback_plan(inventory, request, archive_context_rel)
     planned = closeout_plan.values
     findings.append(_planned_closeout_finding(planned))
     findings.extend(_closeout_writeback_plan_findings(closeout_plan, apply=False))
-    planned_lifecycle = _planned_lifecycle_values(request, archive_plan.archive_rel_path if archive_plan else None)
+    planned_lifecycle = _planned_lifecycle_values(
+        request,
+        archive_plan.archive_rel_path if archive_plan else None,
+        _archive_phase_status(inventory, request) if archive_plan else "",
+    )
     active_plan_lifecycle = _active_plan_lifecycle_values(inventory, request, planned_lifecycle)
-    roadmap_plan, roadmap_errors = _writeback_roadmap_plan(inventory, request, archive_plan.archive_rel_path if archive_plan else None)
+    roadmap_plan, roadmap_errors = _writeback_roadmap_plan(inventory, request, archive_context_rel)
     if roadmap_errors:
         findings.extend(_with_severity(roadmap_errors, "warn"))
         findings.append(
@@ -466,7 +500,7 @@ def writeback_dry_run_findings(inventory: Inventory, request: WritebackRequest) 
             )
         )
         return findings
-    incubation_plan, incubation_errors = _writeback_incubation_plan(inventory, request, archive_plan.archive_rel_path if archive_plan else None)
+    incubation_plan, incubation_errors = _writeback_incubation_plan(inventory, request, archive_context_rel)
     if incubation_errors:
         findings.extend(_with_severity(incubation_errors, "warn"))
         findings.append(
@@ -479,8 +513,22 @@ def writeback_dry_run_findings(inventory: Inventory, request: WritebackRequest) 
         return findings
     route_retarget_plans = _archive_route_retarget_plans(
         inventory,
-        archive_plan.archive_rel_path if archive_plan else "",
+        archive_context_rel if archive_plan else "",
         skip_rels=(*_incubation_plan_source_rels(incubation_plan), *request.archive_retarget_skip_rels),
+    )
+    projected_state_text = _state_text_with_writeback(inventory.state.content, planned, planned_lifecycle, closeout_plan.identity) if inventory.state else ""
+    projected_active_plan_text = _projected_active_plan_text(
+        inventory,
+        planned,
+        active_plan_lifecycle,
+        completed_phase="" if archive_plan else _phase_advancement_completed_phase(inventory, active_plan_lifecycle),
+    )
+    projected_state_text, projected_active_plan_text, roadmap_plan, route_retarget_plans = _with_incubation_archive_replacements(
+        projected_state_text,
+        projected_active_plan_text,
+        roadmap_plan,
+        route_retarget_plans,
+        incubation_plan,
     )
     if archive_plan:
         findings.extend(_archive_plan_findings(inventory, archive_plan, apply=False))
@@ -500,9 +548,34 @@ def writeback_dry_run_findings(inventory: Inventory, request: WritebackRequest) 
         ready_finding = _ready_for_closeout_boundary_finding(planned_lifecycle, inventory.state.rel_path if inventory.state else None, apply=False)
         if ready_finding:
             findings.append(ready_finding)
-    if inventory.state:
-        projected_state_text = _state_text_with_writeback(inventory.state.content, planned, planned_lifecycle, closeout_plan.identity)
-        findings.extend(_state_compaction_findings(_state_compaction_plan(inventory, projected_state_text), apply=False))
+    compaction_plan = _state_compaction_plan(inventory, projected_state_text) if inventory.state else None
+    if compaction_plan:
+        findings.extend(_state_compaction_findings(compaction_plan, apply=False))
+        boundary_findings = _auto_compaction_boundary_findings(request, planned_lifecycle, compaction_plan, apply=False)
+        findings.extend(boundary_findings)
+        if any(finding.severity == "warn" for finding in boundary_findings):
+            findings.append(
+                Finding(
+                    "info",
+                    "writeback-validation-posture",
+                    "dry-run found lifecycle writeback would cross the project-state auto-compaction boundary; rerun with --allow-auto-compaction or run writeback --compact-only separately before apply",
+                    DEFAULT_STATE_REL,
+                )
+            )
+            return findings
+    findings.extend(
+        _writeback_route_write_findings(
+            inventory,
+            projected_state_text,
+            projected_active_plan_text,
+            roadmap_plan,
+            incubation_plan,
+            route_retarget_plans,
+            archive_plan,
+            projected_active_plan_text if archive_plan else None,
+            apply=False,
+        )
+    )
     findings.extend(_active_plan_sync_plan_findings(inventory, planned, active_plan_lifecycle, apply=False))
     if roadmap_plan:
         findings.extend(_writeback_roadmap_findings(roadmap_plan, apply=False))
@@ -549,12 +622,29 @@ def writeback_apply_findings(inventory: Inventory, request: WritebackRequest) ->
 
     state = inventory.state
     assert state is not None
-    closeout_plan = _closeout_writeback_plan(inventory, request, None)
+    archive_context_rel = request.archived_plan or None
+    closeout_plan = _closeout_writeback_plan(inventory, request, archive_context_rel)
     planned = closeout_plan.values
-    roadmap_plan, roadmap_errors = _writeback_roadmap_plan(inventory, request, None)
+    roadmap_plan, roadmap_errors = _writeback_roadmap_plan(inventory, request, archive_context_rel)
     if roadmap_errors:
         return roadmap_errors
+    incubation_plan, incubation_errors = _writeback_incubation_plan(inventory, request, archive_context_rel)
+    if incubation_errors:
+        return incubation_errors
     state_text = _state_text_with_writeback(state.content, planned, request.lifecycle, closeout_plan.identity)
+    compaction_plan = _state_compaction_plan(inventory, state_text)
+    boundary_findings = _auto_compaction_boundary_findings(request, request.lifecycle, compaction_plan, apply=True)
+    if any(finding.severity == "error" for finding in boundary_findings):
+        return [
+            *boundary_findings,
+            *_state_compaction_findings(compaction_plan, apply=False),
+            Finding(
+                "info",
+                "writeback-validation-posture",
+                "writeback apply refused before writing files; review --allow-auto-compaction or run writeback --compact-only as a separate lifecycle decision",
+                DEFAULT_STATE_REL,
+            ),
+        ]
     plan_changes: tuple[Surface, str, list[Finding]] | None = None
     if inventory.active_plan_surface and inventory.active_plan_surface.exists:
         plan = inventory.active_plan_surface
@@ -584,6 +674,8 @@ def writeback_apply_findings(inventory: Inventory, request: WritebackRequest) ->
     )
     roadmap_tmp = _roadmap_writeback_tmp(roadmap_plan)
     roadmap_backup = _roadmap_writeback_backup(roadmap_plan) if roadmap_tmp else None
+    incubation_tmp = _incubation_writeback_tmp(incubation_plan)
+    incubation_backup = _incubation_writeback_backup(incubation_plan) if incubation_tmp else None
     for candidate, label in (
         (state_tmp, "temporary state write path"),
         (state_backup, "temporary state backup path"),
@@ -591,6 +683,8 @@ def writeback_apply_findings(inventory: Inventory, request: WritebackRequest) ->
         (plan_backup, "temporary active-plan backup path"),
         (roadmap_tmp, "temporary roadmap write path"),
         (roadmap_backup, "temporary roadmap backup path"),
+        (incubation_tmp, "temporary incubation relationship write path"),
+        (incubation_backup, "temporary incubation relationship backup path"),
     ):
         if candidate and candidate.exists():
             return [Finding("error", "writeback-refused", f"{label} already exists: {candidate.relative_to(inventory.root).as_posix()}")]
@@ -624,12 +718,26 @@ def writeback_apply_findings(inventory: Inventory, request: WritebackRequest) ->
         ready_finding = _ready_for_closeout_boundary_finding(request.lifecycle, state.rel_path, apply=True)
         if ready_finding:
             findings.append(ready_finding)
+        findings.extend(_auto_compaction_boundary_findings(request, request.lifecycle, compaction_plan, apply=True))
 
     operations: list[AtomicFileWrite] = [AtomicFileWrite(state.path, state_tmp, state_text, state_backup)]
     if plan_tmp and plan_backup and plan_changes:
         operations.append(AtomicFileWrite(plan_changes[0].path, plan_tmp, plan_changes[1], plan_backup))
     if roadmap_tmp and roadmap_backup and roadmap_plan:
         operations.append(AtomicFileWrite(roadmap_plan.target_path, roadmap_tmp, roadmap_plan.updated_text, roadmap_backup))
+    if incubation_tmp and incubation_backup and incubation_plan:
+        operations.append(AtomicFileWrite(incubation_plan.target_path, incubation_tmp, incubation_plan.updated_text, incubation_backup))
+    route_write_evidence = _writeback_route_write_findings(
+        inventory,
+        state_text,
+        plan_changes[1] if plan_changes else None,
+        roadmap_plan,
+        incubation_plan,
+        (),
+        None,
+        None,
+        apply=True,
+    )
     try:
         cleanup_warnings = apply_file_transaction(operations)
     except FileTransactionError as exc:
@@ -657,8 +765,11 @@ def writeback_apply_findings(inventory: Inventory, request: WritebackRequest) ->
         findings.extend(plan_changes[2])
     else:
         findings.extend(sync_findings)
+    findings.extend(route_write_evidence)
     if roadmap_plan:
         findings.extend(_writeback_roadmap_findings(roadmap_plan, apply=True))
+    if incubation_plan:
+        findings.extend(_writeback_incubation_findings(incubation_plan, apply=True))
     for warning in cleanup_warnings:
         findings.append(Finding("warn", "writeback-backup-cleanup", warning, state.rel_path))
     findings.append(
@@ -680,20 +791,36 @@ def _writeback_preflight_errors(inventory: Inventory, request: WritebackRequest)
         errors.append(Finding("error", "writeback-refused", error))
     if request.from_active_plan and request.compact_only:
         errors.append(Finding("error", "writeback-refused", "--from-active-plan cannot be combined with --compact-only"))
-    if request.compact_only and (request.closeout or request.lifecycle or request.archive_active_plan or request.roadmap_item or request.roadmap_status):
-        errors.append(Finding("error", "writeback-refused", "--compact-only cannot be combined with closeout fields, lifecycle fields, --archive-active-plan, or roadmap sync fields"))
+    if request.compact_only and request.allow_auto_compaction:
+        errors.append(Finding("error", "writeback-refused", "--allow-auto-compaction cannot be combined with --compact-only; compact-only is already the explicit compaction rail"))
+    if request.compact_only and (request.closeout or request.lifecycle or request.archive_active_plan or request.roadmap_item or request.roadmap_status or request.archived_plan):
+        errors.append(Finding("error", "writeback-refused", "--compact-only cannot be combined with closeout fields, lifecycle fields, --archive-active-plan, --archived-plan, or roadmap sync fields"))
     if not request.closeout and not request.lifecycle and not request.archive_active_plan and not request.compact_only:
         errors.append(Finding("error", "writeback-refused", "writeback requires at least one closeout or lifecycle field"))
     if request.roadmap_status and not request.roadmap_item:
         errors.append(Finding("error", "writeback-refused", "--roadmap-status requires --roadmap-item"))
+    if request.archived_plan and request.archive_active_plan:
+        errors.append(Finding("error", "writeback-refused", "--archived-plan cannot be combined with --archive-active-plan; one command either archives the active plan or refreshes an already archived plan"))
+    if request.archived_plan and not request.roadmap_item:
+        errors.append(Finding("error", "writeback-refused", "--archived-plan requires --roadmap-item so inactive closeout refresh stays target-bound"))
+    if request.archived_plan:
+        errors.extend(_archived_plan_request_errors(inventory, request.archived_plan))
     if request.roadmap_status and request.roadmap_status not in ROADMAP_STATUS_VALUES:
         errors.append(Finding("error", "writeback-refused", f"--roadmap-status must be one of: {', '.join(sorted(ROADMAP_STATUS_VALUES))}"))
-    if request.archive_active_plan and any(field in request.lifecycle for field in ("active_phase", "phase_status", "last_archived_plan")):
+    if request.archive_active_plan and any(field in request.lifecycle for field in ("active_phase", "last_archived_plan")):
         errors.append(
             Finding(
                 "error",
                 "writeback-refused",
-                "--archive-active-plan owns plan_status, active_plan, and last_archived_plan lifecycle updates; do not combine it with explicit lifecycle fields",
+                "--archive-active-plan owns plan_status, active_plan, and last_archived_plan lifecycle updates; do not combine it with explicit active_phase or last_archived_plan fields",
+            )
+        )
+    if request.archive_active_plan and request.lifecycle.get("phase_status") and request.lifecycle.get("phase_status") != "complete":
+        errors.append(
+            Finding(
+                "error",
+                "writeback-refused",
+                "--archive-active-plan may combine with --phase-status complete to atomically complete and archive the current plan; other explicit phase_status values are refused",
             )
         )
     docs_decision = request.closeout.get("docs_decision")
@@ -777,6 +904,8 @@ def _writeback_request_with_active_plan_facts(
         state_fallback = True
         finding_source = inventory.state.rel_path if inventory.state else DEFAULT_STATE_REL
     merged = dict(harvested)
+    if state_fallback and active_plan_values:
+        merged.update(active_plan_values)
     merged.update(request.closeout)
     fields = ", ".join(field for field in CLOSEOUT_WRITEBACK_FIELDS if field in harvested)
     override_fields = ", ".join(field for field in CLOSEOUT_WRITEBACK_FIELDS if field in request.closeout and field in harvested)
@@ -801,6 +930,19 @@ def _writeback_request_with_active_plan_facts(
                 source,
             )
         )
+        override_fields = ", ".join(field for field in CLOSEOUT_WRITEBACK_FIELDS if field in active_plan_values and field in harvested)
+        if override_fields:
+            findings.append(
+                Finding(
+                    "info",
+                    "writeback-from-active-plan-partial-overrides",
+                    (
+                        "active-plan partial closeout facts override matching project-state fallback facts: "
+                        f"{override_fields}; project-state supplies only missing fallback fields"
+                    ),
+                    source,
+                )
+            )
     findings.append(Finding("info", "writeback-from-active-plan", message, finding_source))
     return (
         replace(request, closeout=_ordered_closeout_values(merged)),
@@ -849,6 +991,12 @@ def _state_closeout_authority_facts(inventory: Inventory) -> tuple[dict[str, str
             )
         ]
     return harvested, []
+
+
+def state_writeback_identity_matches_current_plan(inventory: Inventory) -> bool:
+    existing_identity = _identity_from_facts(state_writeback_identity_facts(inventory.state))
+    current_identity = _current_closeout_identity(inventory, None)
+    return _closeout_identity_matches(existing_identity, current_identity)
 
 
 def _writeback_root_state_preflight_errors(inventory: Inventory) -> list[Finding]:
@@ -915,6 +1063,29 @@ def _product_source_root_errors(inventory: Inventory, value: str) -> list[Findin
     return errors
 
 
+def _archived_plan_request_errors(inventory: Inventory, rel_path: str) -> list[Finding]:
+    errors: list[Finding] = []
+    rel_path = _normalize_rel(rel_path)
+    if not rel_path:
+        return [Finding("error", "writeback-refused", "--archived-plan must be a non-empty root-relative route")]
+    if Path(rel_path).is_absolute() or ".." in Path(rel_path).parts:
+        return [Finding("error", "writeback-refused", "--archived-plan must be a safe root-relative route")]
+    archive_dir = _normalize_rel(_manifest_memory_value(inventory, "archive_dir", DEFAULT_ARCHIVE_DIR_REL))
+    if rel_path == archive_dir or not rel_path.startswith(f"{archive_dir}/"):
+        errors.append(Finding("error", "writeback-refused", f"--archived-plan must be under {archive_dir}", rel_path))
+        return errors
+    path = inventory.root / rel_path
+    if _path_escapes_root(inventory.root, path):
+        errors.append(Finding("error", "writeback-refused", "--archived-plan escapes the target root", rel_path))
+    elif not path.exists():
+        errors.append(Finding("error", "writeback-refused", f"--archived-plan does not exist: {rel_path}", rel_path))
+    elif not path.is_file():
+        errors.append(Finding("error", "writeback-refused", "--archived-plan is not a regular file", rel_path))
+    elif path.is_symlink():
+        errors.append(Finding("error", "writeback-refused", "--archived-plan is a symlink; inactive refresh is refused", rel_path))
+    return errors
+
+
 def _writeback_archive_apply_findings(inventory: Inventory, request: WritebackRequest) -> list[Finding]:
     state = inventory.state
     assert state is not None
@@ -924,7 +1095,7 @@ def _writeback_archive_apply_findings(inventory: Inventory, request: WritebackRe
 
     closeout_plan = _closeout_writeback_plan(inventory, request, archive_plan.archive_rel_path)
     planned = closeout_plan.values
-    lifecycle_values = _planned_lifecycle_values(request, archive_plan.archive_rel_path)
+    lifecycle_values = _planned_lifecycle_values(request, archive_plan.archive_rel_path, _archive_phase_status(inventory, request))
     roadmap_plan, roadmap_errors = _writeback_roadmap_plan(inventory, request, archive_plan.archive_rel_path)
     if roadmap_errors:
         return roadmap_errors
@@ -993,6 +1164,17 @@ def _writeback_archive_apply_findings(inventory: Inventory, request: WritebackRe
         for tmp_path, backup_path, target_path, text in _incubation_link_tmp_paths(incubation_plan)
         if target_path not in link_repair_skip_targets
     ]
+    route_write_evidence = _writeback_route_write_findings(
+        inventory,
+        state_text,
+        plan_text,
+        roadmap_plan,
+        incubation_plan,
+        route_retarget_plans,
+        archive_plan,
+        plan_text,
+        apply=True,
+    )
     route_retarget_tmps = [
         (
             plan.target_path.with_name(f".{plan.target_path.name}.writeback-retarget.tmp"),
@@ -1073,6 +1255,7 @@ def _writeback_archive_apply_findings(inventory: Inventory, request: WritebackRe
         findings.extend(_writeback_incubation_findings(incubation_plan, apply=True))
     if route_retarget_plans:
         findings.extend(_archive_route_retarget_findings(route_retarget_plans, apply=True))
+    findings.extend(route_write_evidence)
     for warning in cleanup_warnings:
         findings.append(Finding("warn", "writeback-archive-backup-cleanup", warning, archive_plan.archive_rel_path))
     findings.extend(
@@ -1100,6 +1283,16 @@ def _should_carry_current_closeout_values(request: WritebackRequest) -> bool:
     if request.roadmap_item:
         return False
     return bool(request.closeout)
+
+
+def _is_phase_only_uncertain_docs_writeback(request: WritebackRequest) -> bool:
+    if request.archive_active_plan or request.roadmap_item or request.roadmap_status:
+        return False
+    if request.closeout != {"docs_decision": "uncertain"}:
+        return False
+    if request.lifecycle.get("phase_status") != "complete":
+        return False
+    return set(request.lifecycle).issubset({"active_phase", "phase_status"})
 
 
 def _closeout_writeback_plan(inventory: Inventory, request: WritebackRequest, archive_rel_path: str | None) -> CloseoutWritebackPlan:
@@ -1150,6 +1343,13 @@ def _closeout_writeback_plan(inventory: Inventory, request: WritebackRequest, ar
             "replace",
             f"replace existing closeout facts because recorded identity {_closeout_identity_summary(existing_identity)} does not match current identity {_closeout_identity_summary(identity)}",
         )
+    if _is_phase_only_uncertain_docs_writeback(request):
+        return CloseoutWritebackPlan(
+            _ordered_closeout_values(request.closeout),
+            identity,
+            "replace",
+            "replace existing closeout facts with same-request docs_decision uncertain for phase-only ready-for-closeout writeback; existing project-state closeout facts are not carried",
+        )
 
     source = inventory.state.rel_path if inventory.state else DEFAULT_STATE_REL
     error = Finding(
@@ -1173,7 +1373,21 @@ def _current_closeout_identity(inventory: Inventory, archive_rel_path: str | Non
     plan = inventory.active_plan_surface
     if plan and plan.exists and plan.frontmatter.has_frontmatter and not plan.frontmatter.errors:
         plan_id = _normalized_value(plan.frontmatter.data.get("plan_id") or "")
+    if not plan_id and archived_plan:
+        plan_id = _archived_plan_id(inventory, archived_plan)
     return CloseoutIdentity(plan_id=plan_id, active_plan=active_plan, archived_plan=archived_plan)
+
+
+def _archived_plan_id(inventory: Inventory, rel_path: str) -> str:
+    path = inventory.root / _normalize_rel(rel_path)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    frontmatter = parse_frontmatter(text)
+    if not frontmatter.has_frontmatter or frontmatter.errors:
+        return ""
+    return _normalized_value(frontmatter.data.get("plan_id") or "")
 
 
 def _identity_from_facts(facts: dict[str, WritebackFact]) -> CloseoutIdentity:
@@ -1203,7 +1417,12 @@ def _closeout_identity_matches(existing: CloseoutIdentity, current: CloseoutIden
 
 
 def _ordered_closeout_values(values: dict[str, str]) -> dict[str, str]:
-    return {field: values[field] for field in CLOSEOUT_WRITEBACK_FIELDS if field in values}
+    ordered = {field: values[field] for field in CLOSEOUT_WRITEBACK_FIELDS if field in values and values[field]}
+    if ordered and "work_result" not in ordered:
+        capsule = work_result_capsule_from_closeout_values(ordered)
+        if capsule is not None:
+            ordered["work_result"] = render_work_result_capsule_line(capsule)
+    return {field: ordered[field] for field in CLOSEOUT_WRITEBACK_FIELDS if field in ordered}
 
 
 def _closeout_writeback_plan_findings(plan: CloseoutWritebackPlan, apply: bool) -> list[Finding]:
@@ -1235,10 +1454,12 @@ def _closeout_identity_summary(identity: CloseoutIdentity) -> str:
     return ", ".join(parts)
 
 
-def _planned_lifecycle_values(request: WritebackRequest, archive_rel_path: str | None) -> dict[str, str]:
+def _planned_lifecycle_values(request: WritebackRequest, archive_rel_path: str | None, archive_phase_status: str = "") -> dict[str, str]:
     values = dict(request.lifecycle)
     if archive_rel_path:
         values.update({"plan_status": "none", "active_plan": "", "last_archived_plan": archive_rel_path})
+        if archive_phase_status and archive_phase_status != "complete":
+            values.setdefault("phase_status", archive_phase_status)
     return values
 
 
@@ -1287,6 +1508,44 @@ def _ready_for_closeout_boundary_finding(lifecycle_values: dict[str, str], sourc
     )
 
 
+def _auto_compaction_boundary_findings(
+    request: WritebackRequest,
+    lifecycle_values: dict[str, str],
+    compaction_plan: StateCompactionPlan,
+    apply: bool,
+) -> list[Finding]:
+    if not lifecycle_values or not request.lifecycle or compaction_plan.posture != "would run":
+        return []
+    if request.allow_auto_compaction:
+        verb = "authorized" if apply else "would authorize"
+        return [
+            Finding(
+                "info",
+                "writeback-auto-compaction-authorized",
+                (
+                    f"{verb} project-state auto-compaction after explicit lifecycle writeback because "
+                    "--allow-auto-compaction was supplied; compact-only maintenance, archive, roadmap status, "
+                    "staging, commit, and next-plan opening remain separate decisions"
+                ),
+                DEFAULT_STATE_REL,
+            )
+        ]
+    severity = "error" if apply else "warn"
+    verb = "refused" if apply else "would refuse"
+    return [
+        Finding(
+            severity,
+            "writeback-auto-compaction-boundary",
+            (
+                f"{verb} lifecycle writeback before writing files because project-state auto-compaction would run; "
+                "rerun with --allow-auto-compaction after reviewing the dry-run, or run writeback --compact-only "
+                "as a separate reviewed maintenance step"
+            ),
+            DEFAULT_STATE_REL,
+        )
+    ]
+
+
 def _planned_closeout_finding(values: dict[str, str]) -> Finding:
     summary = ", ".join(f"{field}={values[field]!r}" for field in CLOSEOUT_WRITEBACK_FIELDS if field in values)
     return Finding("info", "writeback-closeout-fields", f"closeout writeback fields: {summary or 'none'}", "project/project-state.md")
@@ -1295,12 +1554,12 @@ def _planned_closeout_finding(values: dict[str, str]) -> Finding:
 def _writeback_roadmap_plan(inventory: Inventory, request: WritebackRequest, archive_rel_path: str | None) -> tuple[RoadmapWritebackPlan | None, list[Finding]]:
     if not request.roadmap_item:
         return None, []
-    if not inventory.active_plan_surface or not inventory.active_plan_surface.exists:
+    if not archive_rel_path and (not inventory.active_plan_surface or not inventory.active_plan_surface.exists):
         return None, [
             Finding(
                 "error",
                 "writeback-refused",
-                "--roadmap-item requires a readable active plan so roadmap closeout sync is target-bound",
+                "--roadmap-item requires a readable active plan or explicit --archived-plan so roadmap closeout sync is target-bound",
                 DEFAULT_PLAN_REL,
             )
         ]
@@ -1327,6 +1586,8 @@ def _writeback_roadmap_plan(inventory: Inventory, request: WritebackRequest, arc
         return None, errors
     if not plans:
         return None, []
+    active_item_ids = () if archive_rel_path else active_plan_roadmap_item_ids(inventory)
+    plans = _writeback_roadmap_plans_with_current_posture(plans, active_item_ids=active_item_ids)
     return RoadmapWritebackPlan(target_rel=plans[-1].target_rel, target_path=plans[-1].target_path, item_plans=plans), []
 
 
@@ -1362,6 +1623,40 @@ def _roadmap_writeback_plan_with_updated_text(plan: RoadmapWritebackPlan, update
         return plan
     item_plans = (*plan.item_plans[:-1], replace(plan.item_plans[-1], updated_text=updated_text))
     return replace(plan, item_plans=item_plans)
+
+
+def _writeback_roadmap_plans_with_current_posture(
+    plans: tuple[RoadmapPlan, ...],
+    *,
+    active_item_ids: tuple[str, ...] = (),
+) -> tuple[RoadmapPlan, ...]:
+    if not plans:
+        return plans
+    last = plans[-1]
+    updated_text, retargeted_item_ids = roadmap_text_with_terminal_related_plan_retargets(
+        last.updated_text,
+        active_item_ids=active_item_ids,
+    )
+    changed_fields = last.changed_fields
+    if updated_text != last.updated_text:
+        changed_fields = tuple(_dedupe_nonempty((*changed_fields, TERMINAL_RELATED_PLAN_RETARGET_FIELD)))
+
+    refreshed_text = sync_roadmap_current_posture_section(updated_text)
+    if refreshed_text != updated_text:
+        changed_fields = tuple(_dedupe_nonempty((*changed_fields, ROADMAP_CURRENT_POSTURE_FIELD)))
+        updated_text = refreshed_text
+
+    if updated_text == last.updated_text and not retargeted_item_ids:
+        return plans
+    return (
+        *plans[:-1],
+        replace(
+            last,
+            updated_text=updated_text,
+            changed_fields=changed_fields,
+            retargeted_terminal_item_ids=tuple(_dedupe_nonempty((*last.retargeted_terminal_item_ids, *retargeted_item_ids))),
+        ),
+    )
 
 
 def _roadmap_carry_forward_value(closeout: dict[str, str]) -> str:
@@ -1412,6 +1707,16 @@ def _writeback_roadmap_findings(plan: RoadmapWritebackPlan, apply: bool) -> list
             )
     else:
         findings.append(Finding("info", "writeback-roadmap-noop", "roadmap item(s) already match selected writeback facts", plan.target_rel))
+    retargeted = tuple(_dedupe_nonempty(item_id for item_plan in plan.item_plans for item_id in item_plan.retargeted_terminal_item_ids))
+    if retargeted:
+        findings.append(
+            Finding(
+                "info",
+                "writeback-roadmap-terminal-retarget",
+                f"{prefix}retarget terminal roadmap related_plan link(s): {', '.join(retargeted)}",
+                plan.target_rel,
+            )
+        )
     findings.append(
         Finding(
             "info",
@@ -1421,6 +1726,107 @@ def _writeback_roadmap_findings(plan: RoadmapWritebackPlan, apply: bool) -> list
         )
     )
     return findings
+
+
+def _projected_active_plan_text(
+    inventory: Inventory,
+    closeout_values: dict[str, str],
+    lifecycle_values: dict[str, str],
+    *,
+    completed_phase: str,
+) -> str | None:
+    plan = inventory.active_plan_surface
+    if not plan or not plan.exists:
+        return None
+    active_phase = _requested_or_current_active_phase(inventory, lifecycle_values)
+    text, _findings = _active_plan_text_with_synced_values(
+        plan,
+        closeout_values,
+        lifecycle_values,
+        active_phase,
+        completed_phase,
+    )
+    return text
+
+
+def _with_incubation_archive_replacements(
+    state_text: str,
+    active_plan_text: str | None,
+    roadmap_plan: RoadmapWritebackPlan | None,
+    route_retarget_plans: tuple[RouteRetargetPlan, ...],
+    incubation_plan: RelationshipUpdatePlan | None,
+) -> tuple[str, str | None, RoadmapWritebackPlan | None, tuple[RouteRetargetPlan, ...]]:
+    if not incubation_plan or not incubation_plan.archive_rel:
+        return state_text, active_plan_text, roadmap_plan, route_retarget_plans
+    state_text = state_text.replace(incubation_plan.source_rel, incubation_plan.archive_rel)
+    if active_plan_text is not None:
+        active_plan_text = active_plan_text.replace(incubation_plan.source_rel, incubation_plan.archive_rel)
+    if roadmap_plan:
+        roadmap_plan = _roadmap_writeback_plan_with_updated_text(
+            roadmap_plan,
+            roadmap_plan.updated_text.replace(incubation_plan.source_rel, incubation_plan.archive_rel),
+        )
+    route_retarget_plans = tuple(
+        _route_retarget_plan_with_updated_text(plan, plan.updated_text.replace(incubation_plan.source_rel, incubation_plan.archive_rel))
+        for plan in route_retarget_plans
+    )
+    return state_text, active_plan_text, roadmap_plan, route_retarget_plans
+
+
+def _writeback_route_write_findings(
+    inventory: Inventory,
+    state_text: str,
+    active_plan_text: str | None,
+    roadmap_plan: RoadmapWritebackPlan | None,
+    incubation_plan: RelationshipUpdatePlan | None,
+    route_retarget_plans: tuple[RouteRetargetPlan, ...],
+    archive_plan: ArchivePlan | None,
+    archive_plan_text: str | None,
+    *,
+    apply: bool,
+) -> list[Finding]:
+    writes: list[RouteWriteEvidence] = []
+    if inventory.state:
+        writes.append(RouteWriteEvidence(inventory.state.rel_path, inventory.state.content, state_text))
+    if archive_plan:
+        writes.append(RouteWriteEvidence(archive_plan.archive_rel_path, None, archive_plan_text))
+        writes.append(RouteWriteEvidence(archive_plan.plan.rel_path, archive_plan.plan.content, None))
+    elif active_plan_text is not None and inventory.active_plan_surface and inventory.active_plan_surface.exists:
+        writes.append(RouteWriteEvidence(inventory.active_plan_surface.rel_path, inventory.active_plan_surface.content, active_plan_text))
+    if roadmap_plan:
+        writes.append(RouteWriteEvidence(roadmap_plan.target_rel, roadmap_plan.current_text, roadmap_plan.updated_text))
+    if incubation_plan:
+        writes.extend(_relationship_route_write_evidence(incubation_plan))
+    writes.extend(
+        RouteWriteEvidence(plan.source_rel, plan.current_text, plan.updated_text)
+        for plan in route_retarget_plans
+    )
+    return route_write_findings("writeback-route-write", tuple(writes), apply=apply)
+
+
+def _relationship_route_write_evidence(plan: RelationshipUpdatePlan) -> list[RouteWriteEvidence]:
+    writes: list[RouteWriteEvidence] = []
+    if plan.archive_rel:
+        writes.append(RouteWriteEvidence(plan.target_rel, None, plan.updated_text))
+        writes.append(RouteWriteEvidence(plan.source_rel, plan.current_text, None))
+    else:
+        writes.append(RouteWriteEvidence(plan.target_rel, plan.current_text, plan.updated_text))
+    writes.extend(_link_repair_route_write_evidence(plan.link_repairs))
+    return writes
+
+
+def _link_repair_route_write_evidence(link_repairs: tuple[tuple[str, Path, str], ...]) -> list[RouteWriteEvidence]:
+    writes: list[RouteWriteEvidence] = []
+    for rel_path, path, updated_text in link_repairs:
+        writes.append(RouteWriteEvidence(rel_path, _read_route_text(path), updated_text))
+    return writes
+
+
+def _read_route_text(path: Path) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return None
 
 
 def _writeback_incubation_plan(
@@ -1448,6 +1854,26 @@ def _writeback_incubation_plan(
                 "docs_decision": request.closeout.get("docs_decision", ""),
             },
         )
+    if request.archived_plan:
+        return relationship_update_plan(
+            inventory,
+            source_incubation,
+            {
+                "related_roadmap": "project/roadmap.md",
+                "related_roadmap_item": request.roadmap_item,
+                "related_plan": archive_rel_path,
+                "archived_plan": archive_rel_path,
+                "implemented_by": archive_rel_path,
+                "verification_summary": request.closeout.get("verification", ""),
+                "docs_decision": request.closeout.get("docs_decision", ""),
+            },
+        )
+    live_consumers = roadmap_source_incubation_consumers(inventory, source_incubation, live_only=True)
+    extra_blockers: tuple[str, ...] = ()
+    if len(live_consumers) > 1:
+        extra_blockers = (
+            "shared live source_incubation consumers: " + ", ".join(live_consumers),
+        )
     return incubation_closeout_plan(
         inventory,
         source_incubation,
@@ -1455,6 +1881,7 @@ def _writeback_incubation_plan(
         archived_plan=archive_rel_path,
         verification_summary=request.closeout.get("verification", ""),
         docs_decision=request.closeout.get("docs_decision", ""),
+        extra_archive_blockers=extra_blockers,
     )
 
 
@@ -1657,10 +2084,15 @@ def _archive_route_retarget_findings(plans: tuple[RouteRetargetPlan, ...], apply
 def _state_compaction_plan(inventory: Inventory, state_text: str) -> StateCompactionPlan:
     state = inventory.state
     line_count = len(state_text.splitlines())
-    if line_count <= STATE_COMPACTION_LINE_THRESHOLD:
+    char_count = len(state_text)
+    trigger_reason = _state_compaction_trigger_reason(line_count, char_count)
+    if not trigger_reason:
         return StateCompactionPlan(
             posture="skipped",
-            reason=f"project/project-state.md is {line_count} lines; default trigger is > {STATE_COMPACTION_LINE_THRESHOLD} lines",
+            reason=(
+                f"project/project-state.md is {line_count} lines, {char_count} chars; "
+                f"default trigger is > {STATE_COMPACTION_LINE_THRESHOLD} lines or > {STATE_COMPACTION_CHAR_THRESHOLD} chars"
+            ),
         )
     if inventory.root_kind != "live_operating_root":
         return StateCompactionPlan("refused", f"target root kind is {inventory.root_kind}; auto-compaction requires a live operating root")
@@ -1693,10 +2125,10 @@ def _state_compaction_plan(inventory: Inventory, state_text: str) -> StateCompac
         return StateCompactionPlan("refused", "project-state.md has no clearly archivable history sections")
 
     compacted_state_text = _render_compacted_state(prefix, kept_sections, [*prior_history_paths, archive_rel_path])
-    archive_text = _render_state_history_archive(DEFAULT_STATE_REL, archive_rel_path, archived_sections)
+    archive_text = _render_state_history_archive(DEFAULT_STATE_REL, archive_rel_path, archived_sections, trigger_reason)
     return StateCompactionPlan(
         posture="would run",
-        reason=f"project/project-state.md is {line_count} lines; exceeded {STATE_COMPACTION_LINE_THRESHOLD} line default",
+        reason=f"project/project-state.md is {line_count} lines, {char_count} chars; {trigger_reason}",
         archive_rel_path=archive_rel_path,
         archive_path=archive_path,
         compacted_state_text=compacted_state_text,
@@ -1704,6 +2136,15 @@ def _state_compaction_plan(inventory: Inventory, state_text: str) -> StateCompac
         kept_sections=tuple(section.title for section in kept_sections),
         archived_sections=tuple(section.title for section in archived_sections),
     )
+
+
+def _state_compaction_trigger_reason(line_count: int, char_count: int) -> str:
+    reasons: list[str] = []
+    if line_count > STATE_COMPACTION_LINE_THRESHOLD:
+        reasons.append(f"exceeded {STATE_COMPACTION_LINE_THRESHOLD} line default")
+    if char_count > STATE_COMPACTION_CHAR_THRESHOLD:
+        reasons.append(f"exceeded {STATE_COMPACTION_CHAR_THRESHOLD} character default")
+    return " and ".join(reasons)
 
 
 def _state_compaction_findings(plan: StateCompactionPlan, apply: bool) -> list[Finding]:
@@ -1853,8 +2294,13 @@ def _partition_state_sections(sections: list[StateSection]) -> tuple[list[StateS
             kept.append(section)
             continue
         archived.append(section)
-    if "Current Focus" not in {section.title for section in kept} or "Repository Role Map" not in {section.title for section in kept}:
-        return "unclear section boundaries: required Current Focus and Repository Role Map sections were not found"
+    missing_keep_sections = [
+        title
+        for title in ("Current Focus", "Repository Role Map")
+        if title not in {section.title for section in kept}
+    ]
+    if missing_keep_sections:
+        return f"unclear section boundaries: required keep section(s) not found: {', '.join(missing_keep_sections)}"
     return kept, archived, prior_history_paths
 
 
@@ -1890,7 +2336,7 @@ def _render_compacted_state(prefix: str, kept_sections: list[StateSection], arch
     return "\n".join(parts).rstrip() + "\n"
 
 
-def _render_state_history_archive(source_rel_path: str, archive_rel_path: str, archived_sections: list[StateSection]) -> str:
+def _render_state_history_archive(source_rel_path: str, archive_rel_path: str, archived_sections: list[StateSection], reason: str) -> str:
     section_titles = "\n".join(f"- {section.title}" for section in archived_sections)
     archived_text = "\n\n".join(section.text.rstrip() for section in archived_sections)
     return (
@@ -1899,7 +2345,7 @@ def _render_state_history_archive(source_rel_path: str, archive_rel_path: str, a
         f"- Source state path: `{source_rel_path}`\n"
         f"- Archive path: `{archive_rel_path}`\n"
         f"- Compaction date: {date.today().isoformat()}\n"
-        f"- Reason: exceeded {STATE_COMPACTION_LINE_THRESHOLD} line default\n"
+        f"- Reason: {reason}\n"
         "- Non-authority note: archived history is reference; current `project/project-state.md` remains operating memory authority.\n\n"
         "## Archived Sections\n\n"
         f"{section_titles}\n\n"
@@ -1995,7 +2441,7 @@ def _archive_preflight_errors(inventory: Inventory, request: WritebackRequest) -
 
     if plan_status != "active":
         errors.append(Finding("error", "writeback-refused", f"archive-active-plan requires plan_status active; current plan_status is {plan_status or '<empty>'!r}", state.rel_path if state else None))
-    if phase_status != "complete":
+    if phase_status != "complete" and request.roadmap_status not in UNSUCCESSFUL_ARCHIVE_ROADMAP_PHASE_STATUS:
         errors.append(
             Finding(
                 "error",
@@ -2039,6 +2485,9 @@ def _archive_preflight_errors(inventory: Inventory, request: WritebackRequest) -
 
 
 def _archive_phase_status(inventory: Inventory, request: WritebackRequest) -> str:
+    unsuccessful_status = UNSUCCESSFUL_ARCHIVE_ROADMAP_PHASE_STATUS.get(request.roadmap_status)
+    if unsuccessful_status:
+        return unsuccessful_status
     requested = str(request.lifecycle.get("phase_status") or "")
     if requested:
         return requested

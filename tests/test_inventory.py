@@ -330,6 +330,7 @@ class InventoryTests(unittest.TestCase):
                 state.read_text(encoding="utf-8").replace('phase_status: "in_progress"', 'phase_status: "complete"')
                 + "\n## MLH Closeout Writeback\n\n"
                 "<!-- BEGIN mylittleharness-closeout-writeback v1 -->\n"
+                "- active_plan: project/implementation-plan.md\n"
                 "- docs_decision: updated\n"
                 "- state_writeback: complete\n"
                 "- verification: targeted suite passed\n"

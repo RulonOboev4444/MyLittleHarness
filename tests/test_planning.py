@@ -138,10 +138,57 @@ class PlanningTests(unittest.TestCase):
         self.assertIn("### phase-1-implementation", rendered)
         self.assertIn("### phase-2-verification-and-docs", rendered)
         self.assertIn("### phase-3-integration-and-state-transfer", rendered)
-        self.assertIn("- write_scope: `src/mylittleharness/planning.py`, `src/mylittleharness/grain.py`", rendered)
+        self.assertIn(
+            "- write_scope: `src/mylittleharness/planning.py`, `src/mylittleharness/grain.py`, `tests/test_planning.py`, `tests/test_cli.py`",
+            rendered,
+        )
         self.assertIn("tests/test_planning.py tests/test_cli.py", rendered)
         self.assertIn("current-phase-only execution", rendered)
         self.assertNotIn("Generated as one explicit current phase", rendered)
+
+    def test_renderer_includes_docs_scope_when_docs_decision_will_be_updated(self) -> None:
+        request = make_plan_request(
+            "Docs Scope",
+            "Make docs impact executable.",
+            None,
+            roadmap_item="docs-scope",
+            only_requested_item=True,
+        )
+        contract = RoadmapSliceContract(
+            primary_roadmap_item="docs-scope",
+            execution_slice="docs-scope",
+            slice_goal="Update plan synthesis docs impact.",
+            covered_roadmap_items=("docs-scope",),
+            domain_context="Update plan synthesis docs impact.",
+            target_artifacts=("src/mylittleharness/planning.py",),
+            execution_policy="current-phase-only",
+            closeout_boundary="explicit closeout/writeback only",
+            source_incubation="",
+            source_research="",
+            related_specs=("project/specs/workflow/workflow-plan-synthesis-spec.md",),
+        )
+        report = RoadmapSynthesisReport(
+            primary_roadmap_item="docs-scope",
+            execution_slice="docs-scope",
+            covered_roadmap_items=("docs-scope",),
+            domain_contexts=("Update plan synthesis docs impact.",),
+            target_artifacts=contract.target_artifacts,
+            related_specs=contract.related_specs,
+            source_inputs=(),
+            bundle_signals=("only requested roadmap item was selected; roadmap slice siblings are not batched",),
+            split_signals=("bundle/split output is advisory and cannot approve lifecycle movement",),
+            in_slice_dependencies=(),
+            verification_summary_count=0,
+            target_artifact_pressure="1 target artifact across 1 roadmap item; report-only sizing signal, not a hard gate",
+            phase_pressure="1 domain context and 0 verification summaries and 1 docs update decision; candidate plan outline: 2 phases or explicit one-shot rationale",
+            docs_update_count=1,
+        )
+
+        rendered = render_implementation_plan(request, today=date(2026, 5, 1), slice_contract=contract, synthesis_report=report)
+
+        self.assertIn("### phase-2-verification-and-docs", rendered)
+        self.assertIn("- write_scope: `project/specs/workflow/workflow-plan-synthesis-spec.md`", rendered)
+        self.assertIn("record `updated` when specs/templates/docs change", rendered)
 
     def test_renderer_records_one_shot_rationale_for_low_pressure_roadmap_plan(self) -> None:
         request = make_plan_request(

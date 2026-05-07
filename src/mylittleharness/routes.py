@@ -88,6 +88,13 @@ LIVE_LIFECYCLE_ROUTES: tuple[MemoryRoute, ...] = (
         "evidence",
     ),
     MemoryRoute(
+        "agent-runs",
+        "project/verification/agent-runs/*.md",
+        "source-bound durable agent run evidence records",
+        "at explicit run evidence record",
+        "evidence",
+    ),
+    MemoryRoute(
         "closeout-writeback",
         "project/project-state.md MLH closeout writeback block",
         "current closeout fact authority; explicit closeout active-plan copies are derived metadata",
@@ -212,9 +219,104 @@ ROLE_TO_ROUTE_ID = {
     "verification": "verification",
 }
 
+_ROUTE_MUTABILITY = {
+    "active-plan": "lifecycle-apply-rail",
+    "adrs": "human-reviewed-authority",
+    "archive": "archive-apply-rail",
+    "agent-runs": "evidence-record-apply-rail",
+    "closeout-writeback": "lifecycle-apply-rail",
+    "decisions": "human-reviewed-authority",
+    "docs-routing": "advisory-file",
+    "generated-cache": "generated-rebuildable",
+    "incubation": "intake-or-incubate-apply-rail",
+    "operating-guardrails": "human-reviewed-authority",
+    "product-docs": "human-reviewed-product-contract",
+    "research": "research-or-hygiene-apply-rail",
+    "roadmap": "roadmap-apply-rail",
+    "stable-specs": "human-reviewed-authority",
+    "state": "lifecycle-apply-rail",
+    "verification": "evidence-route",
+}
+
+_ROUTE_GATE_CLASS = {
+    "active-plan": "lifecycle",
+    "adrs": "authority",
+    "archive": "archive",
+    "agent-runs": "evidence",
+    "closeout-writeback": "lifecycle",
+    "decisions": "authority",
+    "operating-guardrails": "authority",
+    "product-docs": "product-contract",
+    "roadmap": "planning",
+    "stable-specs": "authority",
+    "state": "lifecycle",
+}
+
+_ROUTE_ALLOWED_DECISIONS = {
+    "active-plan": ("plan", "writeback", "transition"),
+    "adrs": ("accept", "supersede", "archive"),
+    "archive": ("archive", "restore-reference"),
+    "agent-runs": ("record", "inspect"),
+    "closeout-writeback": ("writeback", "transition"),
+    "decisions": ("accept", "supersede", "archive"),
+    "operating-guardrails": ("repair", "manual-review"),
+    "product-docs": ("update", "not-needed", "uncertain"),
+    "roadmap": ("add", "update", "mark-active", "mark-done"),
+    "stable-specs": ("update", "supersede", "reject"),
+    "state": ("writeback", "compact", "transition"),
+}
+
 
 def lifecycle_route_rows() -> tuple[tuple[str, str, str], ...]:
     return tuple((route.route_id, route.target, route.purpose) for route in LIVE_LIFECYCLE_ROUTES)
+
+
+def route_protocol_for_id(route_id: str | None) -> dict[str, object]:
+    normalized = route_id if route_id in ROUTE_BY_ID else "unclassified"
+    gate_class = _ROUTE_GATE_CLASS.get(normalized, "none" if normalized != "unclassified" else "unknown")
+    allowed_decisions = _ROUTE_ALLOWED_DECISIONS.get(normalized, ())
+    requires_gate = bool(allowed_decisions)
+    reason = (
+        f"route {normalized} changes require an explicit reviewed decision or apply rail"
+        if requires_gate
+        else "route is read-only, advisory, generated, or does not carry authority by itself"
+    )
+    return {
+        "route_id": normalized,
+        "mutability": _ROUTE_MUTABILITY.get(normalized, "unknown"),
+        "human_gate": {
+            "required": requires_gate,
+            "gate_class": gate_class,
+            "reason": reason,
+            "allowed_decisions": list(allowed_decisions),
+        },
+        "gate_class": gate_class,
+        "human_gate_reason": reason,
+        "allowed_decisions": list(allowed_decisions),
+        "advisory": normalized not in {"state", "active-plan", "stable-specs", "closeout-writeback"},
+    }
+
+
+def route_manifest() -> tuple[dict[str, object], ...]:
+    rows: list[dict[str, object]] = []
+    for route in ROUTE_REGISTRY:
+        protocol = route_protocol_for_id(route.route_id)
+        rows.append(
+            {
+                "route_id": route.route_id,
+                "target": route.target,
+                "purpose": route.purpose,
+                "start_path": route.start_path,
+                "authority": route.authority,
+                "mutability": protocol["mutability"],
+                "human_gate": protocol["human_gate"],
+                "gate_class": protocol["gate_class"],
+                "human_gate_reason": protocol["human_gate_reason"],
+                "allowed_decisions": protocol["allowed_decisions"],
+                "advisory": protocol["advisory"],
+            }
+        )
+    return tuple(rows)
 
 
 def classify_intake_text(text: str) -> IntakeRouteAdvice:
@@ -289,6 +391,7 @@ def classify_memory_route(rel_path: str, role: str = "") -> MemoryRoute:
         ("project/decisions/", "decisions"),
         ("project/plan-incubation/", "incubation"),
         ("project/research/", "research"),
+        ("project/verification/agent-runs/", "agent-runs"),
         ("project/specs/", "stable-specs"),
         ("project/verification/", "verification"),
         ("specs/workflow/", "package-mirror"),

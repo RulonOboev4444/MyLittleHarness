@@ -23,6 +23,16 @@ The product formula is intentionally plain:
 
 > Files hold authority. Metadata routes. Git records durable history. Generated projections accelerate. Diagnostics warn. Adapters assist. Mutation stays explicit and fail-closed.
 
+## Why Agents Get More Efficient
+
+MLH does not make the model magically smarter. It makes the workspace easier for the model to operate.
+
+The efficiency gain comes from moving process state out of the prompt and into the repo. Project state, roadmap, active plans, checks, closeout evidence, and archives tell the agent what is active, what is allowed, what is blocked, what counts as done, where evidence goes, and how to resume.
+
+That means less context reconstruction, less task-selection ambiguity, less scope creep, fewer unsafe actions, faster verification, better resumability, and optional process feedback when explicitly enabled.
+
+The result: less prompt entropy, fewer wrong turns, tighter scopes, and more reliable autonomous loops.
+
 ## Who It Is For
 
 MyLittleHarness is for developers, teams, and tool builders who are already using AI coding assistants and want a stronger repository boundary around them.
@@ -85,9 +95,9 @@ Apply modes stay explicit and target-bound. Use `repair --apply`, `detach --appl
 
 `check` includes compact link/docmap/stale-root/rule-context/remainder drift reporting, including primary instruction-surface size warnings. `check --deep` adds links, context, hygiene, and report-only grain diagnostics. Grain diagnostics inspect active-plan slice size, roadmap mapping/hygiene, and archived-plan calibration samples as advisory signals only. Deeper section-size detail remains in advanced `context-budget` and `doctor` diagnostics. `check --focus validation|links|context|hygiene|grain` runs one focused read-only diagnostic.
 
-Advanced and compatibility commands remain available for recovery and deeper review: `status`, `validate`, `audit-links`, `context-budget`, `doctor`, `preflight`, `intelligence`, `projection`, `snapshot`, `adapter`, `semantic`, `evidence`, `closeout`, `bootstrap --inspect`, `bootstrap --package-smoke`, explicit `writeback`, explicit `transition`, explicit `incubate`, explicit `plan`, explicit `memory-hygiene`, and explicit `roadmap`.
+Advanced and compatibility commands remain available for recovery and deeper review: `status`, `validate`, `audit-links`, `context-budget`, `doctor`, `preflight`, `suggest --intent`, `intelligence`, `projection`, `snapshot`, `adapter`, `semantic`, `evidence`, `closeout`, `bootstrap --inspect`, `bootstrap --package-smoke`, explicit `mirror`, explicit `writeback`, explicit `transition`, explicit `incubate`, opt-in `meta-feedback`, explicit `plan`, explicit `memory-hygiene`, and explicit `roadmap`.
 
-Focused write rails include `incubate --fix-candidate` for standard MLH debt capture, `memory-hygiene --archive-covered` with explicit Entry Coverage for terminal incubation cleanup, `writeback --from-active-plan` with project-state closeout authority fallback, and `writeback --product-source-root <path>` for validated clean product source metadata.
+Focused write rails include `incubate --fix-candidate` for standard MLH debt capture, opt-in `meta-feedback --to-root <mlh-dev-root>` for routing observed-root feedback into a central incubation note plus global roadmap placement, `meta-feedback --dedupe-to <canonical-id>` for appending related observations to a canonical friction cluster, `mirror --dry-run|--apply` for declared product-to-demo file parity with product-source rerun guidance and local Python dependency-closure gap reports, `memory-hygiene --archive-covered` with explicit Entry Coverage for terminal incubation cleanup, `writeback --from-active-plan` with project-state closeout authority fallback, and `writeback --product-source-root <path>` for validated clean product source metadata.
 
 ## Safety Model
 
@@ -192,6 +202,6 @@ Start at `docs/README.md` for the deeper documentation spine.
 
 ## Docs Decisions
 
-Docs decision values are `updated`, `not-needed`, and `uncertain`. A docs decision is required when behavior, CLI usage, configuration, setup, contract meaning, permissions, output shape, UX/copy, terminology, rollout, migration, or other user-facing meaning changes. Closeout facts live in the marked `project/project-state.md` writeback block; active-plan closeout bullets are derived copies, and `writeback --from-active-plan` may fall back to complete matching project-state closeout authority when the active plan has no explicit closeout section.
+Docs decision values are `updated`, `not-needed`, and `uncertain`. A docs decision is required when behavior, CLI usage, configuration, setup, contract meaning, permissions, output shape, UX/copy, terminology, rollout, migration, or other user-facing meaning changes. Closeout facts live in the marked `project/project-state.md` writeback block; active-plan closeout bullets are derived copies, and `writeback --from-active-plan` may fall back to complete matching project-state closeout authority when the active plan has no explicit closeout section. For phase-only ready-for-closeout handoff, `docs_decision = uncertain` with `phase_status = complete` may replace mismatched stale closeout facts with current plan identity while keeping closeout language provisional.
 
 Use `.agents/docmap.yaml`, `audit-links`, `check`, relevant specs, and observed diff evidence as portable inputs. no Codex skill or generated docs-impact report is required for v1.

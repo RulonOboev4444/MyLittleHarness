@@ -13,7 +13,13 @@ from . import __version__
 from .inventory import Inventory
 from .models import Finding
 from .projection import Projection, ProjectionSourceRecord, build_projection
-from .projection_artifacts import ARTIFACT_DIR_REL, artifact_dir
+from .projection_artifacts import (
+    ARTIFACT_DIR_REL,
+    INDEX_DIRTY_MARKER_NAME,
+    artifact_dir,
+    clear_projection_cache_dirty_marker,
+    projection_cache_dirty_marker_findings,
+)
 
 
 INDEX_SCHEMA_VERSION = 1
@@ -24,6 +30,7 @@ INDEX_SIDECAR_NAMES = (
     f"{INDEX_NAME}-journal",
     f"{INDEX_NAME}-shm",
     f"{INDEX_NAME}-wal",
+    INDEX_DIRTY_MARKER_NAME,
 )
 
 
@@ -65,6 +72,7 @@ def build_projection_index(inventory: Inventory) -> list[Finding]:
             _write_source_rows(connection, shape.source_rows)
             _write_fts_rows(connection, shape.fts_rows)
             connection.commit()
+        clear_projection_cache_dirty_marker(inventory.root, INDEX_DIRTY_MARKER_NAME)
     except sqlite3.Error as exc:
         _delete_known_index_paths(inventory.root)
         return [
@@ -92,6 +100,14 @@ def inspect_projection_index(inventory: Inventory, projection: Projection | None
 
     findings.append(Finding("info", "projection-index-boundary", f"owned generated-output boundary: {ARTIFACT_DIR_REL}", ARTIFACT_DIR_REL))
     findings.extend(_unexpected_index_sidecar_findings(inventory.root))
+    findings.extend(
+        projection_cache_dirty_marker_findings(
+            inventory.root,
+            INDEX_DIRTY_MARKER_NAME,
+            "projection-index-dirty",
+            "SQLite projection index was marked dirty by a mutating workflow command; rebuild recommended",
+        )
+    )
     if not _fts5_is_available():
         findings.append(Finding("warn", "projection-index-fts5-unavailable", "SQLite FTS5 is unavailable; full-text retrieval is skipped"))
 

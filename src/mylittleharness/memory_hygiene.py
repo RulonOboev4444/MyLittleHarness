@@ -18,6 +18,7 @@ ARCHIVE_RESEARCH_DIR_REL = "project/archive/reference/research"
 ARCHIVE_INCUBATION_DIR_REL = "project/archive/reference/incubation"
 ROADMAP_REL = "project/roadmap.md"
 ALLOWED_STATUS_VALUES = {"archived", "distilled", "implemented", "rejected"}
+TERMINAL_ROADMAP_STATUSES = {"done", "rejected", "superseded"}
 RELATIONSHIP_STATUS_FIELDS = {
     "archived_plan",
     "archived_to",
@@ -55,6 +56,8 @@ ENTRY_COVERAGE_TERMINAL_STATUSES = {"implemented", "rejected", "superseded", "me
 ENTRY_COVERAGE_OPEN_STATUSES = {"accepted", "active", "blocked", "deferred", "incubating", "open", "pending", "todo"}
 TERMINAL_INCUBATION_STATUSES = {"implemented", "archived", "rejected", "superseded"}
 FINAL_DOCS_DECISIONS = {"updated", "not-needed"}
+ROADMAP_CURRENT_POSTURE_TITLE = "Current Posture"
+ROADMAP_CURRENT_POSTURE_FIELD = "current_posture"
 
 
 @dataclass(frozen=True)
@@ -119,6 +122,29 @@ class RelationshipUpdatePlan:
     archive_path: Path | None = None
     archive_blockers: tuple[str, ...] = ()
     link_repairs: tuple[tuple[str, Path, str], ...] = ()
+
+
+@dataclass(frozen=True)
+class RoadmapCurrentPostureItem:
+    item_id: str
+    status: str
+    order: str
+    title: str
+    execution_slice: str
+    detail: str
+
+
+def sync_roadmap_current_posture_section(text: str) -> str:
+    lines = text.splitlines(keepends=True)
+    bounds = _roadmap_h2_section_bounds(lines, ROADMAP_CURRENT_POSTURE_TITLE)
+    if bounds is None:
+        return text
+    items = _roadmap_current_posture_items(text)
+    start, end = bounds
+    newline = "\r\n" if any(line.endswith("\r\n") for line in lines) else "\n"
+    replacement = [lines[start], *_roadmap_current_posture_body_lines(items, newline)]
+    updated = "".join([*lines[:start], *replacement, *lines[end:]])
+    return text if updated == text else updated
 
 
 def make_memory_hygiene_request(
@@ -431,17 +457,7 @@ def _source_text_with_lifecycle_frontmatter(text: str, request: MemoryHygieneReq
     if request.archive_to:
         updates["archived_to"] = request.archive_to
 
-    seen: set[str] = set()
-    for index in range(1, closing_index):
-        match = re.match(r"^([A-Za-z0-9_-]+):(.*?)(\r?\n)?$", lines[index])
-        if not match:
-            continue
-        key = match.group(1)
-        if key not in updates:
-            continue
-        newline = match.group(3) or ("\n" if lines[index].endswith("\n") else "")
-        lines[index] = f'{key}: "{_yaml_double_quoted_value(updates[key])}"{newline}'
-        seen.add(key)
+    seen, closing_index = _replace_frontmatter_scalar_blocks(lines, closing_index, updates)
 
     missing = [key for key in updates if key not in seen]
     if missing:
@@ -548,6 +564,7 @@ def incubation_closeout_plan(
     archived_plan: str,
     verification_summary: str,
     docs_decision: str,
+    extra_archive_blockers: tuple[str, ...] = (),
 ) -> tuple[RelationshipUpdatePlan | None, list[Finding]]:
     source_rel = _normalize_rel(source_rel)
     source_path = inventory.root / source_rel if source_rel else inventory.root
@@ -566,6 +583,7 @@ def incubation_closeout_plan(
         source_text,
         ignore_stale_implementation_tail=closeout_can_mark_implemented,
     )
+    blockers = (*blockers, *extra_archive_blockers)
     if not archived_plan:
         blockers = (*blockers, "missing archived plan")
     if not verification_summary:
@@ -807,6 +825,22 @@ def _roadmap_items(inventory: Inventory) -> dict[str, dict[str, object]]:
 
 def _roadmap_relationship_findings(inventory: Inventory, roadmap_items: dict[str, dict[str, object]]) -> list[Finding]:
     findings: list[Finding] = []
+    live_consumers_by_source = _live_source_incubation_consumers_by_source(roadmap_items)
+    for source_incubation, item_ids in sorted(live_consumers_by_source.items()):
+        if len(item_ids) <= 1:
+            continue
+        findings.append(
+            Finding(
+                "warn",
+                "relationship-shared-source-incubation-consumers",
+                (
+                    f"source_incubation {source_incubation} has multiple live roadmap consumers: "
+                    f"{', '.join(item_ids)}; convert non-owning consumers to related_incubation or add terminal coverage "
+                    "before whole-note archive or source path retargeting"
+                ),
+                ROADMAP_REL,
+            )
+        )
     for item_id, fields in sorted(roadmap_items.items()):
         status = str(fields.get("status") or "")
         source_incubation = _normalize_rel(fields.get("source_incubation"))
@@ -852,6 +886,7 @@ def _incubation_relationship_findings(inventory: Inventory, roadmap_items: dict[
         source = _normalize_rel(fields.get("source_incubation"))
         if source:
             items_by_source[source] = (item_id, fields)
+    live_consumers_by_source = _live_source_incubation_consumers_by_source(roadmap_items)
 
     for surface in sorted(inventory.present_surfaces, key=lambda item: item.rel_path):
         if not surface.rel_path.startswith(f"{INCUBATION_DIR_REL}/") or surface.path.suffix.lower() != ".md":
@@ -880,6 +915,20 @@ def _incubation_relationship_findings(inventory: Inventory, roadmap_items: dict[
         item_id = related_item or (source_item[0] if source_item else "")
         item_fields = roadmap_items.get(item_id) if item_id else None
         if not item_fields or str(item_fields.get("status") or "") != "done":
+            continue
+        live_consumers = live_consumers_by_source.get(surface.rel_path, ())
+        if live_consumers:
+            findings.append(
+                Finding(
+                    "warn",
+                    "relationship-mixed-incubation-blocker",
+                    (
+                        f"incubation note is linked to done roadmap item {item_id!r} but still has live "
+                        f"source_incubation consumers: {', '.join(live_consumers)}"
+                    ),
+                    surface.rel_path,
+                )
+            )
             continue
         structurally_covered = False
         item_fields = roadmap_items.get(item_id) if item_id else None
@@ -929,6 +978,7 @@ def _incubation_cleanup_advisor_findings(inventory: Inventory, roadmap_items: di
         source = _normalize_rel(fields.get("source_incubation"))
         if source:
             items_by_source[source] = (item_id, fields)
+    live_consumers_by_source = _live_source_incubation_consumers_by_source(roadmap_items)
 
     findings: list[Finding] = []
     counts = {"archive": 0, "keep": 0, "ambiguous": 0}
@@ -985,6 +1035,24 @@ def _incubation_cleanup_advisor_findings(inventory: Inventory, roadmap_items: di
             )
 
         archive_status = _archive_candidate_status(status, structurally_covered)
+        live_consumers = live_consumers_by_source.get(surface.rel_path, ())
+        shared_live_consumers = tuple(live_consumers) if len(live_consumers) > 1 else ()
+        if not shared_live_consumers and roadmap_status == "done":
+            shared_live_consumers = tuple(item for item in live_consumers if item != item_id)
+        if shared_live_consumers:
+            counts["keep"] += 1
+            findings.append(
+                Finding(
+                    "info",
+                    "incubation-cleanup-keep-active",
+                    (
+                        "keep active while live source_incubation consumers remain: "
+                        f"{', '.join(shared_live_consumers)}"
+                    ),
+                    surface.rel_path,
+                )
+            )
+            continue
         if not blockers and (structurally_covered or status in ALLOWED_STATUS_VALUES):
             counts["archive"] += 1
             status_flag = "" if archive_status == "archived" else f" --status {archive_status}"
@@ -1037,6 +1105,21 @@ def _incubation_keep_active_reason(item_id: str, roadmap_status: str, blockers: 
     if status and status not in TERMINAL_INCUBATION_STATUSES:
         return f"frontmatter status is {status!r}"
     return "no safe archive proof was found"
+
+
+def _live_source_incubation_consumers_by_source(
+    roadmap_items: dict[str, dict[str, object]]
+) -> dict[str, tuple[str, ...]]:
+    consumers: dict[str, list[str]] = {}
+    for item_id, fields in roadmap_items.items():
+        source = _normalize_rel(fields.get("source_incubation"))
+        if not source:
+            continue
+        status = str(fields.get("status") or "").strip().casefold()
+        if status in TERMINAL_ROADMAP_STATUSES:
+            continue
+        consumers.setdefault(source, []).append(item_id)
+    return {source: tuple(item_ids) for source, item_ids in consumers.items()}
 
 
 def _archive_candidate_status(status: str, structurally_covered: bool) -> str:
@@ -1324,22 +1407,42 @@ def _text_with_frontmatter_scalars(text: str, updates: dict[str, str]) -> tuple[
     if closing_index is None:
         return text, "source frontmatter is malformed"
 
-    seen: set[str] = set()
-    for index in range(1, closing_index):
-        match = re.match(r"^([A-Za-z0-9_-]+):(.*?)(\r?\n)?$", lines[index])
-        if not match:
-            continue
-        key = match.group(1)
-        if key not in updates:
-            continue
-        newline = match.group(3) or ("\n" if lines[index].endswith("\n") else "")
-        lines[index] = f'{key}: "{_yaml_double_quoted_value(updates[key])}"{newline}'
-        seen.add(key)
+    seen, closing_index = _replace_frontmatter_scalar_blocks(lines, closing_index, updates)
 
     missing = [key for key in updates if key not in seen]
     if missing:
         lines[closing_index:closing_index] = [f'{key}: "{_yaml_double_quoted_value(updates[key])}"\n' for key in missing]
     return "".join(lines), None
+
+
+def _replace_frontmatter_scalar_blocks(lines: list[str], closing_index: int, updates: dict[str, str]) -> tuple[set[str], int]:
+    seen: set[str] = set()
+    index = 1
+    while index < closing_index:
+        match = re.match(r"^([A-Za-z0-9_-]+):(.*?)(\r?\n)?$", lines[index])
+        if not match:
+            index += 1
+            continue
+        key = match.group(1)
+        if key not in updates:
+            index += 1
+            continue
+        newline = match.group(3) or ("\n" if lines[index].endswith("\n") else "")
+        end = index + 1
+        while end < closing_index and _frontmatter_scalar_continuation_line(lines[end]):
+            end += 1
+        lines[index:end] = [f'{key}: "{_yaml_double_quoted_value(updates[key])}"{newline}']
+        closing_index -= end - index - 1
+        seen.add(key)
+        index += 1
+    return seen, closing_index
+
+
+def _frontmatter_scalar_continuation_line(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        return False
+    return line.startswith((" ", "\t")) or stripped.startswith("- ")
 
 
 def _frontmatter_value(text: str, key: str) -> str | None:
@@ -1403,6 +1506,138 @@ def _source_route_allowed(rel_path: str) -> bool:
 
 def _archive_route_allowed(rel_path: str) -> bool:
     return rel_path.startswith(f"{ARCHIVE_RESEARCH_DIR_REL}/") or rel_path.startswith(f"{ARCHIVE_INCUBATION_DIR_REL}/")
+
+
+def _roadmap_current_posture_items(text: str) -> tuple[RoadmapCurrentPostureItem, ...]:
+    lines = text.splitlines()
+    headings: list[tuple[int, int, str]] = []
+    for index, line in enumerate(lines):
+        match = re.match(r"^(#{2,6})\s+(.+?)\s*$", line.strip())
+        if match:
+            headings.append((index, len(match.group(1)), match.group(2).strip()))
+
+    items: list[RoadmapCurrentPostureItem] = []
+    for position, (start, level, title) in enumerate(headings):
+        if level not in {2, 3}:
+            continue
+        normalized_title = _normalized_heading(title)
+        if normalized_title in {
+            "archived completed history",
+            "current posture",
+            "future execution slice queue",
+            "item schema",
+            "items",
+            "roadmap hygiene",
+        }:
+            continue
+        end = len(lines)
+        for next_start, next_level, _next_title in headings[position + 1 :]:
+            if next_level <= level:
+                end = next_start
+                break
+        fields = _roadmap_current_posture_fields(lines[start + 1 : end])
+        item_id = _normalized_item_id(fields.get("id") or _legacy_heading_item_id(title))
+        status = _normalized_status(fields.get("status"), "", "")
+        if not item_id or not status:
+            continue
+        items.append(
+            RoadmapCurrentPostureItem(
+                item_id=item_id,
+                status=status,
+                order=str(fields.get("order") or "").strip() or "unspecified",
+                title=title,
+                execution_slice=_normalized_item_id(fields.get("execution_slice")) or item_id,
+                detail=_roadmap_current_posture_detail(title, fields),
+            )
+        )
+    return tuple(sorted(items, key=lambda item: (_roadmap_order_sort_key(item.order), item.item_id)))
+
+
+def _roadmap_current_posture_fields(lines: list[str]) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for raw in lines:
+        stripped = raw.strip()
+        canonical = re.match(r"^[-*]\s+`?(?P<key>[A-Za-z0-9_-]+)`?\s*:\s*(?P<value>.*?)\s*$", stripped)
+        legacy = re.match(r"^(?P<key>[A-Za-z0-9_-]+)\s*:\s*(?P<value>.*?)\s*$", stripped)
+        match = canonical or legacy
+        if not match:
+            continue
+        key = match.group("key").strip().casefold().replace("-", "_")
+        value = _strip_quotes(match.group("value").strip().strip("`"))
+        if value.startswith("[") and value.endswith("]"):
+            continue
+        fields[key] = value.strip()
+    return fields
+
+
+def _roadmap_current_posture_detail(title: str, fields: dict[str, str]) -> str:
+    detail = fields.get("slice_goal") or fields.get("carry_forward") or title
+    return re.sub(r"\s+", " ", str(detail or "").replace("`", "'").strip()).rstrip(".")
+
+
+def _roadmap_current_posture_body_lines(items: tuple[RoadmapCurrentPostureItem, ...], newline: str) -> list[str]:
+    active = tuple(item for item in items if item.status == "active")
+    accepted = tuple(item for item in items if item.status == "accepted")
+    proposed = tuple(item for item in items if item.status == "proposed")
+    lines = [newline]
+    lines.append(
+        "Current roadmap posture is derived from item metadata; this prose is advisory and cannot approve lifecycle movement."
+        f"{newline}"
+    )
+    lines.append(newline)
+    lines.append(_roadmap_current_posture_line("Active item", active, newline))
+    lines.append(_roadmap_current_posture_line("Next accepted item", accepted, newline))
+    lines.append(_roadmap_current_posture_line("Proposed later item", proposed, newline))
+    lines.append("- Metadata source: roadmap item `status`, `order`, `execution_slice`, and `slice_goal` fields." f"{newline}")
+    lines.append(newline)
+    return lines
+
+
+def _roadmap_current_posture_line(label: str, items: tuple[RoadmapCurrentPostureItem, ...], newline: str) -> str:
+    if not items:
+        return f"- {label}: none recorded.{newline}"
+    first = items[0]
+    if len(items) == 1:
+        return f"- {label}: `{first.item_id}` (order `{first.order}`, slice `{first.execution_slice}`) - {first.detail}.{newline}"
+    last = items[-1]
+    return (
+        f"- {label}: `{first.item_id}` (order `{first.order}`, slice `{first.execution_slice}`) "
+        f"through `{last.item_id}` (order `{last.order}`, slice `{last.execution_slice}`); {len(items)} item(s) total.{newline}"
+    )
+
+
+def _roadmap_order_sort_key(value: str) -> tuple[int, str]:
+    raw = str(value or "").strip()
+    try:
+        return (int(raw), raw)
+    except ValueError:
+        return (10**9, raw)
+
+
+def _roadmap_h2_section_bounds(lines: list[str], title: str) -> tuple[int, int] | None:
+    start = None
+    pattern = re.compile(rf"^##\s+{re.escape(title)}\s*$")
+    for index, line in enumerate(lines):
+        if pattern.match(line.strip()):
+            start = index
+            break
+    if start is None:
+        return None
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        if re.match(r"^##\s+\S", lines[index].strip()):
+            end = index
+            break
+    return start, end
+
+
+def _legacy_heading_item_id(title: str) -> str:
+    match = re.match(r"^(RM-[0-9]+)\b", str(title or "").strip(), re.IGNORECASE)
+    return match.group(1) if match else ""
+
+
+def _normalized_item_id(value: object) -> str:
+    return str(value or "").strip().casefold().replace("_", "-")
 
 
 def _rel_has_absolute_or_parent_parts(rel_path: str) -> bool:

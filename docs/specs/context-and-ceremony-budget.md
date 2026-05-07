@@ -37,6 +37,8 @@ Before mutation, the agent needs one planning gate that names the intended edits
 
 Escalate to a full implementation plan when work is multi-session, high-risk, cross-root, contract-changing, hard to validate, or likely to require closeout evidence.
 
+Every rendered report includes an adaptive ceremony capsule in `Work Result`: the expected operator cost, the safety guarantee preserved by the current command, and the next safe command or route-discovery step. The capsule is advisory and must point toward dry-run/apply rails without approving lifecycle movement, archive, staging, commit, or push.
+
 Context budgets should favor:
 
 - source-set discipline over broad archaeology
@@ -48,7 +50,7 @@ Context budgets should favor:
 
 Sub-agents and background work are optional bounded helpers. They require explicit user authorization and must return compact results to the main context.
 
-The implemented live operating-memory hygiene threshold is intentionally narrow: after explicit live-root writeback or plan state writes, and through explicit `writeback --dry-run|--apply --compact-only`, `project/project-state.md` above 250 lines may be compacted by moving older history sections into `project/archive/reference/` while preserving current focus, memory routing roadmap, repository role map, short notes, the latest relevant update, closeout writeback facts, and an archive pointer. Read-only context-budget measurements for product docs, specs, or reports remain advisory and do not write files; size alone is warning pressure only for primary instruction surfaces such as guardrails, manifest, state, README, docmap, or an active plan.
+The implemented live operating-memory hygiene threshold is intentionally narrow: after explicit live-root writeback or plan state writes, and through explicit `writeback --dry-run|--apply --compact-only`, `project/project-state.md` above 250 lines or 25,000 characters may be compacted by moving older history sections into `project/archive/reference/` while preserving current focus, memory routing roadmap, repository role map, short notes, the latest relevant update, closeout writeback facts, and an archive pointer. Read-only context-budget measurements for product docs, specs, or reports remain advisory and do not write files; size alone is warning pressure only for primary instruction surfaces such as guardrails, manifest, state, README, docmap, or an active plan.
 
 ## Future Product Gates
 
@@ -83,7 +85,7 @@ Validation may include smoke scenarios for read-only explanation, small mutation
 
 - No new always-on router, scheduler, daemon, dashboard, or control plane.
 - No required background agents.
-- No broad token-budget enforcement beyond the narrow 250-line live state compaction threshold behind explicit writeback/plan write paths or compact-only writeback.
+- No broad token-budget enforcement beyond the narrow 250-line or 25,000-character live state compaction threshold behind explicit writeback/plan write paths or compact-only writeback.
 - No broad import of old research or archives.
 - No ceremony checklist that substitutes for verification.
 - No automatic thread renaming or user-global configuration changes.

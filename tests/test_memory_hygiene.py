@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from mylittleharness import atomic_files
 from mylittleharness.cli import main
+from mylittleharness.parsing import parse_frontmatter
 
 
 class MemoryHygieneTests(unittest.TestCase):
@@ -564,6 +565,51 @@ class MemoryHygieneTests(unittest.TestCase):
             self.assertIn('related_roadmap_item: "relation-test"', source_text)
             self.assertIn('promoted_to: "project/roadmap.md"', source_text)
             self.assertIn("roadmap-relationship-sync", output.getvalue())
+
+    def test_roadmap_apply_replaces_malformed_source_incubation_list_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            source = make_incubation_source(
+                root,
+                frontmatter_extra=(
+                    "related_roadmap:\n"
+                    '- "project/archive/reference/old-roadmap.md"\n'
+                    "related_roadmap_item:\n"
+                    '- "old-item"\n'
+                ),
+            )
+            write_empty_roadmap(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "roadmap",
+                        "--apply",
+                        "--action",
+                        "add",
+                        "--item-id",
+                        "relation-test",
+                        "--title",
+                        "Relation Test",
+                        "--status",
+                        "accepted",
+                        "--order",
+                        "10",
+                        "--source-incubation",
+                        source.relative_to(root).as_posix(),
+                    ]
+                )
+
+            self.assertEqual(code, 0)
+            self.assertIn("roadmap-relationship-sync", output.getvalue())
+            source_text = source.read_text(encoding="utf-8")
+            self.assertIn('related_roadmap: "project/roadmap.md"', source_text)
+            self.assertIn('related_roadmap_item: "relation-test"', source_text)
+            self.assertNotIn('old-roadmap.md"', source_text)
+            self.assertEqual([], parse_frontmatter(source_text).errors)
 
     def test_roadmap_apply_rolls_back_roadmap_when_relationship_replace_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -23,6 +23,21 @@ No adapter may become the only way to recover current focus, plan status, accept
 
 Optional wrappers such as Codex skills, IDE rules, shell aliases, preflight wrappers, MCP clients, hooks, CI jobs, and future adapter packs may derive prompts or ergonomics from the repo-visible contract. They must not become the first-run path, docs-decision path, repair path, verification path, closeout path, or the only location for accepted decisions.
 
+## V2 External Orchestrator Boundary
+
+The v2 architecture treats external orchestrators, model providers, MCP servers, generated indexes, and notification relays as embassies around MLH's deterministic State. They may inspect route law, receive role packets, produce patches, record run evidence, transport approval packets, or help humans review work. They must not become lifecycle authority.
+
+The first v2-compatible adapter contract is read/projection and report legibility:
+
+- external clients can ask for route, role, gate, evidence, and generated-map posture;
+- `manifest --inspect --json` exposes `route_manifest` and advisory `role_manifest` data for orchestrator packet setup;
+- route/role manifests are advisory until an MLH apply rail writes repo-visible authority;
+- provider/model/tool routing is policy metadata before it is runtime ownership;
+- optional relay adapters may transport approval packets only after core packets and review tokens exist;
+- relay, provider, model, MCP, or generated-index state cannot approve closeout, archive, repair, roadmap movement, commit, push, release, or lifecycle transitions.
+
+Do not add a hidden swarm runtime, background daemon, provider credential store, webhook tunnel, workstation install, or autonomous worker supervisor as part of v2 foundation. Future orchestration remains an external client of MLH until route manifests, role profiles, run evidence, claims, review tokens, and reconcile diagnostics are reliable.
+
 ## Adapter Groups
 
 | Adapter group | Product role | Boundary |
@@ -110,6 +125,4 @@ It must not install hooks, create CI/GitHub workflows, use network calls, write 
 - Preflight-only correctness or hidden blocking policy.
 - Browser, IDE, MCP, GitHub, or plugin state as accepted decision storage.
 - Adapter-specific source of truth that cannot be recovered from files.
-
-
 

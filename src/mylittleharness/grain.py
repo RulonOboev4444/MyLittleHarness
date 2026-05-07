@@ -148,6 +148,16 @@ def _active_plan_grain_findings(stats: PlanGrainStats) -> list[Finding]:
             )
         )
 
+    if mismatch_reason := _verification_toolchain_mismatch(stats):
+        findings.append(
+            Finding(
+                "warn",
+                "grain-plan-verification-toolchain",
+                mismatch_reason,
+                stats.rel_path,
+            )
+        )
+
     ownership_gaps = _target_artifact_write_scope_gaps(stats)
     if ownership_gaps:
         sample = ", ".join(ownership_gaps[:5])
@@ -157,6 +167,16 @@ def _active_plan_grain_findings(stats: PlanGrainStats) -> list[Finding]:
                 "warn",
                 "grain-plan-target-ownership",
                 f"active plan target_artifacts are not named in phase write_scope lines: {sample}{suffix}",
+                stats.rel_path,
+            )
+        )
+
+    if adjacent_reason := _adjacent_regression_test_ownership_reason(stats):
+        findings.append(
+            Finding(
+                "warn",
+                "grain-plan-adjacent-verification-ownership",
+                adjacent_reason,
                 stats.rel_path,
             )
         )
@@ -417,7 +437,7 @@ def _plan_stats(rel_path: str, text: str) -> PlanGrainStats:
         execution_policy=str(frontmatter.get("execution_policy") or ""),
         docs_decision=str(frontmatter.get("docs_decision") or ""),
         write_scope_lines=_matching_contract_lines(lines, "write scope", "write_scope"),
-        verification_lines=_matching_contract_lines(lines, "verification gates", "verification gate", "verification"),
+        verification_lines=_matching_contract_lines(lines, "verification gates", "verification gate", "verification_gates", "verification"),
         state_transfer_present="state transfer" in text.casefold(),
         closeout_fact_count=sum(1 for key in _closeout_keys() if re.search(rf"(?m)^-\s+{re.escape(key)}\s*:", text)),
         raw_log_markers=sum(1 for line in lines if _looks_like_raw_log_line(line)),
@@ -460,7 +480,17 @@ def _write_scope_is_vague(lines: tuple[str, ...]) -> bool:
 def _verification_is_vague(lines: tuple[str, ...]) -> bool:
     if not lines:
         return True
-    vague_markers = ("targeted tests first", "broader checks", "appropriate", "as needed", "tbd", "todo")
+    vague_markers = (
+        "targeted tests first",
+        "broader checks",
+        "appropriate",
+        "as needed",
+        "tbd",
+        "todo",
+        "unresolved",
+        "no repo-visible verification command",
+        "a narrower deterministic command is recorded",
+    )
     return not any(_contract_line_is_specific(line, vague_markers) for line in lines)
 
 
@@ -478,6 +508,103 @@ def _target_artifact_write_scope_gaps(stats: PlanGrainStats) -> list[str]:
     if not write_scope_text.strip():
         return list(stats.target_artifacts)
     return [target for target in stats.target_artifacts if target.replace("\\", "/") not in write_scope_text]
+
+
+def _adjacent_regression_test_ownership_reason(stats: PlanGrainStats) -> str:
+    write_scope_text = "\n".join(stats.write_scope_lines).replace("\\", "/").casefold()
+    verification_text = "\n".join(stats.verification_lines)
+    explicit_tests = _dedupe_values((*_test_artifacts_from_values(stats.target_artifacts), *_test_paths_from_verification(verification_text)))
+    outside_scope = [path for path in explicit_tests if path.casefold() not in write_scope_text]
+    if outside_scope:
+        sample = ", ".join(outside_scope[:5])
+        suffix = f", +{len(outside_scope) - 5} more" if len(outside_scope) > 5 else ""
+        return (
+            "active plan verification gates name regression test path(s) outside write_scope lines: "
+            f"{sample}{suffix}; include adjacent test ownership or record a scoped widening"
+        )
+    if _verification_runs_broad_pytest(verification_text) and _has_python_source_target(stats.target_artifacts) and not _test_artifacts_from_values(stats.target_artifacts):
+        return (
+            "active plan uses broad pytest/full-suite verification while target_artifacts name product/source files but no regression tests; "
+            "adjacent regression-test ownership should be named before confident execution"
+        )
+    return ""
+
+
+def _test_artifacts_from_values(values: tuple[str, ...]) -> tuple[str, ...]:
+    tests: list[str] = []
+    for value in values:
+        normalized = value.replace("\\", "/").strip("/").casefold()
+        if normalized.startswith("tests/") or normalized == "tests":
+            tests.append(normalized)
+    return tuple(tests)
+
+
+def _test_paths_from_verification(text: str) -> tuple[str, ...]:
+    normalized = str(text or "").replace("\\", "/")
+    paths = re.findall(r"(?<![A-Za-z0-9_./-])(tests/[A-Za-z0-9_./-]+)", normalized, flags=re.IGNORECASE)
+    return tuple(path.strip("/").casefold() for path in paths)
+
+
+def _verification_runs_broad_pytest(text: str) -> bool:
+    lowered = text.casefold()
+    return "pytest" in lowered and not _test_paths_from_verification(text)
+
+
+def _has_python_source_target(target_artifacts: tuple[str, ...]) -> bool:
+    for target in target_artifacts:
+        normalized = target.replace("\\", "/").strip("/").casefold()
+        if normalized.startswith("src/") or (normalized.endswith(".py") and not normalized.startswith("tests/")):
+            return True
+    return False
+
+
+def _dedupe_values(values: tuple[str, ...]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        normalized = value.replace("\\", "/").strip("/").casefold()
+        if normalized and normalized not in seen:
+            deduped.append(normalized)
+            seen.add(normalized)
+    return deduped
+
+
+def _verification_toolchain_mismatch(stats: PlanGrainStats) -> str:
+    verification_text = "\n".join(stats.verification_lines).casefold()
+    has_python_gate = "pytest" in verification_text or "pythonpath=src" in verification_text
+    has_node_gate = any(marker in verification_text for marker in ("npm ", "pnpm ", "yarn ", "bun "))
+    js_target = _target_artifacts_look_js(stats.target_artifacts)
+    python_target = _target_artifacts_look_python(stats.target_artifacts)
+    if js_target and has_python_gate:
+        return (
+            "active plan verification gates look Python/pytest-shaped while target_artifacts look JavaScript/TypeScript; "
+            "use repo-visible package/task/CI gates or mark the gate unresolved"
+        )
+    if python_target and has_node_gate and not js_target:
+        return (
+            "active plan verification gates look Node/package-script-shaped while target_artifacts look Python; "
+            "use repo-visible Python gates or mark the gate unresolved"
+        )
+    return ""
+
+
+def _target_artifacts_look_js(target_artifacts: tuple[str, ...]) -> bool:
+    js_suffixes = (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs")
+    js_names = ("package.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb", "bun.lock")
+    js_prefixes = ("apps/", "packages/", "web/", "frontend/")
+    for target in target_artifacts:
+        normalized = target.replace("\\", "/").strip("/").casefold()
+        if normalized.endswith(js_suffixes) or normalized in js_names or normalized.startswith(js_prefixes):
+            return True
+    return False
+
+
+def _target_artifacts_look_python(target_artifacts: tuple[str, ...]) -> bool:
+    for target in target_artifacts:
+        normalized = target.replace("\\", "/").strip("/").casefold()
+        if normalized.endswith(".py") or normalized in {"pyproject.toml", "requirements.txt", "tox.ini", "noxfile.py"}:
+            return True
+    return False
 
 
 def _pressure_signals(stats: PlanGrainStats) -> list[str]:

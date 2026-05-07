@@ -4,6 +4,7 @@ import difflib
 import glob
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -24,6 +25,7 @@ from .inventory import (
 from .lifecycle_focus import CURRENT_FOCUS_BEGIN, CURRENT_FOCUS_END, MEMORY_ROADMAP_BEGIN, MEMORY_ROADMAP_END
 from .models import Finding
 from .memory_hygiene import relationship_hygiene_scan_findings
+from .roadmap import roadmap_order_namespace_findings, roadmap_terminal_related_plan_findings
 from .projection import Projection, ProjectionLinkRecord, build_projection, product_target_artifact_reason
 from .projection_artifacts import (
     ARTIFACT_DIR_REL,
@@ -44,6 +46,7 @@ from .routes import (
     lifecycle_route_rows,
 )
 from .writeback import (
+    STATE_COMPACTION_CHAR_THRESHOLD,
     active_plan_body_facts,
     active_plan_completed_phase_handoff_findings,
     active_plan_phase_body_status_fact,
@@ -51,18 +54,21 @@ from .writeback import (
     canonical_phase_body_status,
     closeout_values_are_complete,
     state_writeback_facts,
+    state_writeback_identity_matches_current_plan,
 )
 
 
 LARGE_FILE_LINES = 500
 VERY_LARGE_FILE_LINES = 1500
-LARGE_FILE_CHARS = 25_000
+LARGE_FILE_CHARS = STATE_COMPACTION_CHAR_THRESHOLD
 VERY_LARGE_FILE_CHARS = 75_000
 LARGE_AGGREGATE_LINES = 2500
 LARGE_AGGREGATE_CHARS = 125_000
 SEARCH_RESULT_LIMIT = 20
 FAN_IN_RESULT_LIMIT = 20
 CURRENT_PHASE_ONLY_POLICY = "current-phase-only"
+CENTRAL_META_FEEDBACK_PROJECT = "MyLittleHarness-dev"
+META_FEEDBACK_ROOT_ENV_VAR = "MYLITTLEHARNESS_META_FEEDBACK_ROOT"
 AUTO_CONTINUE_STOP_COVERAGE = (
     ("verification", ("verification", "deterministic success", "success signal")),
     ("authority", ("docs", "api", "lifecycle authority", "root classification")),
@@ -430,6 +436,7 @@ def status_findings(inventory: Inventory) -> list[Finding]:
     data = state.frontmatter.data if state else {}
     findings.append(Finding("info", "root-kind", f"root kind: {inventory.root_kind}"))
     findings.extend(_product_posture_status_findings(inventory))
+    findings.extend(_meta_feedback_destination_status_findings(inventory))
     findings.extend(lifecycle_route_findings(inventory))
     findings.extend(lifecycle_summary_findings(inventory))
     for key in (
@@ -482,6 +489,38 @@ def status_findings(inventory: Inventory) -> list[Finding]:
     if marker and marker.exists:
         findings.extend(_detach_marker_status_findings(inventory, marker))
     return findings
+
+
+def _meta_feedback_destination_status_findings(inventory: Inventory) -> list[Finding]:
+    if inventory.root_kind != "live_operating_root":
+        return []
+    if not os.environ.get(META_FEEDBACK_ROOT_ENV_VAR):
+        return []
+    data = inventory.state.frontmatter.data if inventory.state and inventory.state.exists else {}
+    project = data.get("project")
+    if project == CENTRAL_META_FEEDBACK_PROJECT:
+        return [
+            Finding(
+                "info",
+                "meta-feedback-central-destination",
+                (
+                    f"this root is the central {CENTRAL_META_FEEDBACK_PROJECT} destination for canonical "
+                    "MLH-Fix-Candidate incubation notes and accepted roadmap placement; observed roots remain provenance"
+                ),
+                inventory.state.rel_path if inventory.state else None,
+            )
+        ]
+    return [
+        Finding(
+            "info",
+            "meta-feedback-central-destination",
+            (
+                f"canonical MLH product-debt meta-feedback should route to the central {CENTRAL_META_FEEDBACK_PROJECT} "
+                f"live operating root with --to-root or {META_FEEDBACK_ROOT_ENV_VAR}; this local live root is provenance only"
+            ),
+            inventory.state.rel_path if inventory.state else None,
+        )
+    ]
 
 
 def lifecycle_summary_findings(inventory: Inventory) -> list[Finding]:
@@ -645,6 +684,8 @@ def validation_findings(inventory: Inventory) -> list[Finding]:
     findings.extend(_spec_findings(inventory))
     findings.extend(_frontmatter_findings(inventory))
     findings.extend(_route_metadata_findings(inventory))
+    findings.extend(roadmap_order_namespace_findings(inventory))
+    findings.extend(roadmap_terminal_related_plan_findings(inventory))
     findings.extend(_docmap_findings(inventory))
     findings.extend(_mirror_findings(inventory))
     return findings
@@ -729,14 +770,14 @@ def _projection_cache_status(findings: list[Finding], current_code: str, missing
         return "unavailable", _projection_cache_sample(codes)
     if missing_code in codes:
         return "missing", missing_code
-    if current_code in codes:
-        return "current", current_code
     if any(
         code.endswith(suffix)
         for code in codes
-        for suffix in ("stale", "hash", "count", "schema", "root-mismatch")
+        for suffix in ("stale", "dirty", "hash", "count", "schema", "root-mismatch")
     ):
         return "stale", _projection_cache_sample(codes)
+    if current_code in codes:
+        return "current", current_code
     if any(finding.severity in {"warn", "error"} for finding in findings):
         return "degraded", _projection_cache_sample(codes)
     return "current", _projection_cache_sample(codes)
@@ -765,6 +806,7 @@ def rule_context_findings(inventory: Inventory, include_ok: bool = True) -> list
     rel_paths = list(RULE_CONTEXT_PRIMARY_SURFACES)
     if inventory.active_plan_surface and inventory.active_plan_surface.rel_path not in rel_paths:
         rel_paths.append(inventory.active_plan_surface.rel_path)
+    large_live_state = False
 
     for rel_path in rel_paths:
         surface = inventory.surface_by_rel.get(rel_path)
@@ -781,7 +823,12 @@ def rule_context_findings(inventory: Inventory, include_ok: bool = True) -> list
                 surface.rel_path,
             )
         )
+        if inventory.root_kind == "live_operating_root" and surface.rel_path == "project/project-state.md":
+            large_live_state = True
 
+    if large_live_state:
+        findings.extend(_state_compaction_contract_findings(inventory))
+        findings.extend(_agents_compaction_contract_findings(inventory))
     if findings or not include_ok:
         return findings
     return [Finding("info", "rule-context-ok", "primary instruction surfaces are within check-level size thresholds")]
@@ -793,8 +840,58 @@ def _large_rule_context_message(inventory: Inventory, surface: Surface, label: s
         f"{surface.char_count} chars, label={label}; use context-budget for section detail"
     )
     if inventory.root_kind == "live_operating_root" and surface.rel_path == "project/project-state.md":
-        message += "; preview whole-state history compaction with writeback --dry-run --compact-only"
+        message += "; preview/apply whole-state history compaction with writeback --dry-run --compact-only, then writeback --apply --compact-only after review"
     return message
+
+
+def _state_compaction_contract_findings(inventory: Inventory) -> list[Finding]:
+    state = inventory.state
+    if not state or not state.exists:
+        return []
+    required_keep_sections = ("Current Focus", "Repository Role Map")
+    missing = [title for title in required_keep_sections if f"## {title}" not in state.content]
+    if not missing:
+        return []
+    missing_text = ", ".join(missing)
+    return [
+        Finding(
+            "warn",
+            "state-compaction-section-boundary-missing",
+            (
+                f"project/project-state.md is oversized but lacks compact-only keep section(s): {missing_text}; "
+                "compact-only would refuse until current state section boundaries are restored, and this remains "
+                "operating-memory hygiene separate from lifecycle closeout, staging, commit, archive, rollback, or next-plan opening"
+            ),
+            state.rel_path,
+        )
+    ]
+
+
+def _agents_compaction_contract_findings(inventory: Inventory) -> list[Finding]:
+    agents = inventory.surface_by_rel.get("AGENTS.md")
+    if not agents or not agents.exists or _agents_has_compaction_contract(agents.content):
+        return []
+    return [
+        Finding(
+            "warn",
+            "agents-compaction-contract-missing",
+            (
+                "AGENTS.md does not include compact-only project-state hygiene guidance; refreshed operating-root contracts should tell agents "
+                "to preview/apply writeback --compact-only instead of manually trimming only the newest note"
+            ),
+            "AGENTS.md",
+        )
+    ]
+
+
+def _agents_has_compaction_contract(content: str) -> bool:
+    normalized = content.casefold()
+    return (
+        "writeback --compact-only" in normalized
+        and "project/project-state.md" in normalized
+        and ("manual" in normalized or "manually" in normalized)
+        and ("trim" in normalized or "compact" in normalized)
+    )
 
 
 def remainder_drift_findings(inventory: Inventory, include_ok: bool = True) -> list[Finding]:
@@ -2985,6 +3082,7 @@ def _repair_proposal_for(finding: Finding) -> Finding:
         "active-plan-missing": "restore the active implementation plan or mark plan_status inactive from the operating root",
         "active-plan-manifest": "align active_plan with manifest memory.plan_file after confirming the active plan location",
         "stale-plan-file": "archive, remove, or reactivate the stale plan only through the operating root closeout path",
+        "roadmap-terminal-stale-active-plan-link": "run a bounded roadmap, plan, or writeback sync to retarget the terminal roadmap relationship to archived_plan or clear it",
         "missing-stable-spec": "restore the expected workflow spec fixture from product docs or the operating source of truth",
         "frontmatter-parse": "fix malformed markdown frontmatter without changing body authority",
         "research-frontmatter": "add lightweight routing frontmatter only if the research artifact remains durable",
@@ -5501,10 +5599,12 @@ def _active_plan_findings(inventory: Inventory) -> list[Finding]:
             )
         if plan and plan.exists:
             findings.extend(_active_plan_generated_shape_findings(plan))
+            findings.extend(_active_plan_verification_gate_findings(inventory, plan, data))
             findings.extend(_active_plan_execution_policy_findings(plan, data))
             findings.extend(_active_plan_docs_decision_findings(plan, data))
             findings.extend(_active_plan_writeback_drift_findings(inventory, plan, data))
             findings.extend(_active_plan_lifecycle_drift_findings(inventory, plan, data))
+            findings.extend(_active_plan_work_result_capsule_findings(inventory, plan, data))
             findings.extend(_active_plan_source_incubation_relationship_findings(inventory, plan))
     elif plan and plan.exists:
         findings.append(Finding("warn", "stale-plan-file", "implementation plan exists while plan_status is not active", plan.rel_path))
@@ -5570,6 +5670,235 @@ def _active_plan_generated_shape_findings(plan: Surface) -> list[Finding]:
             plan.rel_path,
         )
     ]
+
+
+def _active_plan_verification_gate_findings(
+    inventory: Inventory,
+    plan: Surface,
+    state_data: dict[str, object],
+) -> list[Finding]:
+    lines = _active_plan_verification_gate_lines(plan)
+    target_artifacts = _contract_list(plan.frontmatter.data.get("target_artifacts") if plan.frontmatter.has_frontmatter else None)
+    target_root = _active_plan_target_root(inventory)
+    declared_write_scope = [text for text, _line in _plan_contract_lines(plan, "write_scope", "write scope")]
+    findings: list[Finding] = []
+    if not lines:
+        if not _active_plan_has_generated_verification_contract(plan, target_artifacts):
+            return []
+        findings.append(
+            Finding(
+                "warn",
+                "active-plan-verification-gate-missing",
+                "active plan has no verification_gates entries; record repo-visible deterministic success signals before confident execution",
+                plan.rel_path,
+            )
+        )
+    else:
+        line_text = "\n".join(text for text, _line in lines)
+        if _verification_gate_is_unresolved(line_text):
+            findings.append(
+                Finding(
+                    "warn",
+                    "active-plan-verification-gate-unresolved",
+                    "active plan verification_gates are unresolved; an agent must record an evidence-backed concrete gate before confident closeout",
+                    plan.rel_path,
+                    lines[0][1],
+                )
+            )
+        if _verification_gate_is_generic(line_text):
+            findings.append(
+                Finding(
+                    "warn",
+                    "active-plan-verification-gate-generic",
+                    "active plan verification_gates still contain a generic fallback instead of a repo-visible command with a deterministic success signal",
+                    plan.rel_path,
+                    lines[0][1],
+                )
+            )
+        if mismatch_reason := _verification_gate_toolchain_mismatch(line_text, target_artifacts, target_root):
+            findings.append(
+                Finding(
+                    "warn",
+                    "active-plan-verification-gate-toolchain-mismatch",
+                    mismatch_reason,
+                    plan.rel_path,
+                    lines[0][1],
+                )
+            )
+        if ownership_reason := _adjacent_regression_test_ownership_reason(line_text, target_artifacts, declared_write_scope):
+            findings.append(
+                Finding(
+                    "warn",
+                    "active-plan-adjacent-verification-ownership",
+                    ownership_reason,
+                    plan.rel_path,
+                    lines[0][1],
+                )
+            )
+
+    if findings and str(state_data.get("phase_status") or "") == "complete":
+        findings.append(
+            Finding(
+                "warn",
+                "active-plan-verification-gate-closeout-blocker",
+                "phase_status is complete but verification gates are missing, unresolved, generic, toolchain-mismatched, or missing adjacent regression-test ownership; keep closeout provisional until concrete evidence is recorded",
+                plan.rel_path,
+            )
+        )
+    return findings
+
+
+def _active_plan_has_generated_verification_contract(plan: Surface, target_artifacts: list[str]) -> bool:
+    if not plan.frontmatter.has_frontmatter:
+        return False
+    data = plan.frontmatter.data
+    return bool(data.get("plan_id") or data.get("execution_slice") or data.get("primary_roadmap_item") or target_artifacts)
+
+
+def _active_plan_verification_gate_lines(plan: Surface) -> list[tuple[str, int]]:
+    lines: list[tuple[str, int]] = []
+    for index, line in enumerate(plan.content.splitlines(), start=1):
+        match = re.match(r"^\s*[-*]\s*verification_gates\s*:\s*(.*?)\s*$", line)
+        if match:
+            lines.append((_contract_text(match.group(1)), index))
+    return lines
+
+
+def _verification_gate_is_unresolved(text: str) -> bool:
+    lowered = text.casefold()
+    return "unresolved" in lowered or "no repo-visible verification command" in lowered
+
+
+def _verification_gate_is_generic(text: str) -> bool:
+    lowered = text.casefold()
+    generic_markers = (
+        "run targeted tests first",
+        "broader checks appropriate",
+        "as appropriate",
+        "a narrower deterministic command is recorded",
+        "appropriate to the changed surface",
+    )
+    return any(marker in lowered for marker in generic_markers)
+
+
+def _verification_gate_toolchain_mismatch(
+    text: str,
+    target_artifacts: list[str],
+    target_root: Path,
+) -> str:
+    lowered = text.casefold()
+    has_python_gate = "pytest" in lowered or "pythonpath=src" in lowered
+    has_node_gate = any(marker in lowered for marker in ("npm ", "pnpm ", "yarn ", "bun "))
+    js_target = _target_artifacts_look_js(target_artifacts) or ((target_root / "package.json").is_file() and not _target_artifacts_look_python(target_artifacts))
+    python_target = _target_artifacts_look_python(target_artifacts) or ((target_root / "pyproject.toml").is_file() and not (target_root / "package.json").is_file())
+    if js_target and has_python_gate:
+        return (
+            "active plan verification_gates look Python/pytest-shaped while target artifacts or product_source_root expose a JavaScript/TypeScript toolchain; "
+            "use repo-visible package/task/CI gates or mark the gate unresolved"
+        )
+    if python_target and has_node_gate and not (target_root / "package.json").is_file():
+        return (
+            "active plan verification_gates look Node/package-script-shaped while target artifacts expose a Python toolchain; "
+            "use repo-visible Python gates or mark the gate unresolved"
+        )
+    return ""
+
+
+def _adjacent_regression_test_ownership_reason(
+    text: str,
+    target_artifacts: list[str],
+    write_scope_lines: list[str],
+) -> str:
+    write_scope_text = "\n".join(write_scope_lines).replace("\\", "/").casefold()
+    explicit_tests = _dedupe_route_values(
+        (*_test_artifacts_from_values(target_artifacts), *_test_paths_from_verification_gate(text))
+    )
+    outside_scope = [path for path in explicit_tests if path.casefold() not in write_scope_text]
+    if outside_scope:
+        sample = ", ".join(outside_scope[:5])
+        suffix = f", +{len(outside_scope) - 5} more" if len(outside_scope) > 5 else ""
+        return (
+            "active plan verification_gates name regression test path(s) outside active-phase write_scope: "
+            f"{sample}{suffix}; include adjacent test ownership or record a scoped widening before closeout"
+        )
+    if _verification_gate_runs_broad_pytest(text) and _has_python_source_target(target_artifacts) and not _test_artifacts_from_values(target_artifacts):
+        return (
+            "active plan uses broad pytest/full-suite verification while target_artifacts name product/source files but no regression tests; "
+            "surface adjacent regression-test ownership or narrow the gate before confident closeout"
+        )
+    return ""
+
+
+def _test_artifacts_from_values(values: list[str]) -> tuple[str, ...]:
+    tests: list[str] = []
+    for value in values:
+        normalized = _normalize_route_metadata_path(str(value)).casefold()
+        if normalized.startswith("tests/") or normalized == "tests":
+            tests.append(normalized)
+    return tuple(tests)
+
+
+def _test_paths_from_verification_gate(text: str) -> tuple[str, ...]:
+    normalized = str(text or "").replace("\\", "/")
+    paths = re.findall(r"(?<![A-Za-z0-9_./-])(tests/[A-Za-z0-9_./-]+)", normalized, flags=re.IGNORECASE)
+    return tuple(_normalize_route_metadata_path(path).casefold() for path in paths)
+
+
+def _verification_gate_runs_broad_pytest(text: str) -> bool:
+    lowered = text.casefold()
+    return "pytest" in lowered and not _test_paths_from_verification_gate(text)
+
+
+def _has_python_source_target(target_artifacts: list[str]) -> bool:
+    for target in target_artifacts:
+        normalized = _normalize_route_metadata_path(str(target)).casefold()
+        if normalized.startswith("src/") or (normalized.endswith(".py") and not normalized.startswith("tests/")):
+            return True
+    return False
+
+
+def _dedupe_route_values(values: tuple[str, ...]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        normalized = _normalize_route_metadata_path(str(value)).casefold()
+        if normalized and normalized not in seen:
+            deduped.append(normalized)
+            seen.add(normalized)
+    return deduped
+
+
+def _active_plan_target_root(inventory: Inventory) -> Path:
+    state_data = inventory.state.frontmatter.data if inventory.state and inventory.state.frontmatter.has_frontmatter else {}
+    for key in ("product_source_root", "projection_root", "operating_root", "canonical_source_evidence_root"):
+        raw = str(state_data.get(key) or "").strip()
+        if not raw:
+            continue
+        candidate = Path(raw.replace("\\\\", "\\"))
+        if not candidate.is_absolute():
+            candidate = inventory.root / candidate
+        if candidate.is_dir():
+            return candidate
+    return inventory.root
+
+
+def _target_artifacts_look_js(target_artifacts: list[str]) -> bool:
+    js_suffixes = (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs")
+    js_names = ("package.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb", "bun.lock")
+    js_prefixes = ("apps/", "packages/", "web/", "frontend/")
+    for target in target_artifacts:
+        normalized = _normalize_route_metadata_path(str(target)).casefold()
+        if normalized.endswith(js_suffixes) or normalized in js_names or normalized.startswith(js_prefixes):
+            return True
+    return False
+
+
+def _target_artifacts_look_python(target_artifacts: list[str]) -> bool:
+    for target in target_artifacts:
+        normalized = _normalize_route_metadata_path(str(target)).casefold()
+        if normalized.endswith(".py") or normalized in {"pyproject.toml", "requirements.txt", "tox.ini", "noxfile.py"}:
+            return True
+    return False
 
 
 def _active_plan_execution_policy_findings(plan: Surface, state_data: dict[str, object]) -> list[Finding]:
@@ -5700,6 +6029,34 @@ def _contract_entry(
     if key in plan_data:
         return plan_data[key], None
     return None, None
+
+
+def _active_phase_contract_lines(plan: Surface, active_phase: str, *labels: str) -> list[tuple[str, int]]:
+    block = _active_phase_block(plan.content, active_phase)
+    if block is None:
+        return []
+    return _contract_lines_in_range(plan.content.splitlines(keepends=True), block[0] + 1, block[1], *labels)
+
+
+def _plan_contract_lines(plan: Surface, *labels: str) -> list[tuple[str, int]]:
+    lines = plan.content.splitlines(keepends=True)
+    return _contract_lines_in_range(lines, 0, len(lines), *labels)
+
+
+def _contract_lines_in_range(lines: list[str], start: int, end: int, *labels: str) -> list[tuple[str, int]]:
+    normalized_labels = {_normalize_contract_label(label) for label in labels}
+    matches: list[tuple[str, int]] = []
+    for index in range(start, end):
+        match = re.match(r"^\s*[-*]\s*([^:]+)\s*:\s*(.*?)\s*(?:\r?\n)?$", lines[index])
+        if not match:
+            continue
+        if _normalize_contract_label(match.group(1)) in normalized_labels:
+            matches.append((_contract_text(match.group(2)), index + 1))
+    return matches
+
+
+def _normalize_contract_label(value: str) -> str:
+    return _contract_text(value).casefold().replace("-", "_").replace(" ", "_")
 
 
 def _active_phase_contract_metadata(plan: Surface, active_phase: str) -> dict[str, tuple[object, int]]:
@@ -5907,6 +6264,7 @@ def _active_plan_lifecycle_drift_findings(inventory: Inventory, plan: Surface, s
         state_data.get("plan_status") == "active"
         and phase_status == "complete"
         and closeout_values_are_complete(closeout_values)
+        and state_writeback_identity_matches_current_plan(inventory)
     ):
         findings.append(
             Finding(
@@ -5957,6 +6315,8 @@ def _active_plan_writeback_drift_findings(inventory: Inventory, plan: Surface, s
     facts = state_writeback_facts(inventory.state)
     if not facts:
         return []
+    if not state_writeback_identity_matches_current_plan(inventory):
+        return []
     findings: list[Finding] = []
     if plan.frontmatter.has_frontmatter:
         for field, fact in facts.items():
@@ -5992,6 +6352,63 @@ def _active_plan_writeback_drift_findings(inventory: Inventory, plan: Surface, s
                 )
             )
     return findings
+
+
+def _active_plan_work_result_capsule_findings(inventory: Inventory, plan: Surface, state_data: dict[str, object]) -> list[Finding]:
+    if str(state_data.get("phase_status") or "") != "complete":
+        return []
+    facts = state_writeback_facts(inventory.state)
+    if not facts:
+        return []
+    if not state_writeback_identity_matches_current_plan(inventory):
+        return []
+    closeout_values = {field: fact.value for field, fact in facts.items()}
+    if not closeout_values_are_complete(closeout_values):
+        return []
+
+    fact = facts.get("work_result")
+    if fact is None:
+        return [
+            Finding(
+                "warn",
+                "active-plan-work-result-capsule-missing",
+                (
+                    "phase_status is complete and closeout facts are complete, but project-state MLH closeout "
+                    "writeback has no plain-language work_result capsule; rerun writeback with closeout facts or "
+                    "--work-result so the handoff explains what changed, what became better, how it was checked, and what remains"
+                ),
+                inventory.state.rel_path if inventory.state else "project/project-state.md",
+            )
+        ]
+
+    normalized = fact.value.casefold()
+    has_result = "result:" in normalized
+    has_change = "what changed:" in normalized or "what was done:" in normalized
+    has_check = "how it was checked:" in normalized or "verification" in normalized
+    has_remaining = "what remains:" in normalized or "no required follow-up" in normalized
+    if not (has_result and has_change and has_check and has_remaining):
+        return [
+            Finding(
+                "warn",
+                "active-plan-work-result-capsule-thin",
+                (
+                    "project-state MLH closeout writeback has work_result, but it does not read like a complete "
+                    "plain-language capsule; include Result, What changed or What was done, How it was checked, and What remains"
+                ),
+                fact.source,
+                fact.line,
+            )
+        ]
+
+    return [
+        Finding(
+            "info",
+            "active-plan-work-result-capsule",
+            "project-state MLH closeout writeback records a plain-language work_result capsule for this completed phase",
+            fact.source,
+            fact.line,
+        )
+    ]
 
 
 def _spec_findings(inventory: Inventory) -> list[Finding]:
