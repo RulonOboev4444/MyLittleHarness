@@ -38,6 +38,94 @@ class PackageMetadataTests(unittest.TestCase):
         self.assertEqual("mylittleharness_build", pyproject["build-system"]["build-backend"])
         self.assertEqual(["build_backend"], pyproject["build-system"]["backend-path"])
         self.assertTrue((ROOT / "build_backend/mylittleharness_build.py").is_file())
+        docmap = (ROOT / ".agents/docmap.yaml").read_text(encoding="utf-8")
+        self.assertIn('"build_backend/mylittleharness_build.py"', docmap)
+        self.assertNotIn('"../build_backend/mylittleharness_build.py"', docmap)
+
+    def test_dependency_gate_keeps_candidate_libraries_out_of_package_metadata(self) -> None:
+        pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        project = pyproject["project"]
+        build_system = pyproject["build-system"]
+        gate = pyproject["tool"]["mylittleharness"]["dependency-gate"]
+
+        declared_packages = set(project["dependencies"])
+        declared_packages.update(build_system["requires"])
+        gated_candidates = {"marko", "patch-ng", "portalocker", "msgspec"}
+
+        self.assertEqual(set(), declared_packages)
+        self.assertTrue(gated_candidates.isdisjoint(declared_packages))
+        self.assertEqual("stdlib-first", gate["default_policy"])
+        self.assertEqual("approval-packet-required", gate["external_dependency_additions"])
+        self.assertEqual(
+            ["package-smoke", "license-supply-chain-review", "no-telemetry", "rollback-plan"],
+            gate["required_evidence"],
+        )
+        self.assertEqual(["marko", "patch-ng", "portalocker", "msgspec"], gate["future_spikes"])
+
+    def test_dependency_gate_policy_docs_require_review_before_adoption(self) -> None:
+        metadata = (ROOT / "docs/specs/metadata-routing-and-evidence.md").read_text(encoding="utf-8")
+        capability = (ROOT / "project/specs/workflow/workflow-capability-roadmap-spec.md").read_text(
+            encoding="utf-8"
+        )
+
+        for doc in (metadata, capability):
+            for expected in (
+                "stdlib-first dependency gate",
+                "approval packet",
+                "package smoke",
+                "license/supply-chain review",
+                "no telemetry",
+                "rollback plan",
+                "Marko, patch-ng, portalocker, and msgspec remain future gated spikes only",
+                "no dependency adoption by default",
+            ):
+                self.assertIn(expected, doc)
+
+    def test_authority_context_tiers_and_approval_packet_policy_are_documented(self) -> None:
+        authority = (ROOT / "docs/specs/authority-and-memory.md").read_text(encoding="utf-8")
+        metadata = (ROOT / "docs/specs/metadata-routing-and-evidence.md").read_text(encoding="utf-8")
+        artifact_model = (ROOT / "project/specs/workflow/workflow-artifact-model-spec.md").read_text(
+            encoding="utf-8"
+        )
+
+        for expected in (
+            "Hot Authority",
+            "On-Demand Routes",
+            "Generated Projections",
+            "Archive/Evidence",
+            "default recovery surface",
+            "read when the current question needs their lane",
+            "rebuildable navigation caches",
+            "cold source-bound evidence recovered by pointer",
+        ):
+            self.assertIn(expected, authority)
+
+        for expected in (
+            "Approval-packet gate classes",
+            "`lifecycle-authority-mutation`",
+            "`write-scope-expansion`",
+            "`dependency-package-supply-chain`",
+            "`destructive-archive-vcs-rollback`",
+            "`external-service-secrets-network`",
+            "`fan-in-merge-review-token`",
+            "`repeated-verifier-failure-or-uncertain-evidence`",
+            "allowed command/network/auth scopes",
+            "review-token hash",
+            "Packet status is evidence",
+        ):
+            self.assertIn(expected, metadata)
+
+        for expected in (
+            "Approval packets are required for risky operations",
+            "Gate classes include lifecycle authority mutation",
+            "write-scope expansion",
+            "dependency/package/supply-chain change",
+            "external service/secrets/network use",
+            "repeated verifier failure or uncertain evidence",
+            "The packet is cold evidence",
+            "not implementation proof or lifecycle authority",
+        ):
+            self.assertIn(expected, artifact_model)
 
     def test_wheel_includes_stable_spec_templates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -169,6 +257,7 @@ class PackageMetadataTests(unittest.TestCase):
             "Use MLH lifecycle routes instead of ad hoc memory pockets",
             "Use the optional docs routing file when present as a routing aid",
             "Run `mylittleharness --root <this-repo> check` before mutating repair work",
+            "Agent behavior defaults: think before editing; prefer the simplest bounded fix",
         ):
             self.assertIn(expected, template)
         for expected in (
@@ -203,6 +292,7 @@ class PackageMetadataTests(unittest.TestCase):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         docs_readme = (ROOT / "docs/README.md").read_text(encoding="utf-8")
         architecture = (ROOT / "docs/architecture/product-architecture.md").read_text(encoding="utf-8")
+        authority = (ROOT / "docs/specs/authority-and-memory.md").read_text(encoding="utf-8")
         metadata = (ROOT / "docs/specs/metadata-routing-and-evidence.md").read_text(encoding="utf-8")
         cli_spec = (ROOT / "docs/specs/attach-repair-status-cli.md").read_text(encoding="utf-8")
 
@@ -238,6 +328,28 @@ class PackageMetadataTests(unittest.TestCase):
         self.assertIn("`writeback --dry-run|--apply --compact-only`", docs_readme)
         self.assertIn("State compaction selection scans the whole `project/project-state.md`", docs_readme)
         self.assertIn("default 250-line or 25,000-character threshold", metadata)
+        self.assertIn("compact-only apply requires the matching `--source-hash`", authority)
+        self.assertIn("Working-memory compaction has three explicit route shapes", metadata)
+        self.assertIn("provider-owned memory, a daemon, or next-plan opening", metadata)
+        self.assertIn("identity-bound archived-plan closeout refresh", authority)
+        self.assertIn("existing HEAD trailers may be parsed with read-only `git interpret-trailers --parse`", metadata)
+        self.assertIn("Parsed existing HEAD trailers are historical context only", metadata)
+        self.assertIn("`writeback --dry-run|--apply --archived-plan <project/archive/plans/...>`", cli_spec)
+        self.assertIn("compacted Archived Completed History lines are evidence", metadata)
+
+    def test_entry_docs_distinguish_evidence_report_from_record_rail(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        docs_readme = (ROOT / "docs/README.md").read_text(encoding="utf-8")
+        state = (ROOT / "project/project-state.md").read_text(encoding="utf-8")
+
+        for doc in (readme, docs_readme, state):
+            self.assertIn("evidence --record", doc)
+        self.assertIn("bare `evidence`, `evidence --record`", readme)
+        self.assertIn("Bare `evidence` is a terminal-only read-only report", state)
+        self.assertIn("Agent Run Evidence", state)
+        self.assertIn("--focus search|warnings|projection|routes", state)
+        self.assertIn("bare `evidence`, and `closeout` are CLI reports", docs_readme)
+        self.assertIn("is an explicit source-bound record rail", docs_readme)
 
     def test_optional_adapter_docs_reject_skill_owned_memory(self) -> None:
         adapter = (ROOT / "docs/specs/adapter-boundary.md").read_text(encoding="utf-8")
@@ -256,6 +368,9 @@ class PackageMetadataTests(unittest.TestCase):
         authority = (ROOT / "docs/specs/authority-and-memory.md").read_text(encoding="utf-8")
         metadata = (ROOT / "docs/specs/metadata-routing-and-evidence.md").read_text(encoding="utf-8")
         adapter = (ROOT / "docs/specs/adapter-boundary.md").read_text(encoding="utf-8")
+        artifact_model = (ROOT / "project/specs/workflow/workflow-artifact-model-spec.md").read_text(encoding="utf-8")
+        closeout = (ROOT / "project/specs/workflow/workflow-verification-and-closeout-spec.md").read_text(encoding="utf-8")
+        capability = (ROOT / "project/specs/workflow/workflow-capability-roadmap-spec.md").read_text(encoding="utf-8")
 
         for expected in (
             "V2 Architecture Direction",
@@ -264,6 +379,11 @@ class PackageMetadataTests(unittest.TestCase):
             "`manifest --inspect --json`",
             "`role_manifest`",
             "Product docs should continue rejecting `swarm run` as the first v2 command",
+            "`parallelism_class`",
+            "`claim_scope`",
+            "`fan_in_gate`",
+            "`worker_space_boundary`",
+            "`fan_in_output_required`",
         ):
             self.assertIn(expected, docs_readme)
         for expected in (
@@ -290,9 +410,16 @@ class PackageMetadataTests(unittest.TestCase):
             "`manifest --inspect --json` exposes `route_manifest` and advisory `role_manifest`",
             "provider/model/tool routing is policy metadata before it is runtime ownership",
             "optional relay adapters may transport approval packets only after core packets and review tokens exist",
+            "`parallelism_class`",
+            "`orchestration_role`",
+            "`fan_in_output_required`",
             "Do not add a hidden swarm runtime",
         ):
             self.assertIn(expected, adapter)
+        self.assertIn("Route and role manifests are protocol views", artifact_model)
+        self.assertIn("without spawning workers or granting direct apply authority", artifact_model)
+        self.assertIn("manifest fields are verification inputs rather than runtime proof", closeout)
+        self.assertIn("route manifest orchestration fields and role manifest coordination fields", capability)
 
     def test_route_manifest_protocol_shape_is_package_stable(self) -> None:
         manifest = {row["route_id"]: row for row in route_manifest()}
@@ -300,6 +427,7 @@ class PackageMetadataTests(unittest.TestCase):
         self.assertIn("state", manifest)
         self.assertIn("active-plan", manifest)
         self.assertIn("agent-runs", manifest)
+        self.assertIn("work-claims", manifest)
         self.assertIn("generated-cache", manifest)
         state = manifest["state"]
         self.assertEqual("project/project-state.md", state["target"])
@@ -312,18 +440,43 @@ class PackageMetadataTests(unittest.TestCase):
             "human_gate_reason",
             "allowed_decisions",
             "advisory",
+            "parallelism_class",
+            "authority_lane",
+            "exclusive_owner",
+            "claim_scope",
+            "claim_required",
+            "merge_policy",
+            "fan_in_gate",
+            "max_parallelism_hint",
+            "stale_claim_policy",
+            "conflict_policy",
         ):
             self.assertIn(key, state)
         self.assertEqual("lifecycle", state["gate_class"])
+        self.assertEqual("sequential_only", state["parallelism_class"])
+        self.assertEqual("coordinator", state["exclusive_owner"])
+        self.assertEqual(["route", "lifecycle"], state["claim_scope"])
         self.assertIn("writeback", state["allowed_decisions"])
         protocol = route_protocol_for_id("generated-cache")
         self.assertEqual("generated-rebuildable", protocol["mutability"])
+        self.assertEqual("safe_parallel", protocol["parallelism_class"])
+        self.assertEqual("generated_cache", protocol["authority_lane"])
+        self.assertFalse(protocol["claim_required"])
         self.assertFalse(protocol["human_gate"]["required"])
         agent_runs = manifest["agent-runs"]
         self.assertEqual("project/verification/agent-runs/*.md", agent_runs["target"])
         self.assertEqual("evidence", agent_runs["gate_class"])
+        self.assertEqual("safe_parallel", agent_runs["parallelism_class"])
+        self.assertIn("execution_slice", agent_runs["claim_scope"])
         self.assertIn("record", agent_runs["allowed_decisions"])
         self.assertTrue(agent_runs["advisory"])
+        work_claims = manifest["work-claims"]
+        self.assertEqual("project/verification/work-claims/*.json", work_claims["target"])
+        self.assertEqual("evidence", work_claims["gate_class"])
+        self.assertEqual("safe_parallel", work_claims["parallelism_class"])
+        self.assertEqual("verification", work_claims["authority_lane"])
+        self.assertIn("create", work_claims["allowed_decisions"])
+        self.assertTrue(work_claims["advisory"])
 
     def test_agent_role_manifest_protocol_shape_is_package_stable(self) -> None:
         roles = {row["role_id"]: row for row in agent_role_manifest()}
@@ -357,13 +510,27 @@ class PackageMetadataTests(unittest.TestCase):
             "human_gates",
             "forbidden_actions",
             "stop_conditions",
+            "orchestration_role",
+            "may_spawn_workers",
+            "worker_space_boundary",
+            "isolation_contract",
+            "fan_in_output_required",
+            "coordination_budget",
             "apply_authority",
             "advisory",
         ):
             self.assertIn(key, coder)
         self.assertFalse(coder["apply_authority"])
+        self.assertEqual("worker", coder["orchestration_role"])
+        self.assertFalse(coder["may_spawn_workers"])
+        self.assertIn("changed_paths", coder["fan_in_output_required"])
+        self.assertIn("overlapping claims", " ".join(coder["isolation_contract"]))
         self.assertIn("changed_paths", coder["output_packet_requirements"])
         self.assertIn("change lifecycle state", coder["forbidden_actions"])
+        governor = roles["governor"]
+        self.assertEqual("coordinator", governor["orchestration_role"])
+        self.assertFalse(governor["may_spawn_workers"])
+        self.assertIn("review_token_status", governor["fan_in_output_required"])
 
         permission = next(row for row in coder["permissions"] if row["route_id"] == "verification")
         for key in (
@@ -389,9 +556,19 @@ class PackageMetadataTests(unittest.TestCase):
 
         for intent_id in (
             "start-pass",
+            "operator-audit-loop",
             "repair-preview",
             "open-active-plan",
             "archive-active-plan",
+            "research-human-review-gate",
+            "docs-route-recovery",
+            "research-route-recovery",
+            "projection-cache-refresh",
+            "record-agent-evidence",
+            "create-work-claim",
+            "work-claim-review",
+            "create-handoff-packet",
+            "approval-packet-review",
             "command-discovery",
         ):
             self.assertIn(intent_id, registry)
@@ -403,6 +580,115 @@ class PackageMetadataTests(unittest.TestCase):
         self.assertIn("writeback --dry-run --archive-active-plan", archive.first_safe_command)
         self.assertIn("--phase-status complete", archive.first_safe_command)
         self.assertIn("does not stage, commit, push", archive.boundary)
+
+        audit = command_suggestions_for_intent("autonomous audit free swim", limit=1)[0]
+        self.assertEqual("operator-audit-loop", audit.intent_id)
+        self.assertIn("check", audit.first_safe_command)
+        self.assertIn('intelligence --query "<audit-topic-or-route-question>"', " ".join(audit.follow_up_commands))
+        self.assertIn('meta-feedback --dry-run --from-root <observed-root> --topic "<topic>" --note "<note>"', " ".join(audit.follow_up_commands))
+        self.assertIn("audit loop is read-only", audit.boundary)
+
+        claim_review = command_suggestions_for_intent("stale claim cleanup missing run evidence", limit=1)[0]
+        self.assertEqual("work-claim-review", claim_review.intent_id)
+        self.assertIn("check --focus agents", claim_review.first_safe_command)
+        self.assertIn("claim --status", " ".join(claim_review.follow_up_commands))
+        self.assertIn('evidence --record --dry-run', " ".join(claim_review.follow_up_commands))
+        self.assertIn('--task "<task>"', " ".join(claim_review.follow_up_commands))
+        self.assertIn('--release-condition "<reviewed-condition>"', " ".join(claim_review.follow_up_commands))
+        self.assertIn("claim cleanup remains report-only", claim_review.boundary)
+
+        claim_suggestions = command_suggestions_for_intent("stale claim cleanup missing run evidence", limit=3)
+        self.assertNotIn("recover-roadmap-source-incubation", {suggestion.intent_id for suggestion in claim_suggestions})
+
+        claim_create = command_suggestions_for_intent("create work claim before editing source", limit=1)[0]
+        self.assertEqual("create-work-claim", claim_create.intent_id)
+        self.assertIn("claim --dry-run --action create", claim_create.first_safe_command)
+        self.assertIn("claim --apply --action create", " ".join(claim_create.follow_up_commands))
+        self.assertIn("coordination evidence only", claim_create.boundary)
+
+        handoff_create = command_suggestions_for_intent("create handoff packet for worker", limit=3)
+        self.assertEqual("create-handoff-packet", handoff_create[0].intent_id)
+        self.assertIn("handoff --dry-run", handoff_create[0].first_safe_command)
+        self.assertIn("handoff packets are coordination evidence only", handoff_create[0].boundary)
+        self.assertNotIn("phase-closeout-handoff", {suggestion.intent_id for suggestion in handoff_create})
+        self.assertNotIn("open-active-plan", {suggestion.intent_id for suggestion in handoff_create})
+
+        approval_review = command_suggestions_for_intent("approval packet pending review", limit=1)[0]
+        self.assertEqual("approval-packet-review", approval_review.intent_id)
+        self.assertIn("check --focus agents", approval_review.first_safe_command)
+        self.assertIn("approval-packet --dry-run", " ".join(approval_review.follow_up_commands))
+        self.assertIn('--subject "<subject>"', " ".join(approval_review.follow_up_commands))
+        self.assertIn('--human-gate-condition "<condition>"', " ".join(approval_review.follow_up_commands))
+        self.assertIn("append-only human-gate evidence", approval_review.boundary)
+        self.assertIn("prior packet as --input-ref", approval_review.boundary)
+
+        approval_suggestions = command_suggestions_for_intent("approval packet pending review", limit=3)
+        self.assertEqual(("approval-packet-review",), tuple(suggestion.intent_id for suggestion in approval_suggestions))
+
+        recovery = command_suggestions_for_intent("roadmap source incubation missing", limit=1)[0]
+        self.assertEqual("recover-roadmap-source-incubation", recovery.intent_id)
+        self.assertIn("memory-hygiene --dry-run --scan", recovery.first_safe_command)
+        self.assertIn("incubate --dry-run", " ".join(recovery.follow_up_commands))
+
+        context_warning = command_suggestions_for_intent("explain README large warning", limit=1)[0]
+        self.assertEqual("inspect-context-surface-budget", context_warning.intent_id)
+        self.assertIn("check --focus context", context_warning.first_safe_command)
+        self.assertNotIn("writeback --dry-run --compact-only", context_warning.first_safe_command)
+
+        research_gate = command_suggestions_for_intent("requires_reflection deep research prompt", limit=1)[0]
+        self.assertEqual("research-human-review-gate", research_gate.intent_id)
+        self.assertIn("check", research_gate.first_safe_command)
+        self.assertIn("Draft the external Deep Research request manually outside MyLittleHarness", " ".join(research_gate.follow_up_commands))
+        self.assertIn("research-import --dry-run", " ".join(research_gate.follow_up_commands))
+        self.assertIn("research-distill --dry-run", " ".join(research_gate.follow_up_commands))
+
+        rubric_recovery = command_suggestions_for_intent("deep research rubric recovery", limit=1)[0]
+        self.assertEqual("recover-deep-research-rubric", rubric_recovery.intent_id)
+        self.assertIn("check", rubric_recovery.first_safe_command)
+        self.assertIn("memory-hygiene --dry-run --scan", " ".join(rubric_recovery.follow_up_commands))
+        self.assertIn("research-import --dry-run", " ".join(rubric_recovery.follow_up_commands))
+
+        docs_recovery = command_suggestions_for_intent(
+            "recover docs/specs/research-prompt-packets.md missing intelligence warning",
+            limit=3,
+        )
+        self.assertEqual("docs-route-recovery", docs_recovery[0].intent_id)
+        self.assertIn("intelligence --query", docs_recovery[0].first_safe_command)
+        self.assertNotIn(
+            "research-human-review-gate",
+            {suggestion.intent_id for suggestion in docs_recovery},
+        )
+        self.assertNotIn(
+            "recover-deep-research-rubric",
+            {suggestion.intent_id for suggestion in docs_recovery},
+        )
+        self.assertNotIn(
+            "recover-roadmap-source-incubation",
+            {suggestion.intent_id for suggestion in docs_recovery},
+        )
+        self.assertNotIn("route-incoming-information", {suggestion.intent_id for suggestion in docs_recovery})
+        self.assertNotIn("repair-preview", {suggestion.intent_id for suggestion in docs_recovery})
+
+        research_recovery = command_suggestions_for_intent(
+            "recover missing project/research/2026-05-07-agent-coding-plan-reliability-distillate.md provenance warning",
+            limit=3,
+        )
+        self.assertEqual("research-route-recovery", research_recovery[0].intent_id)
+        self.assertIn("intelligence --query", research_recovery[0].first_safe_command)
+        self.assertIn("research-import --dry-run", " ".join(research_recovery[0].follow_up_commands))
+        self.assertNotIn("docs-route-recovery", {suggestion.intent_id for suggestion in research_recovery})
+        self.assertNotIn("research-human-review-gate", {suggestion.intent_id for suggestion in research_recovery})
+        self.assertNotIn("recover-deep-research-rubric", {suggestion.intent_id for suggestion in research_recovery})
+        self.assertNotIn("recover-roadmap-source-incubation", {suggestion.intent_id for suggestion in research_recovery})
+
+        projection_cache = command_suggestions_for_intent("projection cache stale rebuild recommended", limit=3)
+        self.assertEqual("projection-cache-refresh", projection_cache[0].intent_id)
+        self.assertIn("projection --inspect --target all", projection_cache[0].first_safe_command)
+        self.assertIn("projection --rebuild --target all", " ".join(projection_cache[0].follow_up_commands))
+        self.assertNotIn("metadata-status-review", {suggestion.intent_id for suggestion in projection_cache})
+        self.assertNotIn("roadmap-acceptance-readiness", {suggestion.intent_id for suggestion in projection_cache})
+
+        self.assertEqual((), command_suggestions_for_intent("mirror product files across retired boundary", limit=3))
 
     def test_default_mcp_agent_tooling_docs_are_optional_and_read_only(self) -> None:
         template = (ROOT / "src/mylittleharness/templates/operating-root/AGENTS.md").read_text(encoding="utf-8")
@@ -492,8 +778,10 @@ class PackageMetadataTests(unittest.TestCase):
             "`check --deep` is read-only",
             "optional `project/roadmap.md` sequencing",
             "`check --focus validation|links|context|hygiene|grain` is read-only",
-            "`suggest --intent <operator-action>`",
+            "`suggest --intent \"<operator-action>\"`",
             "command intent suggestions are advisory",
+            "manual external prompt drafting outside MyLittleHarness",
+            "research-distill`",
             "manifest --inspect --json",
             "role_manifest",
             "required outputs, context/output packet requirements, gate classes, and human gates",
@@ -509,13 +797,13 @@ class PackageMetadataTests(unittest.TestCase):
             "explicit ready-for-closeout `writeback --apply --phase-status complete`",
             "`--product-source-root <path>`",
             "`writeback --dry-run --compact-only`",
-            "`incubate --dry-run --topic <topic> --note <note>`",
-            "`incubate --apply --topic <topic> --note <note>`",
+            "`incubate --dry-run --topic \"<topic>\" --note \"<note>\"`",
+            "`incubate --apply --topic \"<topic>\" --note \"<note>\"`",
             "`--note-file <path>`",
             "`--note-file -`",
             "`--fix-candidate`",
-            "`plan --dry-run --title <title> --objective <objective>`",
-            "`plan --apply --title <title> --objective <objective>`",
+            "`plan --dry-run --title \"<title>\" --objective \"<objective>\"`",
+            "`plan --apply --title \"<title>\" --objective \"<objective>\"`",
             "--roadmap-item <id>",
             "--execution-slice",
             "--slice-member",
@@ -546,6 +834,10 @@ class PackageMetadataTests(unittest.TestCase):
             "relationship frontmatter block recovery",
             "coverage-aware incubation auto-archive",
             "Route metadata diagnostics are read-only validation",
+            "route-specific allowed status hints",
+            "shared target-artifact ownership resolver",
+            "product-source-artifact",
+            "valid parsed Entry Coverage ids",
             "route-metadata-frontmatter",
             "cold memory routes",
             "archived plans under `project/archive/plans/*.md`",
@@ -634,8 +926,10 @@ class PackageMetadataTests(unittest.TestCase):
 
         self.assertLessEqual(len(template.splitlines()), 20)
         self.assertIn("Use MLH lifecycle routes instead of ad hoc memory pockets", template)
+        self.assertIn("meta-feedback capture is opt-in, not a default start-pass requirement", template)
         self.assertNotIn("agent-operability micro-friction", template)
         self.assertIn("opt-in `meta-feedback`", readme)
+        self.assertIn("`meta-feedback` is opt-in and is not part of the default start pass", readme)
         self.assertNotIn("future-optional", template)
         for expected in (
             "`status`, `check`, and `intelligence --focus routes`",
@@ -673,6 +967,56 @@ class PackageMetadataTests(unittest.TestCase):
         self.assertIn("does not repair metadata", metadata)
         self.assertIn("relationship frontmatter block recovery happens only", metadata)
         self.assertIn("intentionally excluded from repair proposals", cli_spec)
+
+    def test_spec_lifecycle_posture_docs_keep_reconcile_read_only(self) -> None:
+        metadata = (ROOT / "docs/specs/metadata-routing-and-evidence.md").read_text(encoding="utf-8")
+        authority = (ROOT / "docs/specs/authority-and-memory.md").read_text(encoding="utf-8")
+        artifact_model = (ROOT / "project/specs/workflow/workflow-artifact-model-spec.md").read_text(
+            encoding="utf-8"
+        )
+        capability = (ROOT / "project/specs/workflow/workflow-capability-roadmap-spec.md").read_text(
+            encoding="utf-8"
+        )
+
+        for doc in (metadata, authority, artifact_model, capability):
+            self.assertIn("spec_status", doc)
+            self.assertIn("implementation_posture", doc)
+            self.assertIn("target-only", doc)
+        for expected in (
+            "`docs_decision` stays a closeout-local decision",
+            "spec-posture-missing",
+            "spec-synced-without-verification",
+            "spec-target-only-has-implementation-evidence",
+            "spec-drift-detected-without-carry-forward",
+            "spec-superseded-without-target",
+            "must not be deleted merely because code has not caught up",
+        ):
+            self.assertIn(expected, metadata)
+        self.assertIn("Spec posture findings", authority)
+        self.assertIn("`target-only` preserves an accepted target contract", artifact_model)
+        self.assertIn("cannot remove target specs, force implementation sync, approve deletion, or change roadmap status", capability)
+
+    def test_verification_ledger_rotation_docs_are_bounded(self) -> None:
+        metadata = (ROOT / "docs/specs/metadata-routing-and-evidence.md").read_text(encoding="utf-8")
+        for expected in (
+            "memory-hygiene --dry-run|--apply --rotate-ledger",
+            "project/archive/reference/verification/",
+            "full sha256 `--source-hash`",
+            "fresh active continuity ledger",
+            "archived evidence remains historical rather than active continuation state",
+            "cannot approve closeout, roadmap promotion, unrelated archive cleanup, staging, commit, push, rollback, dependency adoption, or next-plan opening",
+        ):
+            self.assertIn(expected, metadata)
+
+    def test_memory_hygiene_batch_apply_token_docs_are_bounded(self) -> None:
+        metadata = (ROOT / "docs/specs/metadata-routing-and-evidence.md").read_text(encoding="utf-8")
+        for expected in (
+            "memory-hygiene --apply --scan --proposal-token <mhb-token>",
+            "source hashes, archive targets, exact link-repair file hashes",
+            "refuses before writes unless the token matches the exact current candidate set",
+            "cannot infer promotion meaning, perform fuzzy link repair, approve archive decisions",
+        ):
+            self.assertIn(expected, metadata)
 
 
 if __name__ == "__main__":

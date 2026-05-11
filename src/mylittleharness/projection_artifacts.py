@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import json
 import hashlib
+import time
 from dataclasses import asdict
+from datetime import datetime, timezone
 from json import JSONDecodeError
 from pathlib import Path
 from typing import Any, Iterable
+from uuid import uuid4
 
 from .inventory import Inventory
 from .models import Finding
@@ -33,10 +36,15 @@ KNOWN_NON_JSON_PROJECTION_NAMES = (
 ARTIFACT_DIRTY_MARKER_NAME = "artifacts.dirty.json"
 INDEX_DIRTY_MARKER_NAME = "index.dirty.json"
 CACHE_DIRTY_MARKER_NAMES = (ARTIFACT_DIRTY_MARKER_NAME, INDEX_DIRTY_MARKER_NAME)
+CACHE_OPERATION_MARKER_NAME = "cache-operation.json"
 DIRTY_MARKER_SCHEMA_VERSION = 1
+OPERATION_MARKER_SCHEMA_VERSION = 1
+JSON_REPLACE_ATTEMPTS = 6
+JSON_REPLACE_RETRY_SECONDS = 0.01
 PAYLOAD_HASH_ARTIFACT_NAMES = tuple(name for name in ARTIFACT_NAMES if name != "manifest.json")
 SOURCE_SET_ARTIFACT_NAMES = ("sources.json", "source-hashes.json")
 RECORD_SET_ARTIFACT_NAMES = ("links.json", "backlinks.json", "fan-in.json", "relationships.json", "summary.json")
+PROJECTION_REBUILD_NEXT_SAFE_COMMAND = "next_safe_command=mylittleharness --root <root> projection --rebuild --target all"
 
 
 def build_projection_artifacts(inventory: Inventory) -> list[Finding]:
@@ -45,14 +53,19 @@ def build_projection_artifacts(inventory: Inventory) -> list[Finding]:
         return findings
 
     projection_dir = artifact_dir(inventory.root)
-    projection = build_projection(inventory)
-    payloads = artifact_payloads(inventory, projection)
-    for name in ARTIFACT_NAMES:
-        path = projection_dir / name
-        _write_json(path, payloads[name])
-    clear_projection_cache_dirty_marker(inventory.root, ARTIFACT_DIRTY_MARKER_NAME)
+    operation_findings = write_projection_cache_operation_marker(inventory.root, "projection-artifacts-build")
+    try:
+        projection = build_projection(inventory)
+        payloads = artifact_payloads(inventory, projection)
+        for name in ARTIFACT_NAMES:
+            path = projection_dir / name
+            _write_json(path, payloads[name])
+        clear_projection_cache_dirty_marker(inventory.root, ARTIFACT_DIRTY_MARKER_NAME)
+    finally:
+        clear_projection_cache_operation_marker(inventory.root)
 
     return [
+        *operation_findings,
         Finding("info", "projection-artifact-boundary", f"owned generated-output boundary: {ARTIFACT_DIR_REL}", ARTIFACT_DIR_REL),
         Finding("info", "projection-artifact-build", f"wrote {len(ARTIFACT_NAMES)} rebuildable projection artifacts"),
         Finding(
@@ -121,18 +134,23 @@ def delete_projection_artifacts(inventory: Inventory) -> list[Finding]:
             *blocked,
         ]
 
-    for name in (*ARTIFACT_NAMES, ARTIFACT_DIRTY_MARKER_NAME):
-        child = projection_dir / name
-        if not child.exists():
-            continue
-        rel_child = child.relative_to(inventory.root).as_posix()
-        if child.is_dir() and not child.is_symlink():
-            continue
-        else:
-            child.unlink()
-        deleted.append(rel_child)
+    operation_findings = write_projection_cache_operation_marker(inventory.root, "projection-artifacts-delete")
+    try:
+        for name in (*ARTIFACT_NAMES, ARTIFACT_DIRTY_MARKER_NAME):
+            child = projection_dir / name
+            if not child.exists():
+                continue
+            rel_child = child.relative_to(inventory.root).as_posix()
+            if child.is_dir() and not child.is_symlink():
+                continue
+            else:
+                child.unlink()
+            deleted.append(rel_child)
+    finally:
+        clear_projection_cache_operation_marker(inventory.root)
 
     return [
+        *operation_findings,
         Finding("info", "projection-artifact-boundary", f"owned generated-output boundary: {ARTIFACT_DIR_REL}", ARTIFACT_DIR_REL),
         Finding("info", "projection-artifact-delete", f"deleted {len(deleted)} generated artifact paths from the owned boundary"),
     ]
@@ -146,6 +164,7 @@ def inspect_projection_artifacts(inventory: Inventory, projection: Projection | 
 
     projection_dir = artifact_dir(inventory.root)
     findings.append(Finding("info", "projection-artifact-boundary", f"owned generated-output boundary: {ARTIFACT_DIR_REL}", ARTIFACT_DIR_REL))
+    findings.extend(projection_cache_operation_marker_findings(inventory.root))
     if not projection_dir.exists():
         findings.append(
             Finding(
@@ -164,7 +183,7 @@ def inspect_projection_artifacts(inventory: Inventory, projection: Projection | 
             inventory.root,
             ARTIFACT_DIRTY_MARKER_NAME,
             "projection-artifact-dirty",
-            "generated projection artifacts were marked dirty by a mutating workflow command; rebuild recommended",
+            f"generated projection artifacts were marked dirty by a mutating workflow command; rebuild recommended; {PROJECTION_REBUILD_NEXT_SAFE_COMMAND}",
         )
     )
     missing = [name for name in ARTIFACT_NAMES if not (projection_dir / name).is_file()]
@@ -280,6 +299,9 @@ def mark_projection_cache_dirty(inventory: Inventory, changed_paths: Iterable[st
         try:
             _write_json(marker_path, payload)
         except OSError as exc:
+            if marker_path.exists() and not marker_path.is_symlink() and marker_path.is_file():
+                written.append(marker_rel)
+                continue
             warnings.append(
                 Finding(
                     "warn",
@@ -324,8 +346,83 @@ def projection_cache_dirty_marker_findings(root: Path, marker_name: str, code: s
     ]
 
 
+def projection_cache_operation_marker_findings(root: Path) -> list[Finding]:
+    marker_path = artifact_dir(root) / CACHE_OPERATION_MARKER_NAME
+    marker_rel = f"{ARTIFACT_DIR_REL}/{CACHE_OPERATION_MARKER_NAME}"
+    if not marker_path.exists():
+        return []
+    if not marker_path.is_file() or marker_path.is_symlink():
+        return [
+            Finding(
+                "warn",
+                "projection-cache-operation-in-progress",
+                f"generated projection cache operation marker is malformed; serialize projection writers/readers and inspect {marker_rel}",
+                marker_rel,
+            )
+        ]
+    try:
+        payload = json.loads(marker_path.read_text(encoding="utf-8"))
+    except (OSError, JSONDecodeError) as exc:
+        return [
+            Finding(
+                "warn",
+                "projection-cache-operation-in-progress",
+                f"generated projection cache operation marker is unreadable; rerun after any projection command completes: {exc}",
+                marker_rel,
+            )
+        ]
+    operation = str(payload.get("operation") or "unknown")
+    created_at = str(payload.get("created_at_utc") or "unknown")
+    return [
+        Finding(
+            "warn",
+            "projection-cache-operation-in-progress",
+            (
+                f"generated projection cache write may be in progress or interrupted: operation={operation}; "
+                f"created_at_utc={created_at}; rerun the read-only command after the projection write completes; "
+                f"{PROJECTION_REBUILD_NEXT_SAFE_COMMAND}"
+            ),
+            marker_rel,
+        )
+    ]
+
+
+def write_projection_cache_operation_marker(root: Path, operation: str) -> list[Finding]:
+    projection_dir = artifact_dir(root)
+    marker_path = projection_dir / CACHE_OPERATION_MARKER_NAME
+    marker_rel = f"{ARTIFACT_DIR_REL}/{CACHE_OPERATION_MARKER_NAME}"
+    payload = {
+        "schema_version": OPERATION_MARKER_SCHEMA_VERSION,
+        "marker_kind": "mylittleharness-projection-cache-operation",
+        "operation": operation,
+        "created_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "authority": "repo-visible source files remain authoritative; this marker only identifies an in-progress disposable generated-cache write",
+    }
+    try:
+        _write_json(marker_path, payload)
+    except OSError as exc:
+        return [
+            Finding(
+                "warn",
+                "projection-cache-operation-marker-skipped",
+                f"failed to write generated projection cache operation marker {marker_rel}: {exc}",
+                marker_rel,
+            )
+        ]
+    return []
+
+
 def clear_projection_cache_dirty_marker(root: Path, marker_name: str) -> None:
     marker_path = artifact_dir(root) / marker_name
+    if marker_path.exists() and marker_path.is_file() and not marker_path.is_symlink():
+        try:
+            marker_path.unlink()
+        except OSError:
+            pass
+
+
+def clear_projection_cache_operation_marker(root: Path) -> None:
+    marker_path = artifact_dir(root) / CACHE_OPERATION_MARKER_NAME
     if marker_path.exists() and marker_path.is_file() and not marker_path.is_symlink():
         try:
             marker_path.unlink()
@@ -534,7 +631,7 @@ def artifact_payloads(inventory: Inventory, projection: Projection) -> dict[str,
 
 def _unexpected_artifact_findings(root: Path) -> list[Finding]:
     projection_dir = artifact_dir(root)
-    expected = set(ARTIFACT_NAMES) | set(KNOWN_NON_JSON_PROJECTION_NAMES) | set(CACHE_DIRTY_MARKER_NAMES)
+    expected = set(ARTIFACT_NAMES) | set(KNOWN_NON_JSON_PROJECTION_NAMES) | set(CACHE_DIRTY_MARKER_NAMES) | {CACHE_OPERATION_MARKER_NAME}
     findings: list[Finding] = []
     for child in sorted(projection_dir.iterdir(), key=lambda item: item.name.lower()):
         if child.name in expected:
@@ -576,7 +673,7 @@ def _payload_shape_findings(payloads: dict[str, Any]) -> list[Finding]:
         schema_version = payload.get("schema_version")
         if schema_version not in (None, ARTIFACT_SCHEMA_VERSION):
             message = (
-                f"{name} is a stale v1 projection artifact; rebuild recommended"
+                f"{name} is a stale v1 projection artifact; rebuild recommended; {PROJECTION_REBUILD_NEXT_SAFE_COMMAND}"
                 if schema_version == 1
                 else f"{name} has unsupported schema {schema_version!r}; expected {ARTIFACT_SCHEMA_VERSION}"
             )
@@ -596,7 +693,7 @@ def _payload_shape_findings(payloads: dict[str, Any]) -> list[Finding]:
                         Finding(
                             "warn",
                             "projection-artifact-malformed",
-                            f"manifest.json field {key!r} is missing or malformed; rebuild recommended",
+                            f"manifest.json field {key!r} is missing or malformed; rebuild recommended; {PROJECTION_REBUILD_NEXT_SAFE_COMMAND}",
                             f"{ARTIFACT_DIR_REL}/manifest.json",
                         )
                     )
@@ -637,7 +734,7 @@ def _integrity_findings(payloads: dict[str, Any]) -> list[Finding]:
                 Finding(
                     "warn",
                     "projection-artifact-hash",
-                    f"{name} payload hash does not match manifest integrity metadata; rebuild recommended",
+                    f"{name} payload hash does not match manifest integrity metadata; rebuild recommended; {PROJECTION_REBUILD_NEXT_SAFE_COMMAND}",
                     f"{ARTIFACT_DIR_REL}/{name}",
                 )
             )
@@ -648,7 +745,7 @@ def _integrity_findings(payloads: dict[str, Any]) -> list[Finding]:
             Finding(
                 "warn",
                 "projection-artifact-hash",
-                "source-set hash does not match current artifact payload hashes; rebuild recommended",
+                f"source-set hash does not match current artifact payload hashes; rebuild recommended; {PROJECTION_REBUILD_NEXT_SAFE_COMMAND}",
                 f"{ARTIFACT_DIR_REL}/manifest.json",
             )
         )
@@ -658,7 +755,7 @@ def _integrity_findings(payloads: dict[str, Any]) -> list[Finding]:
             Finding(
                 "warn",
                 "projection-artifact-hash",
-                "record-set hash does not match current artifact payload hashes; rebuild recommended",
+                f"record-set hash does not match current artifact payload hashes; rebuild recommended; {PROJECTION_REBUILD_NEXT_SAFE_COMMAND}",
                 f"{ARTIFACT_DIR_REL}/manifest.json",
             )
         )
@@ -730,7 +827,7 @@ def _stale_findings(projection: Projection, payloads: dict[str, Any]) -> list[Fi
                     Finding(
                         "warn",
                         "projection-artifact-stale",
-                        f"generated source hashes differ from current files; sample={sample}; rebuild recommended",
+                        f"generated source hashes differ from current files; sample={sample}; rebuild recommended; {PROJECTION_REBUILD_NEXT_SAFE_COMMAND}",
                     )
                 )
 
@@ -758,7 +855,7 @@ def _stale_findings(projection: Projection, payloads: dict[str, Any]) -> list[Fi
                 Finding(
                     "warn",
                     "projection-artifact-stale",
-                    f"generated summary counts differ from current projection: {', '.join(mismatches)}; rebuild recommended",
+                    f"generated summary counts differ from current projection: {', '.join(mismatches)}; rebuild recommended; {PROJECTION_REBUILD_NEXT_SAFE_COMMAND}",
                     f"{ARTIFACT_DIR_REL}/summary.json",
                 )
             )
@@ -809,9 +906,33 @@ def _is_under_artifact_dir(root: Path, path: Path) -> bool:
 
 def _write_json(path: Path, payload: Any) -> None:
     rendered = json.dumps(payload, indent=2, sort_keys=True) + "\n"
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(rendered, encoding="utf-8")
-    tmp_path.replace(path)
+    tmp_path = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        tmp_path.write_text(rendered, encoding="utf-8")
+        _replace_with_retry(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+
+
+def _replace_with_retry(source: Path, target: Path) -> None:
+    last_error: OSError | None = None
+    delay = JSON_REPLACE_RETRY_SECONDS
+    for attempt in range(JSON_REPLACE_ATTEMPTS):
+        try:
+            source.replace(target)
+            return
+        except OSError as exc:
+            last_error = exc
+            if attempt == JSON_REPLACE_ATTEMPTS - 1:
+                break
+            time.sleep(delay)
+            delay *= 2
+    if last_error is not None:
+        raise last_error
 
 
 def _dirty_marker_payload(command: str, paths: tuple[str, ...]) -> dict[str, Any]:

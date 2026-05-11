@@ -1,22 +1,31 @@
 from __future__ import annotations
 
 import ast
+import hashlib
+import json
 import re
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
 from .atomic_files import AtomicFileDelete, AtomicFileWrite, FileTransactionError, apply_file_transaction
+from .command_discovery import rails_not_cognition_boundary_finding
 from .inventory import Inventory
 from .models import Finding
 from .parsing import parse_frontmatter
+from .research_recovery import deep_research_rubric_recovery_findings
+from .roadmap_semantics import roadmap_item_is_terminal_history_stub
 
 
 RESEARCH_DIR_REL = "project/research"
 INCUBATION_DIR_REL = "project/plan-incubation"
+VERIFICATION_DIR_REL = "project/verification"
 ARCHIVE_RESEARCH_DIR_REL = "project/archive/reference/research"
 ARCHIVE_INCUBATION_DIR_REL = "project/archive/reference/incubation"
+ARCHIVE_VERIFICATION_DIR_REL = "project/archive/reference/verification"
 ROADMAP_REL = "project/roadmap.md"
+DEFAULT_VERIFICATION_LEDGER_REL = f"{VERIFICATION_DIR_REL}/autonomous-mlh-swim-ledger.md"
+VERIFICATION_LEDGER_CONTINUITY_MARKER = "<!-- mylittleharness-verification-ledger-continuity v1 -->"
 ALLOWED_STATUS_VALUES = {"archived", "distilled", "implemented", "rejected"}
 TERMINAL_ROADMAP_STATUSES = {"done", "rejected", "superseded"}
 RELATIONSHIP_STATUS_FIELDS = {
@@ -58,6 +67,17 @@ TERMINAL_INCUBATION_STATUSES = {"implemented", "archived", "rejected", "supersed
 FINAL_DOCS_DECISIONS = {"updated", "not-needed"}
 ROADMAP_CURRENT_POSTURE_TITLE = "Current Posture"
 ROADMAP_CURRENT_POSTURE_FIELD = "current_posture"
+META_FEEDBACK_CLUSTER_BEGIN = "<!-- BEGIN mylittleharness-meta-feedback-cluster v1 -->"
+RECONSTRUCTED_ARCHIVE_STATUS_FIELDS = ("recovery_status", "reconstruction_status")
+RECONSTRUCTED_ARCHIVE_BOUNDARY_FIELDS = ("authority", "closeout_boundary")
+RECONSTRUCTED_ARCHIVE_BODY_MARKERS = (
+    "recovered evidence card",
+    "reconstructed historical pointer",
+    "not proof of the original full plan body",
+    "not the original implementation plan",
+    "original file body was absent",
+    "physical file was absent",
+)
 
 
 @dataclass(frozen=True)
@@ -92,6 +112,10 @@ class MemoryHygieneRequest:
     scan: bool = False
     archive_covered: bool = False
     entry_coverage: tuple[str, ...] = ()
+    rotate_ledger: bool = False
+    source_hash: str = ""
+    reason: str = ""
+    proposal_token: str = ""
 
 
 @dataclass(frozen=True)
@@ -107,6 +131,18 @@ class MemoryHygienePlan:
     link_repairs: tuple[tuple[str, Path, str], ...]
     entry_coverage_updates: tuple[EntryCoverage, ...] = ()
     archive_covered: bool = False
+
+
+@dataclass(frozen=True)
+class VerificationLedgerRotationPlan:
+    source_rel: str
+    source_path: Path
+    archive_rel: str
+    archive_path: Path
+    source_text: str
+    source_hash: str
+    fresh_text: str
+    reason: str
 
 
 @dataclass(frozen=True)
@@ -134,6 +170,18 @@ class RoadmapCurrentPostureItem:
     detail: str
 
 
+@dataclass(frozen=True)
+class MemoryHygieneBatchCandidate:
+    candidate_id: str
+    source_rel: str
+    source_hash: str
+    status: str
+    archive_rel: str
+    link_repairs: tuple[tuple[str, str, str], ...]
+    dry_run_command: str
+    apply_command: str
+
+
 def sync_roadmap_current_posture_section(text: str) -> str:
     lines = text.splitlines(keepends=True)
     bounds = _roadmap_h2_section_bounds(lines, ROADMAP_CURRENT_POSTURE_TITLE)
@@ -156,8 +204,14 @@ def make_memory_hygiene_request(
     scan: bool = False,
     archive_covered: bool = False,
     entry_coverage: tuple[str, ...] | list[str] = (),
+    rotate_ledger: bool = False,
+    source_hash: str | None = None,
+    reason: str | None = None,
+    proposal_token: str | None = None,
 ) -> MemoryHygieneRequest:
     source_rel = _normalize_rel(source)
+    if rotate_ledger and not source_rel:
+        source_rel = DEFAULT_VERIFICATION_LEDGER_REL
     promoted = _normalize_rel(promoted_to)
     archive = _normalize_rel(archive_to)
     if archive_covered and not archive and source_rel.startswith(f"{INCUBATION_DIR_REL}/"):
@@ -172,10 +226,17 @@ def make_memory_hygiene_request(
         scan=scan,
         archive_covered=archive_covered,
         entry_coverage=tuple(str(item or "").strip() for item in entry_coverage if str(item or "").strip()),
+        rotate_ledger=rotate_ledger,
+        source_hash=str(source_hash or "").strip().casefold(),
+        reason=str(reason or "").strip(),
+        proposal_token=str(proposal_token or "").strip().casefold(),
     )
 
 
 def memory_hygiene_dry_run_findings(inventory: Inventory, request: MemoryHygieneRequest) -> list[Finding]:
+    if request.rotate_ledger:
+        return verification_ledger_rotate_dry_run_findings(inventory, request)
+
     findings = [
         Finding("info", "memory-hygiene-dry-run", "memory hygiene proposal only; no files were written"),
         _root_posture_finding(inventory),
@@ -185,7 +246,7 @@ def memory_hygiene_dry_run_findings(inventory: Inventory, request: MemoryHygiene
             Finding(
                 "info",
                 "memory-hygiene-scan",
-                "relationship hygiene scan is read-only and reports stale links, missing reciprocal links, orphan notes, text-input audit posture, entry coverage, split suggestions, incubation cleanup advisor classifications, and safe cleanup candidates",
+                "relationship hygiene scan is read-only and reports stale links, missing reciprocal links, orphan notes, text-input audit posture, entry coverage, split suggestions, incubation cleanup advisor classifications, Deep Research rubric recovery hints, and safe cleanup candidates",
             )
         )
         errors = _request_errors(inventory, request)
@@ -224,8 +285,19 @@ def memory_hygiene_dry_run_findings(inventory: Inventory, request: MemoryHygiene
 
 
 def memory_hygiene_apply_findings(inventory: Inventory, request: MemoryHygieneRequest) -> list[Finding]:
+    if request.rotate_ledger:
+        return verification_ledger_rotate_apply_findings(inventory, request)
+
     if request.scan:
-        return [Finding("error", "memory-hygiene-refused", "--scan is read-only and can be used only with --dry-run")]
+        if request.proposal_token:
+            return _memory_hygiene_batch_apply_findings(inventory, request)
+        return [
+            Finding(
+                "error",
+                "memory-hygiene-refused",
+                "--scan is read-only unless paired with --apply --proposal-token from a reviewed dry-run scan",
+            )
+        ]
 
     plan, errors = _memory_hygiene_plan(inventory, request)
     if errors:
@@ -276,6 +348,404 @@ def memory_hygiene_apply_findings(inventory: Inventory, request: MemoryHygieneRe
         )
     )
     return findings
+
+
+def _memory_hygiene_batch_apply_findings(inventory: Inventory, request: MemoryHygieneRequest) -> list[Finding]:
+    errors = _request_errors(inventory, request)
+    if errors:
+        return errors
+    if not re.fullmatch(r"mhb-[0-9a-f]{16}", request.proposal_token):
+        return [
+            Finding(
+                "error",
+                "memory-hygiene-batch-refused",
+                "--proposal-token must be the mhb-* token reported by memory-hygiene --dry-run --scan",
+            )
+        ]
+
+    candidates = _incubation_cleanup_batch_candidates(inventory)
+    if not candidates:
+        return [
+            Finding(
+                "error",
+                "memory-hygiene-batch-refused",
+                "no current scan cleanup candidates match a token-bound batch apply; rerun memory-hygiene --dry-run --scan",
+            )
+        ]
+
+    current_token = _batch_proposal_token(candidates)
+    if request.proposal_token != current_token:
+        return [
+            Finding(
+                "error",
+                "memory-hygiene-batch-refused",
+                (
+                    "proposal token mismatch or stale scan; "
+                    f"expected current token {current_token}, received {request.proposal_token}; rerun memory-hygiene --dry-run --scan"
+                ),
+            )
+        ]
+
+    plans: list[tuple[MemoryHygieneBatchCandidate, MemoryHygienePlan]] = []
+    for candidate in candidates:
+        plan_request = MemoryHygieneRequest(
+            source=candidate.source_rel,
+            promoted_to="",
+            status=candidate.status,
+            archive_to=candidate.archive_rel,
+            repair_links=True,
+        )
+        plan, plan_errors = _memory_hygiene_plan(inventory, plan_request)
+        if plan_errors:
+            return plan_errors
+        assert plan is not None
+        plans.append((candidate, plan))
+
+    operations: list[AtomicFileWrite | AtomicFileDelete] = []
+    for _, plan in plans:
+        if not plan.archive_path:
+            return [Finding("error", "memory-hygiene-batch-refused", "batch cleanup requires archive targets", plan.source_rel)]
+        archive_tmp = plan.archive_path.with_name(f".{plan.archive_path.name}.memory-hygiene-batch.tmp")
+        archive_backup = plan.archive_path.with_name(f".{plan.archive_path.name}.memory-hygiene-batch.backup")
+        source_backup = plan.source_path.with_name(f".{plan.source_path.name}.memory-hygiene-batch.backup")
+        operations.append(AtomicFileWrite(plan.archive_path, archive_tmp, plan.updated_source_text, archive_backup))
+        operations.append(AtomicFileDelete(plan.source_path, source_backup))
+
+    link_text_by_path: dict[Path, str] = {}
+    link_rel_by_path: dict[Path, str] = {}
+    for _, plan in plans:
+        for rel_path, path, _ in plan.link_repairs:
+            if path not in link_text_by_path:
+                try:
+                    link_text_by_path[path] = path.read_text(encoding="utf-8")
+                except OSError as exc:
+                    return [Finding("error", "memory-hygiene-batch-refused", f"link repair target could not be read: {exc}", rel_path)]
+                link_rel_by_path[path] = rel_path
+            link_text_by_path[path] = link_text_by_path[path].replace(plan.source_rel, plan.archive_rel)
+
+    for path, text in sorted(link_text_by_path.items(), key=lambda item: link_rel_by_path[item[0]]):
+        link_tmp = path.with_name(f".{path.name}.memory-hygiene-batch.tmp")
+        link_backup = path.with_name(f".{path.name}.memory-hygiene-batch.backup")
+        operations.append(AtomicFileWrite(path, link_tmp, text, link_backup))
+
+    try:
+        cleanup_warnings = apply_file_transaction(operations)
+    except FileTransactionError as exc:
+        return [
+            Finding(
+                "error",
+                "memory-hygiene-batch-refused",
+                f"token-bound memory hygiene batch apply failed before all target writes completed: {exc}",
+            )
+        ]
+
+    findings = [
+        Finding("info", "memory-hygiene-batch-apply", "token-bound memory hygiene batch apply started"),
+        _root_posture_finding(inventory),
+        Finding(
+            "info",
+            "memory-hygiene-batch-token-accepted",
+            (
+                f"accepted reviewed proposal token {request.proposal_token} for {len(plans)} candidate(s); "
+                "token binds source hashes, candidate ids, archive targets, and exact link-repair file hashes"
+            ),
+        ),
+    ]
+    for candidate, plan in plans:
+        findings.append(
+            Finding(
+                "info",
+                "memory-hygiene-batch-candidate-applied",
+                f"candidate_id={candidate.candidate_id}; archived source to {plan.archive_rel}",
+                plan.archive_rel,
+            )
+        )
+        findings.append(Finding("info", "memory-hygiene-frontmatter-updated", "updated lifecycle frontmatter", plan.archive_rel))
+        findings.append(Finding("info", "memory-hygiene-archived", f"archived source to {plan.archive_rel}", plan.archive_rel))
+    for path in sorted(link_text_by_path, key=lambda item: link_rel_by_path[item]):
+        rel_path = link_rel_by_path[path]
+        findings.append(Finding("info", "memory-hygiene-link-repaired", f"repaired exact source-path references in {rel_path}", rel_path))
+    for warning in cleanup_warnings:
+        findings.append(Finding("warn", "memory-hygiene-backup-cleanup", warning))
+    findings.extend(_boundary_findings())
+    findings.append(
+        Finding(
+            "info",
+            "memory-hygiene-validation-posture",
+            "run check after token-bound batch apply; hygiene output is not lifecycle approval",
+        )
+    )
+    return findings
+
+
+def verification_ledger_rotate_dry_run_findings(inventory: Inventory, request: MemoryHygieneRequest) -> list[Finding]:
+    findings = [
+        Finding("info", "verification-ledger-rotate-dry-run", "verification ledger rotation proposal only; no files were written"),
+        _root_posture_finding(inventory),
+    ]
+    plan, errors = _verification_ledger_rotation_plan(inventory, request, apply=False)
+    if plan:
+        findings.extend(_verification_ledger_rotation_plan_findings(plan, apply=False))
+    if errors:
+        findings.extend(_with_severity(errors, "warn"))
+        findings.append(
+            Finding(
+                "info",
+                "verification-ledger-rotate-validation-posture",
+                "dry-run refused before apply; fix refusal reasons, then rerun dry-run before rotating verification ledger memory",
+                request.source or None,
+            )
+        )
+        return findings
+    assert plan is not None
+    findings.extend(_verification_ledger_rotation_boundary_findings())
+    findings.append(
+        Finding(
+            "info",
+            "verification-ledger-rotate-validation-posture",
+            f"apply would write only {plan.archive_rel} and {plan.source_rel}; rerun apply with --source-hash {plan.source_hash}; dry-run writes no files",
+            plan.source_rel,
+        )
+    )
+    return findings
+
+
+def verification_ledger_rotate_apply_findings(inventory: Inventory, request: MemoryHygieneRequest) -> list[Finding]:
+    plan, errors = _verification_ledger_rotation_plan(inventory, request, apply=True)
+    if errors:
+        return errors
+    assert plan is not None
+
+    operations: list[AtomicFileWrite | AtomicFileDelete] = [
+        AtomicFileWrite(
+            plan.archive_path,
+            plan.archive_path.with_name(f".{plan.archive_path.name}.verification-ledger.tmp"),
+            plan.source_text,
+            plan.archive_path.with_name(f".{plan.archive_path.name}.verification-ledger.backup"),
+        ),
+        AtomicFileWrite(
+            plan.source_path,
+            plan.source_path.with_name(f".{plan.source_path.name}.verification-ledger.tmp"),
+            plan.fresh_text,
+            plan.source_path.with_name(f".{plan.source_path.name}.verification-ledger.backup"),
+        ),
+    ]
+    try:
+        cleanup_warnings = apply_file_transaction(operations)
+    except FileTransactionError as exc:
+        return [Finding("error", "verification-ledger-rotate-refused", f"verification ledger rotation failed before all target writes completed: {exc}", plan.source_rel)]
+
+    findings = [
+        Finding("info", "verification-ledger-rotate-apply", "verification ledger rotation apply started"),
+        _root_posture_finding(inventory),
+        Finding("info", "verification-ledger-archived", f"archived previous ledger to {plan.archive_rel}", plan.archive_rel),
+        Finding("info", "verification-ledger-seeded", f"seeded fresh continuity ledger at {plan.source_rel}", plan.source_rel),
+    ]
+    findings.extend(_verification_ledger_rotation_plan_findings(plan, apply=True))
+    for warning in cleanup_warnings:
+        findings.append(Finding("warn", "verification-ledger-backup-cleanup", warning, plan.source_rel))
+    findings.extend(_verification_ledger_rotation_boundary_findings())
+    findings.append(
+        Finding(
+            "info",
+            "verification-ledger-rotate-validation-posture",
+            "run check after apply to verify fresh ledger and archived evidence posture; rotation output is not lifecycle approval",
+            plan.source_rel,
+        )
+    )
+    return findings
+
+
+def _verification_ledger_rotation_plan(
+    inventory: Inventory,
+    request: MemoryHygieneRequest,
+    *,
+    apply: bool,
+) -> tuple[VerificationLedgerRotationPlan | None, list[Finding]]:
+    source_rel = request.source or DEFAULT_VERIFICATION_LEDGER_REL
+    source_path = inventory.root / source_rel if source_rel else inventory.root
+    archive_rel = _default_verification_archive_rel(source_rel)
+    archive_path = inventory.root / archive_rel
+    errors = _verification_ledger_rotation_errors(inventory, request, source_rel, source_path, archive_rel, archive_path, apply=apply)
+    if errors:
+        return None, errors
+    try:
+        source_text = source_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return None, [Finding("error", "verification-ledger-rotate-refused", f"source ledger could not be read: {exc}", source_rel)]
+
+    source_hash = _sha256_text(source_text)
+    if apply:
+        expected_hash = request.source_hash
+        if not expected_hash:
+            return None, [
+                Finding(
+                    "error",
+                    "verification-ledger-rotate-refused",
+                    f"--source-hash is required for apply; rerun dry-run and retry with --source-hash {source_hash}",
+                    source_rel,
+                )
+            ]
+        if expected_hash != source_hash:
+            return None, [
+                Finding(
+                    "error",
+                    "verification-ledger-rotate-refused",
+                    f"source hash changed after review; expected {expected_hash}, current {source_hash}; rerun dry-run before apply",
+                    source_rel,
+                )
+            ]
+
+    reason = request.reason or "ledger rotation requested through memory-hygiene --rotate-ledger"
+    fresh_text = _fresh_verification_ledger_text(source_rel, archive_rel, source_hash, reason)
+    return (
+        VerificationLedgerRotationPlan(
+            source_rel=source_rel,
+            source_path=source_path,
+            archive_rel=archive_rel,
+            archive_path=archive_path,
+            source_text=source_text,
+            source_hash=source_hash,
+            fresh_text=fresh_text,
+            reason=reason,
+        ),
+        [],
+    )
+
+
+def _verification_ledger_rotation_errors(
+    inventory: Inventory,
+    request: MemoryHygieneRequest,
+    source_rel: str,
+    source_path: Path,
+    archive_rel: str,
+    archive_path: Path,
+    *,
+    apply: bool,
+) -> list[Finding]:
+    errors: list[Finding] = []
+    if inventory.root_kind == "product_source_fixture":
+        errors.append(Finding("error", "verification-ledger-rotate-refused", "target is a product-source compatibility fixture; verification ledger rotation is refused", source_rel or None))
+    elif inventory.root_kind == "fallback_or_archive":
+        errors.append(Finding("error", "verification-ledger-rotate-refused", "target is fallback/archive or generated-output evidence; verification ledger rotation is refused", source_rel or None))
+    elif inventory.root_kind != "live_operating_root":
+        errors.append(Finding("error", "verification-ledger-rotate-refused", f"target root kind is {inventory.root_kind}; verification ledger rotation requires a live operating root"))
+
+    if (
+        request.scan
+        or request.promoted_to
+        or request.archive_to
+        or request.status
+        or request.repair_links
+        or request.archive_covered
+        or request.entry_coverage
+        or request.proposal_token
+    ):
+        errors.append(
+            Finding(
+                "error",
+                "verification-ledger-rotate-refused",
+                "--rotate-ledger cannot be combined with scan, proposal-token, promotion, archive, status, link-repair, archive-covered, or entry-coverage fields",
+                source_rel or None,
+            )
+        )
+    if request.source_hash and not re.fullmatch(r"[0-9a-f]{64}", request.source_hash):
+        errors.append(Finding("error", "verification-ledger-rotate-refused", "--source-hash must be a full lowercase sha256 hex digest from dry-run", source_rel or None))
+    if not apply and request.source_hash:
+        errors.append(Finding("error", "verification-ledger-rotate-refused", "--source-hash is apply-only; dry-run reports the current source hash", source_rel or None))
+    if not source_rel:
+        errors.append(Finding("error", "verification-ledger-rotate-refused", "--source is required and cannot be empty"))
+        return errors
+    if _rel_has_absolute_or_parent_parts(source_rel):
+        errors.append(Finding("error", "verification-ledger-rotate-refused", "--source must be a root-relative path without parent segments", source_rel))
+        return errors
+    if not source_rel.startswith(f"{VERIFICATION_DIR_REL}/"):
+        errors.append(Finding("error", "verification-ledger-rotate-refused", "source ledger must be under project/verification/", source_rel))
+    if not source_rel.endswith(".md"):
+        errors.append(Finding("error", "verification-ledger-rotate-refused", "source ledger must be a Markdown file", source_rel))
+    if _path_escapes_root(inventory.root, source_path):
+        errors.append(Finding("error", "verification-ledger-rotate-refused", "source ledger path escapes the target root", source_rel))
+    elif not source_path.exists():
+        errors.append(Finding("error", "verification-ledger-rotate-refused", "source ledger does not exist", source_rel))
+    elif source_path.is_symlink():
+        errors.append(Finding("error", "verification-ledger-rotate-refused", "source ledger is a symlink", source_rel))
+    elif not source_path.is_file():
+        errors.append(Finding("error", "verification-ledger-rotate-refused", "source ledger is not a regular file", source_rel))
+
+    if _path_escapes_root(inventory.root, archive_path):
+        errors.append(Finding("error", "verification-ledger-rotate-refused", "archive target path escapes the target root", archive_rel))
+        return errors
+    for parent in _parents_between(inventory.root, archive_path.parent):
+        rel = parent.relative_to(inventory.root).as_posix()
+        if parent.exists() and parent.is_symlink():
+            errors.append(Finding("error", "verification-ledger-rotate-refused", f"archive target directory contains a symlink segment: {rel}", rel))
+        elif parent.exists() and not parent.is_dir():
+            errors.append(Finding("error", "verification-ledger-rotate-refused", f"archive target directory contains a non-directory segment: {rel}", rel))
+    if archive_path.exists():
+        errors.append(Finding("error", "verification-ledger-rotate-refused", "archive target already exists", archive_rel))
+    return errors
+
+
+def _verification_ledger_rotation_plan_findings(plan: VerificationLedgerRotationPlan, *, apply: bool) -> list[Finding]:
+    prefix = "" if apply else "would "
+    return [
+        Finding("info", "verification-ledger-source", f"{prefix}rotate source ledger: {plan.source_rel}", plan.source_rel),
+        Finding("info", "verification-ledger-source-hash", f"current source sha256: {plan.source_hash}", plan.source_rel),
+        Finding("info", "verification-ledger-archive-target", f"{prefix}archive previous ledger to {plan.archive_rel}", plan.archive_rel),
+        Finding("info", "verification-ledger-fresh-target", f"{prefix}seed fresh continuity ledger at {plan.source_rel}", plan.source_rel),
+        Finding("info", "verification-ledger-continuity-pointer", f"{prefix}record continuity pointer from {plan.source_rel} to {plan.archive_rel}", plan.source_rel),
+        Finding("info", "verification-ledger-reason", f"rotation reason: {plan.reason}", plan.source_rel),
+    ]
+
+
+def _verification_ledger_rotation_boundary_findings() -> list[Finding]:
+    return [
+        rails_not_cognition_boundary_finding(VERIFICATION_DIR_REL),
+        Finding(
+            "info",
+            "verification-ledger-rotate-boundary",
+            "verification ledger rotation writes only the reviewed active ledger and deterministic archive/reference verification target in eligible live operating roots",
+        ),
+        Finding(
+            "info",
+            "verification-ledger-rotate-authority",
+            "verification ledger rotation is evidence maintenance only; it cannot approve closeout, roadmap promotion, unrelated archive cleanup, staging, commit, push, rollback, or next-plan opening",
+        ),
+    ]
+
+
+def _default_verification_archive_rel(source_rel: str) -> str:
+    source = Path(source_rel)
+    return f"{ARCHIVE_VERIFICATION_DIR_REL}/{date.today().isoformat()}-{source.stem}.md"
+
+
+def _fresh_verification_ledger_text(source_rel: str, archive_rel: str, source_hash: str, reason: str) -> str:
+    today = date.today().isoformat()
+    title = Path(source_rel).stem.replace("-", " ").title()
+    return (
+        "---\n"
+        f'title: "{_yaml_double_quoted_value(title)}"\n'
+        'status: "active"\n'
+        f'created: "{today}"\n'
+        f'rotated_from: "{_yaml_double_quoted_value(archive_rel)}"\n'
+        f'rotated_from_hash: "{source_hash}"\n'
+        "---\n"
+        f"# {title}\n\n"
+        f"{VERIFICATION_LEDGER_CONTINUITY_MARKER}\n"
+        f"- Previous ledger archive: `{archive_rel}`\n"
+        f"- Previous ledger sha256: `{source_hash}`\n"
+        f"- Rotated on: `{today}`\n"
+        f"- Reason: {reason}\n"
+        "- Boundary: this active ledger is fresh continuity only; archived verification evidence remains historical "
+        "and cannot approve lifecycle movement, closeout, staging, commit, push, rollback, or next-plan opening.\n"
+        "\n"
+        "## Current Continuity\n\n"
+        "- Start new verification observations below this heading.\n"
+    )
+
+
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _memory_hygiene_plan(inventory: Inventory, request: MemoryHygieneRequest) -> tuple[MemoryHygienePlan | None, list[Finding]]:
@@ -356,6 +826,8 @@ def _request_errors(inventory: Inventory, request: MemoryHygieneRequest) -> list
             errors.append(Finding("error", "memory-hygiene-refused", "--scan cannot be combined with source, promotion, archive, status, link-repair, archive-covered, or entry-coverage fields"))
         return errors
 
+    if request.proposal_token:
+        errors.append(Finding("error", "memory-hygiene-refused", "--proposal-token requires --scan"))
     if not request.source:
         errors.append(Finding("error", "memory-hygiene-refused", "--source is required and cannot be empty"))
     if request.archive_covered and not request.source.startswith(f"{INCUBATION_DIR_REL}/"):
@@ -478,7 +950,16 @@ def _source_text_with_entry_coverage(text: str, raw_records: tuple[str, ...]) ->
     entry_ids = {entry.entry_id for entry in report.entries}
     for record in parsed_records:
         if record.entry_id not in entry_ids:
-            return text, (), f"entry coverage references unknown entry {record.entry_id!r}"
+            valid_ids = ", ".join(f"`{entry.entry_id}`" for entry in report.entries) or "<none parsed>"
+            return (
+                text,
+                (),
+                (
+                    f"entry coverage references unknown entry {record.entry_id!r}; valid entry ids: {valid_ids}; "
+                    'retry with --entry-coverage "<entry-id>: implemented via <destination>" or '
+                    '--entry-coverage "<entry-id>: rejected <reason>"'
+                ),
+            )
         blockers = _entry_coverage_record_blockers(record)
         if blockers:
             return text, (), "; ".join(blockers)
@@ -507,6 +988,7 @@ def relationship_update_plan(
     archive_to: str = "",
     repair_links: bool = False,
     archive_blockers: tuple[str, ...] = (),
+    clear_fields: tuple[str, ...] = (),
 ) -> tuple[RelationshipUpdatePlan | None, list[Finding]]:
     source_rel = _normalize_rel(source_rel)
     archive_rel = _normalize_rel(archive_to)
@@ -526,14 +1008,21 @@ def relationship_update_plan(
         return None, [Finding("error", "relationship-writeback-refused", f"source could not be read: {exc}", source_rel)]
 
     update_values = {key: value for key, value in updates.items() if value not in (None, "")}
+    clear_field_names = tuple(dict.fromkeys(field for field in clear_fields if field))
     if archive_rel:
         update_values["archived_to"] = archive_rel
     update_values["updated"] = date.today().isoformat()
-    updated_text, frontmatter_error = _text_with_frontmatter_scalars(source_text, update_values)
+    updated_text, frontmatter_error = _text_with_frontmatter_scalars(source_text, update_values, clear_fields=clear_field_names)
     if frontmatter_error:
         return None, [Finding("error", "relationship-writeback-refused", frontmatter_error, source_rel)]
 
     changed_fields = tuple(key for key in update_values if _frontmatter_value(source_text, key) != update_values[key])
+    cleared_fields = tuple(
+        key
+        for key in clear_field_names
+        if _frontmatter_field_present(source_text, key) and _frontmatter_value(updated_text, key) == ""
+    )
+    changed_fields = tuple(dict.fromkeys((*changed_fields, *cleared_fields)))
     link_repairs: tuple[tuple[str, Path, str], ...] = ()
     if repair_links and archive_rel:
         link_repairs = tuple(_planned_link_repairs(inventory, source_rel, archive_rel))
@@ -649,6 +1138,7 @@ def relationship_hygiene_scan_findings(inventory: Inventory) -> list[Finding]:
     findings.extend(_roadmap_relationship_findings(inventory, roadmap_items))
     findings.extend(_incubation_relationship_findings(inventory, roadmap_items))
     findings.extend(_incubation_cleanup_advisor_findings(inventory, roadmap_items))
+    findings.extend(deep_research_rubric_recovery_findings(inventory, include_present=True))
     if not findings:
         findings.append(Finding("info", "relationship-scan-ok", "no relationship hygiene findings were found"))
     return findings
@@ -757,6 +1247,7 @@ def _plan_findings(plan: MemoryHygienePlan, apply: bool, repair_links: bool) -> 
 
 def _boundary_findings() -> list[Finding]:
     return [
+        rails_not_cognition_boundary_finding(INCUBATION_DIR_REL),
         Finding(
             "info",
             "memory-hygiene-boundary",
@@ -772,6 +1263,7 @@ def _boundary_findings() -> list[Finding]:
 
 def _relationship_scan_boundary_findings() -> list[Finding]:
     return [
+        rails_not_cognition_boundary_finding(INCUBATION_DIR_REL),
         Finding(
             "info",
             "relationship-scan-read-only",
@@ -848,6 +1340,7 @@ def _roadmap_relationship_findings(inventory: Inventory, roadmap_items: dict[str
         related_plan = _normalize_rel(fields.get("related_plan"))
         verification_summary = str(fields.get("verification_summary") or "").strip()
         docs_decision = str(fields.get("docs_decision") or "").strip()
+        terminal_history_stub = roadmap_item_is_terminal_history_stub(fields)
         if source_incubation:
             source_path = inventory.root / source_incubation
             if not source_path.is_file():
@@ -865,15 +1358,28 @@ def _roadmap_relationship_findings(inventory: Inventory, roadmap_items: dict[str
                             "relationship-missing-reciprocal",
                             f"roadmap item {item_id!r} points to {source_incubation}, but the incubation note does not point back to the roadmap item",
                             source_incubation,
-                        )
                     )
+                )
         if status == "done":
-            if not archived_plan:
+            if not archived_plan and not terminal_history_stub:
                 findings.append(Finding("warn", "relationship-roadmap-done-missing-archive", f"done roadmap item {item_id!r} has no archived_plan", ROADMAP_REL))
             if not verification_summary:
                 findings.append(Finding("warn", "relationship-roadmap-done-missing-verification", f"done roadmap item {item_id!r} has no verification_summary", ROADMAP_REL))
             if docs_decision not in {"updated", "not-needed"}:
-                findings.append(Finding("warn", "relationship-roadmap-done-missing-docs", f"done roadmap item {item_id!r} lacks a final docs_decision", ROADMAP_REL))
+                if _done_item_has_reconstructed_archive_docs_boundary(inventory, archived_plan):
+                    findings.append(
+                        Finding(
+                            "info",
+                            "relationship-roadmap-done-reconstructed-docs",
+                            (
+                                f"done roadmap item {item_id!r} keeps docs_decision provisional because its archived_plan "
+                                "is reconstructed historical evidence; re-review docs only when a current lifecycle decision depends on it"
+                            ),
+                            archived_plan,
+                        )
+                    )
+                else:
+                    findings.append(Finding("warn", "relationship-roadmap-done-missing-docs", f"done roadmap item {item_id!r} lacks a final docs_decision", ROADMAP_REL))
             if archived_plan and related_plan == "project/implementation-plan.md":
                 findings.append(Finding("warn", "relationship-stale-active-plan-link", f"done roadmap item {item_id!r} still has related_plan pointing at the active plan", ROADMAP_REL))
     return findings
@@ -895,9 +1401,21 @@ def _incubation_relationship_findings(inventory: Inventory, roadmap_items: dict[
         status = str(data.get("status") or "").strip().casefold()
         relation_values = [data.get(field) for field in RELATIONSHIP_STATUS_FIELDS]
         related_item = str(data.get("related_roadmap_item") or "")
+        source_item = items_by_source.get(surface.rel_path)
+        item_id = related_item or (source_item[0] if source_item else "")
+        roadmap_detached_meta_feedback = _meta_feedback_candidate_is_roadmap_detached(data, surface.content, item_id)
         if status in {"implemented", "archived", "rejected", "superseded"}:
             findings.append(Finding("warn", "relationship-active-incubation-closed", f"closed incubation note is still in the active incubation lane with status {status!r}", surface.rel_path))
-        if not any(_frontmatter_value_is_nonempty(value) for value in relation_values):
+        if roadmap_detached_meta_feedback:
+            findings.append(
+                Finding(
+                    "info",
+                    "relationship-meta-feedback-candidate",
+                    "meta-feedback candidate is roadmap-detached operating memory until explicit roadmap/spec/plan promotion",
+                    surface.rel_path,
+                )
+            )
+        elif not any(_frontmatter_value_is_nonempty(value) for value in relation_values):
             findings.append(Finding("warn", "relationship-orphan-incubation", "incubation note has no roadmap, plan, archive, rejection, or supersession relationship metadata", surface.rel_path))
         coverage_report = incubation_entry_coverage_report(surface.content)
         for blocker in _active_implementation_tail_blockers(data, coverage_report):
@@ -909,10 +1427,10 @@ def _incubation_relationship_findings(inventory: Inventory, roadmap_items: dict[
                     surface.rel_path,
                 )
             )
+        if roadmap_detached_meta_feedback:
+            continue
         findings.extend(_incubation_entry_coverage_findings(surface.rel_path, surface.content))
         findings.extend(_incubation_split_suggestion_findings(surface.rel_path, surface.content))
-        source_item = items_by_source.get(surface.rel_path)
-        item_id = related_item or (source_item[0] if source_item else "")
         item_fields = roadmap_items.get(item_id) if item_id else None
         if not item_fields or str(item_fields.get("status") or "") != "done":
             continue
@@ -982,6 +1500,7 @@ def _incubation_cleanup_advisor_findings(inventory: Inventory, roadmap_items: di
 
     findings: list[Finding] = []
     counts = {"archive": 0, "keep": 0, "ambiguous": 0}
+    batch_candidates: list[MemoryHygieneBatchCandidate] = []
     for surface in surfaces:
         data = surface.frontmatter.data
         status = str(data.get("status") or "").strip().casefold()
@@ -989,6 +1508,7 @@ def _incubation_cleanup_advisor_findings(inventory: Inventory, roadmap_items: di
         related_item = str(data.get("related_roadmap_item") or "")
         source_item = items_by_source.get(surface.rel_path)
         item_id = related_item or (source_item[0] if source_item else "")
+        roadmap_detached_meta_feedback = _meta_feedback_candidate_is_roadmap_detached(data, surface.content, item_id)
         item_fields = roadmap_items.get(item_id) if item_id else None
         roadmap_status = str(item_fields.get("status") or "").strip().casefold() if item_fields else ""
         archived_plan = _normalize_rel(item_fields.get("archived_plan")) if item_fields else ""
@@ -1000,6 +1520,19 @@ def _incubation_cleanup_advisor_findings(inventory: Inventory, roadmap_items: di
             ignore_stale_implementation_tail=structurally_covered,
         )
         archive_rel = _default_incubation_archive_rel(surface.rel_path)
+
+        if roadmap_detached_meta_feedback:
+            counts["keep"] += 1
+            findings.append(
+                Finding(
+                    "info",
+                    "incubation-cleanup-keep-active",
+                    "keep active: meta-feedback candidate is roadmap-detached operating memory until explicit promotion",
+                    surface.rel_path,
+                )
+            )
+            continue
+
         link_repairs = _planned_link_repairs(inventory, surface.rel_path, archive_rel)
 
         if link_repairs:
@@ -1056,11 +1589,27 @@ def _incubation_cleanup_advisor_findings(inventory: Inventory, roadmap_items: di
         if not blockers and (structurally_covered or status in ALLOWED_STATUS_VALUES):
             counts["archive"] += 1
             status_flag = "" if archive_status == "archived" else f" --status {archive_status}"
+            dry_run_command = (
+                f"mylittleharness --root <root> memory-hygiene --dry-run --source {surface.rel_path}"
+                f"{status_flag} --archive-to {archive_rel} --repair-links"
+            )
+            apply_command = dry_run_command.replace("--dry-run", "--apply", 1)
+            candidate = MemoryHygieneBatchCandidate(
+                candidate_id=_batch_candidate_id(surface.rel_path, archive_status, archive_rel),
+                source_rel=surface.rel_path,
+                source_hash=_sha256_text(surface.content),
+                status=archive_status,
+                archive_rel=archive_rel,
+                link_repairs=_batch_link_repair_records(link_repairs),
+                dry_run_command=dry_run_command,
+                apply_command=apply_command,
+            )
+            batch_candidates.append(candidate)
             findings.append(
                 Finding(
                     "info",
                     "incubation-cleanup-archive-candidate",
-                    f"preview safe cleanup: mylittleharness memory-hygiene --dry-run --source {surface.rel_path}{status_flag} --archive-to {archive_rel} --repair-links",
+                    f"preview safe cleanup: {dry_run_command}",
                     surface.rel_path,
                 )
             )
@@ -1072,7 +1621,7 @@ def _incubation_cleanup_advisor_findings(inventory: Inventory, roadmap_items: di
                 Finding(
                     "warn",
                     "incubation-cleanup-ambiguous",
-                    "incubation note has no route relationship metadata; classify it as roadmap, research, rejected, superseded, or explicitly kept before cleanup",
+                    "incubation note has no route relationship metadata; record whether it belongs with roadmap, research, rejected, superseded, or explicitly kept posture before cleanup",
                     surface.rel_path,
                 )
             )
@@ -1087,12 +1636,175 @@ def _incubation_cleanup_advisor_findings(inventory: Inventory, roadmap_items: di
             "info",
             "incubation-cleanup-advisor-summary",
             (
-                f"classified {len(surfaces)} active incubation note(s): "
+                f"reported structural cleanup posture for {len(surfaces)} active incubation note(s): "
                 f"{counts['archive']} archive candidate(s), {counts['keep']} keep-active, {counts['ambiguous']} ambiguous"
             ),
         )
     )
+    if batch_candidates:
+        findings.extend(_batch_proposal_findings(tuple(batch_candidates)))
     return findings
+
+
+def _incubation_cleanup_batch_candidates(inventory: Inventory) -> tuple[MemoryHygieneBatchCandidate, ...]:
+    roadmap_items = _roadmap_items(inventory)
+    surfaces = [
+        surface
+        for surface in sorted(inventory.present_surfaces, key=lambda item: item.rel_path)
+        if surface.rel_path.startswith(f"{INCUBATION_DIR_REL}/") and surface.path.suffix.lower() == ".md"
+    ]
+    items_by_source: dict[str, tuple[str, dict[str, object]]] = {}
+    for item_id, fields in roadmap_items.items():
+        source = _normalize_rel(fields.get("source_incubation"))
+        if source:
+            items_by_source[source] = (item_id, fields)
+    live_consumers_by_source = _live_source_incubation_consumers_by_source(roadmap_items)
+
+    candidates: list[MemoryHygieneBatchCandidate] = []
+    for surface in surfaces:
+        data = surface.frontmatter.data
+        status = str(data.get("status") or "").strip().casefold()
+        related_item = str(data.get("related_roadmap_item") or "")
+        source_item = items_by_source.get(surface.rel_path)
+        item_id = related_item or (source_item[0] if source_item else "")
+        if _meta_feedback_candidate_is_roadmap_detached(data, surface.content, item_id):
+            continue
+        item_fields = roadmap_items.get(item_id) if item_id else None
+        roadmap_status = str(item_fields.get("status") or "").strip().casefold() if item_fields else ""
+        archived_plan = _normalize_rel(item_fields.get("archived_plan")) if item_fields else ""
+        verification = str(item_fields.get("verification_summary") or "").strip() if item_fields else ""
+        docs_decision = str(item_fields.get("docs_decision") or "").strip() if item_fields else ""
+        structurally_covered = roadmap_status == "done" and bool(archived_plan and verification and docs_decision in FINAL_DOCS_DECISIONS)
+        blockers = incubation_archive_blockers(
+            surface.content,
+            ignore_stale_implementation_tail=structurally_covered,
+        )
+        live_consumers = live_consumers_by_source.get(surface.rel_path, ())
+        shared_live_consumers = tuple(live_consumers) if len(live_consumers) > 1 else ()
+        if not shared_live_consumers and roadmap_status == "done":
+            shared_live_consumers = tuple(item for item in live_consumers if item != item_id)
+        if shared_live_consumers or blockers or not (structurally_covered or status in ALLOWED_STATUS_VALUES):
+            continue
+
+        archive_status = _archive_candidate_status(status, structurally_covered)
+        archive_rel = _default_incubation_archive_rel(surface.rel_path)
+        link_repairs = _planned_link_repairs(inventory, surface.rel_path, archive_rel)
+        status_flag = "" if archive_status == "archived" else f" --status {archive_status}"
+        dry_run_command = (
+            f"mylittleharness --root <root> memory-hygiene --dry-run --source {surface.rel_path}"
+            f"{status_flag} --archive-to {archive_rel} --repair-links"
+        )
+        apply_command = dry_run_command.replace("--dry-run", "--apply", 1)
+        candidates.append(
+            MemoryHygieneBatchCandidate(
+                candidate_id=_batch_candidate_id(surface.rel_path, archive_status, archive_rel),
+                source_rel=surface.rel_path,
+                source_hash=_sha256_text(surface.content),
+                status=archive_status,
+                archive_rel=archive_rel,
+                link_repairs=_batch_link_repair_records(link_repairs),
+                dry_run_command=dry_run_command,
+                apply_command=apply_command,
+            )
+        )
+    return tuple(candidates)
+
+
+def _batch_proposal_findings(candidates: tuple[MemoryHygieneBatchCandidate, ...]) -> list[Finding]:
+    token = _batch_proposal_token(candidates)
+    candidate_ids = ", ".join(candidate.candidate_id for candidate in candidates)
+    batch_apply_command = f"mylittleharness --root <root> memory-hygiene --apply --scan --proposal-token {token}"
+    findings = [
+        Finding(
+            "info",
+            "incubation-cleanup-batch-preview",
+            (
+                f"reviewable batch proposal: candidate_count={len(candidates)}; candidate_ids={candidate_ids}; "
+                f"batch_review_token={token}; batch_apply_command={batch_apply_command}; "
+                "dry-run scan writes no files and the token binds this exact current proposal"
+            ),
+        )
+    ]
+    for candidate in candidates:
+        link_repairs = ", ".join(_link_repair_rel_paths(candidate)) if candidate.link_repairs else "none"
+        findings.append(
+            Finding(
+                "info",
+                "incubation-cleanup-batch-candidate",
+                (
+                    f"candidate_id={candidate.candidate_id}; source={candidate.source_rel}; status={candidate.status}; "
+                    f"source_hash={candidate.source_hash}; "
+                    f"archive_target={candidate.archive_rel}; link_repairs={link_repairs}; "
+                    f"next_safe_command={candidate.dry_run_command}; apply_command={candidate.apply_command}"
+                ),
+                candidate.source_rel,
+            )
+        )
+    findings.append(
+        Finding(
+            "info",
+            "incubation-cleanup-batch-token-command",
+            (
+                "copy-ready token-bound apply shape: review candidate ids, source hashes, archive targets, and link repairs, "
+                f"then run {batch_apply_command} only while the scan proposal is still current. "
+                "This does not open plans, mutate roadmap state, close out work, stage, commit, rollback, or move to a next plan."
+            ),
+        )
+    )
+    return findings
+
+
+def _batch_link_repair_records(link_repairs: list[tuple[str, Path, str]]) -> tuple[tuple[str, str, str], ...]:
+    records: list[tuple[str, str, str]] = []
+    for rel_path, path, updated_text in link_repairs:
+        try:
+            current_text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        records.append((rel_path, _sha256_text(current_text), _sha256_text(updated_text)))
+    return tuple(records)
+
+
+def _link_repair_rel_paths(candidate: MemoryHygieneBatchCandidate) -> tuple[str, ...]:
+    return tuple(record[0] for record in candidate.link_repairs)
+
+
+def _batch_candidate_id(source_rel: str, status: str, archive_rel: str) -> str:
+    return "mhc-" + _stable_digest({"source": source_rel, "status": status, "archive": archive_rel})[:12]
+
+
+def _batch_proposal_token(candidates: tuple[MemoryHygieneBatchCandidate, ...]) -> str:
+    payload = {
+        "schema": "mylittleharness.memory-hygiene-batch-proposal.v1",
+        "route_class": "memory-hygiene-covered-incubation-cleanup",
+        "candidates": [
+            {
+                "candidate_id": candidate.candidate_id,
+                "source": candidate.source_rel,
+                "source_hash": candidate.source_hash,
+                "status": candidate.status,
+                "archive": candidate.archive_rel,
+                "link_repairs": [
+                    {
+                        "path": rel_path,
+                        "source_hash": source_hash,
+                        "updated_hash": updated_hash,
+                    }
+                    for rel_path, source_hash, updated_hash in candidate.link_repairs
+                ],
+                "dry_run_command": candidate.dry_run_command,
+                "apply_command": candidate.apply_command,
+            }
+            for candidate in candidates
+        ],
+        "boundary": "proposal token authorizes only exact current covered cleanup batch apply; per-source apply remains explicit",
+    }
+    return "mhb-" + _stable_digest(payload)[:16]
+
+
+def _stable_digest(value: object) -> str:
+    text = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _incubation_keep_active_reason(item_id: str, roadmap_status: str, blockers: tuple[str, ...], status: str) -> str:
@@ -1105,6 +1817,44 @@ def _incubation_keep_active_reason(item_id: str, roadmap_status: str, blockers: 
     if status and status not in TERMINAL_INCUBATION_STATUSES:
         return f"frontmatter status is {status!r}"
     return "no safe archive proof was found"
+
+
+def _meta_feedback_candidate_is_active(content: str) -> bool:
+    return META_FEEDBACK_CLUSTER_BEGIN in content and "[MLH-Fix-Candidate]" in content
+
+
+def _meta_feedback_candidate_is_roadmap_detached(data: dict[str, object], content: str, item_id: str) -> bool:
+    if item_id or not _meta_feedback_candidate_is_active(content):
+        return False
+    relation_values = [data.get(field) for field in RELATIONSHIP_STATUS_FIELDS]
+    return not any(_frontmatter_value_is_nonempty(value) for value in relation_values)
+
+
+def _done_item_has_reconstructed_archive_docs_boundary(inventory: Inventory, archived_plan: str) -> bool:
+    if not archived_plan.startswith("project/archive/plans/"):
+        return False
+    archive_path = inventory.root / archived_plan
+    if not archive_path.is_file():
+        return False
+    try:
+        content = archive_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    frontmatter = parse_frontmatter(content)
+    docs_decision = str(frontmatter.data.get("docs_decision") or "").strip().casefold()
+    if docs_decision != "uncertain":
+        return False
+    status_values = " ".join(str(frontmatter.data.get(field) or "") for field in RECONSTRUCTED_ARCHIVE_STATUS_FIELDS).casefold()
+    if "reconstruct" in status_values:
+        return True
+    boundary_values = " ".join(str(frontmatter.data.get(field) or "") for field in RECONSTRUCTED_ARCHIVE_BOUNDARY_FIELDS).casefold()
+    if "reconstructed historical" in boundary_values or "recovered archive evidence" in boundary_values:
+        return True
+    body = content
+    if frontmatter.has_frontmatter:
+        body = "\n".join(content.splitlines()[max(frontmatter.body_start_line - 1, 0) :])
+    normalized_body = body.casefold()
+    return any(marker in normalized_body for marker in RECONSTRUCTED_ARCHIVE_BODY_MARKERS)
 
 
 def _live_source_incubation_consumers_by_source(
@@ -1395,7 +2145,7 @@ def _incubation_split_suggestion_findings(rel_path: str, text: str) -> list[Find
     return []
 
 
-def _text_with_frontmatter_scalars(text: str, updates: dict[str, str]) -> tuple[str, str | None]:
+def _text_with_frontmatter_scalars(text: str, updates: dict[str, str], *, clear_fields: tuple[str, ...] = ()) -> tuple[str, str | None]:
     lines = text.splitlines(keepends=True)
     if not lines or lines[0].strip() != "---":
         return text, "source frontmatter is required for relationship writeback"
@@ -1407,7 +2157,8 @@ def _text_with_frontmatter_scalars(text: str, updates: dict[str, str]) -> tuple[
     if closing_index is None:
         return text, "source frontmatter is malformed"
 
-    seen, closing_index = _replace_frontmatter_scalar_blocks(lines, closing_index, updates)
+    replacement_values = {**updates, **{field: "" for field in clear_fields}}
+    seen, closing_index = _replace_frontmatter_scalar_blocks(lines, closing_index, replacement_values)
 
     missing = [key for key in updates if key not in seen]
     if missing:
@@ -1456,6 +2207,18 @@ def _frontmatter_value(text: str, key: str) -> str | None:
         if match:
             return _strip_quotes(match.group(1).strip())
     return None
+
+
+def _frontmatter_field_present(text: str, key: str) -> bool:
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return False
+    for line in lines[1:]:
+        if line.strip() == "---":
+            return False
+        if re.match(rf"^{re.escape(key)}:\s*", line):
+            return True
+    return False
 
 
 def _frontmatter_value_is_nonempty(value: object) -> bool:

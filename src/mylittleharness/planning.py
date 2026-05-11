@@ -7,7 +7,8 @@ from datetime import date
 from pathlib import Path
 
 from .atomic_files import AtomicFileWrite, FileTransactionError, apply_file_transaction
-from .inventory import Inventory
+from .command_discovery import rails_not_cognition_boundary_finding
+from .inventory import Inventory, target_artifact_ownerships
 from .lifecycle_focus import sync_current_focus_block
 from .memory_hygiene import (
     ROADMAP_CURRENT_POSTURE_FIELD,
@@ -17,6 +18,7 @@ from .memory_hygiene import (
 )
 from .models import Finding
 from .roadmap import (
+    ACCEPTED_BOUNDARY_NORMALIZATION_PREFIX,
     ROADMAP_REL,
     RELATED_INCUBATION_FIELD,
     TERMINAL_RELATED_PLAN_RETARGET_FIELD,
@@ -26,12 +28,19 @@ from .roadmap import (
     make_roadmap_request,
     roadmap_item_fields,
     roadmap_item_title,
+    roadmap_plan_scope_blockers,
+    roadmap_plan_scope_next_safe_command,
     roadmap_plans_for_requests,
     roadmap_slice_contract_for_item,
+    roadmap_compacted_dependency_archive_evidence_findings,
+    roadmap_human_review_gate_findings,
+    roadmap_related_specs_evidence_findings,
+    roadmap_source_incubation_evidence_findings,
     roadmap_synthesis_report_for_item,
     roadmap_text_with_terminal_related_plan_retargets,
 )
 from .reporting import RouteWriteEvidence, route_write_findings
+from .route_reference_guards import route_reference_transaction_guard_findings
 from .writeback import state_compaction_apply_findings, state_compaction_dry_run_findings
 
 
@@ -373,7 +382,7 @@ def _generated_phases(
         )
     )
     boundary = slice_contract.closeout_boundary if slice_contract else "explicit-closeout-required"
-    source_scope = groups["source"] or groups["other"] or targets
+    source_scope = groups["source"] or groups["other"] or groups["docs"] or targets
     test_scope = groups["tests"]
     docs_scope = _docs_impact_scope(report, groups)
     if getattr(report, "docs_update_count", 0) > 0 and docs_scope:
@@ -410,17 +419,15 @@ def _generated_phases(
     phase_2 = GeneratedPlanPhase(
         phase_id="phase-2-verification-and-docs",
         status="pending",
-        objective="Prove the behavior with focused tests and update user-facing workflow specs/templates when impact is present.",
+        objective=_phase_2_objective(test_scope, docs_scope, verification_profile),
         dependencies=(DEFAULT_ACTIVE_PHASE,),
         write_scope=phase_2_scope,
         read_context=read_context,
         invariants="do not weaken phase-1 verification, roadmap advisory boundaries, or current-phase-only stop conditions.",
-        implementation_contract=(
-            "focused tests and docs/spec fixtures describe the generated phase outline or one-shot rationale consistently"
-        ),
+        implementation_contract=_phase_2_implementation_contract(test_scope, docs_scope, verification_profile),
         verification_gates=_focused_verification_gate(test_scope, verification_profile),
-        docs_decision_rule="record `updated` when specs/templates/docs change; otherwise record `not-needed` with evidence.",
-        state_transfer="record exact commands, expected success signals, docs decision evidence, any remaining generic gates, and a plain-language work result capsule.",
+        docs_decision_rule=_phase_2_docs_decision_rule(docs_scope),
+        state_transfer=_phase_2_state_transfer(test_scope, docs_scope, verification_profile),
         refusal_or_escalation="stop if docs/API/lifecycle authority is uncertain or verification cannot provide a deterministic success signal.",
     )
 
@@ -440,7 +447,7 @@ def _generated_phases(
         ),
         implementation_contract="repo-visible state transfer is compact, deterministic, and enough for explicit closeout preparation.",
         verification_gates=(
-            "`mylittleharness --root <operating-root> check` exits 0; run broader product/demo tests when product source or mirrors changed"
+            "`mylittleharness --root <operating-root> check` exits 0; run broader product or boundary tests when product source changed"
         ),
         docs_decision_rule="final docs_decision must be `updated`, `not-needed`, or `uncertain`; uncertain keeps closeout language provisional.",
         state_transfer="record final verification summary, residual risk, carry-forward, work result capsule, and commit decision without staging or archive authority.",
@@ -464,6 +471,110 @@ def _default_generated_phase() -> GeneratedPlanPhase:
         state_transfer="record changed contracts, verification evidence, residual risk, carry-forward, and a plain-language work result capsule.",
         refusal_or_escalation="stop before unsafe roots, destructive recovery, hidden infrastructure, or unclear ownership.",
     )
+
+
+def _phase_2_objective(
+    test_scope: tuple[str, ...],
+    docs_scope: tuple[str, ...],
+    verification_profile: VerificationGateProfile | None,
+) -> str:
+    verification_subject = _phase_contract_verification_subject(test_scope, verification_profile)
+    docs_subject = _phase_contract_docs_subject(docs_scope)
+    if docs_subject:
+        return f"Prove the behavior with {verification_subject} and {docs_subject}."
+    return f"Prove the behavior with {verification_subject} and record docs_decision evidence without widening docs scope."
+
+
+def _phase_2_implementation_contract(
+    test_scope: tuple[str, ...],
+    docs_scope: tuple[str, ...],
+    verification_profile: VerificationGateProfile | None,
+) -> str:
+    verification_owner = _phase_contract_verification_owner(test_scope, verification_profile)
+    docs_owner = _phase_contract_docs_owner(docs_scope)
+    return (
+        f"verification ownership stays on {verification_owner}; docs ownership stays on {docs_owner}; "
+        "generated phase outline or one-shot rationale must name those concrete owners"
+    )
+
+
+def _phase_2_docs_decision_rule(docs_scope: tuple[str, ...]) -> str:
+    base = "record `updated` when specs/templates/docs change"
+    if docs_scope:
+        return (
+            f"{base} in the named docs/spec/package scope; replace any placeholder before mutation; "
+            "otherwise record `not-needed` with evidence."
+        )
+    return f"{base}; when no docs/spec/package files change, record `not-needed` with evidence instead."
+
+
+def _phase_2_state_transfer(
+    test_scope: tuple[str, ...],
+    docs_scope: tuple[str, ...],
+    verification_profile: VerificationGateProfile | None,
+) -> str:
+    verification_owner = _phase_contract_verification_owner(test_scope, verification_profile)
+    docs_owner = _phase_contract_docs_owner(docs_scope)
+    return (
+        f"record exact verification owner ({verification_owner}), expected success signal, "
+        f"docs_decision evidence tied to {docs_owner}, any remaining generic/unresolved gates, "
+        "and a plain-language work result capsule."
+    )
+
+
+def _phase_contract_verification_subject(
+    test_scope: tuple[str, ...],
+    verification_profile: VerificationGateProfile | None,
+) -> str:
+    if test_scope:
+        return f"focused regression ownership in {_backticked_values(test_scope, 'targeted tests')}"
+    if verification_profile and verification_profile.status == "candidate" and verification_profile.command:
+        source = "CI workflow" if "CI workflow" in verification_profile.source else "repo-visible verification"
+        return f"{source} gate `{verification_profile.command}`"
+    if verification_profile and verification_profile.status == "unresolved":
+        return "an evidence-backed verification gate before closeout"
+    return "a deterministic verification gate before completion"
+
+
+def _phase_contract_verification_owner(
+    test_scope: tuple[str, ...],
+    verification_profile: VerificationGateProfile | None,
+) -> str:
+    if test_scope:
+        return _backticked_values(test_scope, "`targeted tests`")
+    if verification_profile and verification_profile.status == "candidate" and verification_profile.command:
+        return f"`{verification_profile.command}` from {verification_profile.source}"
+    if verification_profile and verification_profile.status == "unresolved":
+        return "an explicit verification command recorded before closeout"
+    return "a deterministic verification command recorded before completion"
+
+
+def _phase_contract_docs_subject(docs_scope: tuple[str, ...]) -> str:
+    if not docs_scope:
+        return ""
+    concrete_scope = tuple(value for value in docs_scope if value != DOCS_WRITE_SCOPE_PLACEHOLDER)
+    if DOCS_WRITE_SCOPE_PLACEHOLDER in docs_scope:
+        if concrete_scope:
+            return (
+                f"update docs/spec/package scope {_backticked_values(concrete_scope, 'the named docs scope')} "
+                f"after replacing `{DOCS_WRITE_SCOPE_PLACEHOLDER}`"
+            )
+        return f"keep docs/spec/package mutation blocked until exact files replace `{DOCS_WRITE_SCOPE_PLACEHOLDER}`"
+    return f"update docs/spec/package scope {_backticked_values(docs_scope, 'the named docs scope')}"
+
+
+def _phase_contract_docs_owner(docs_scope: tuple[str, ...]) -> str:
+    if not docs_scope:
+        return "`docs_decision` evidence only when no docs/spec/package files change"
+    concrete_scope = tuple(value for value in docs_scope if value != DOCS_WRITE_SCOPE_PLACEHOLDER)
+    if DOCS_WRITE_SCOPE_PLACEHOLDER in docs_scope:
+        if concrete_scope:
+            return (
+                f"{_backticked_values(concrete_scope, 'the named docs scope')} plus exact files replacing "
+                f"`{DOCS_WRITE_SCOPE_PLACEHOLDER}`"
+            )
+        return f"exact files replacing `{DOCS_WRITE_SCOPE_PLACEHOLDER}`"
+    return _backticked_values(docs_scope, "`the named docs scope`")
 
 
 def _render_phase_section(phase: GeneratedPlanPhase) -> str:
@@ -494,13 +605,8 @@ def _artifact_groups(targets: tuple[str, ...]) -> dict[str, tuple[str, ...]]:
         normalized = _normalize_rel(target)
         if normalized.startswith("tests/"):
             tests.append(normalized)
-        elif (
-            normalized.startswith("docs/")
-            or normalized.startswith("project/specs/")
-            or normalized.startswith("src/mylittleharness/templates/")
-            or normalized.endswith(".md")
-        ):
-            docs.append(normalized)
+        elif _is_docs_like_target(normalized):
+            docs.append(DOCS_WRITE_SCOPE_PLACEHOLDER if _is_broad_docs_scope(normalized) else normalized)
         elif normalized.startswith("src/"):
             source.append(normalized)
         else:
@@ -511,6 +617,27 @@ def _artifact_groups(targets: tuple[str, ...]) -> dict[str, tuple[str, ...]]:
         "docs": tuple(docs),
         "other": tuple(other),
     }
+
+
+def _is_docs_like_target(target: str) -> bool:
+    normalized = _normalize_rel(target)
+    return (
+        normalized.startswith("docs/")
+        or normalized.startswith("project/specs/")
+        or normalized.startswith("src/mylittleharness/templates/")
+        or normalized.endswith(".md")
+    )
+
+
+def _is_broad_docs_scope(target: str) -> bool:
+    normalized = _normalize_rel(target).strip("/").casefold()
+    if not normalized:
+        return False
+    for prefix in ("docs", "project/specs", "src/mylittleharness/templates"):
+        if normalized == prefix or normalized.startswith(f"{prefix}/"):
+            leaf = normalized.rsplit("/", 1)[-1]
+            return "." not in leaf
+    return False
 
 
 def _docs_impact_scope(report: RoadmapSynthesisReport, groups: dict[str, tuple[str, ...]]) -> tuple[str, ...]:
@@ -907,7 +1034,7 @@ def _plan_input_resolution_findings(resolution: PlanInputResolution, apply: bool
             Finding(
                 "info",
                 "plan-roadmap-derived-input",
-                f"{prefix}derive missing plan input field(s) from roadmap item {item_id!r}: {', '.join(resolution.derived_fields)}",
+                f"{prefix}populate missing plan scaffold field candidate(s) from roadmap item {item_id!r}: {', '.join(resolution.derived_fields)}; explicit CLI input remains authoritative",
                 DEFAULT_PLAN_REL,
             )
         )
@@ -953,12 +1080,19 @@ def plan_dry_run_findings(inventory: Inventory, request: PlanRequest) -> list[Fi
     errors.extend(roadmap_errors)
     source_plans, source_errors = _plan_source_incubation_plans(inventory, request)
     errors.extend(source_errors)
-    findings.append(Finding("info", "plan-target", f"would write active plan: {DEFAULT_PLAN_REL}", DEFAULT_PLAN_REL))
+    roadmap_item_ids = _plan_roadmap_item_ids(inventory, request)
+    roadmap_evidence_findings = [
+        *roadmap_source_incubation_evidence_findings(inventory, roadmap_item_ids),
+        *roadmap_related_specs_evidence_findings(inventory, roadmap_item_ids),
+        *roadmap_human_review_gate_findings(inventory, roadmap_item_ids),
+        *roadmap_compacted_dependency_archive_evidence_findings(inventory, roadmap_item_ids),
+    ]
+    findings.append(Finding("info", "plan-target", f"active plan target: {DEFAULT_PLAN_REL}; write preview requires validation to pass", DEFAULT_PLAN_REL))
     findings.append(
         Finding(
             "info",
             "plan-lifecycle",
-            "would update project-state lifecycle frontmatter and Current Focus managed block: operating_mode, plan_status, active_plan, active_phase, phase_status",
+            "project-state lifecycle target fields: operating_mode, plan_status, active_plan, active_phase, phase_status; write preview requires validation to pass",
             inventory.state.rel_path if inventory.state else "project/project-state.md",
         )
     )
@@ -972,11 +1106,12 @@ def plan_dry_run_findings(inventory: Inventory, request: PlanRequest) -> list[Fi
             findings.append(_plan_only_requested_item_finding(request, apply=False))
         synthesis_report = _plan_synthesis_report(inventory, request, slice_contract)
         if synthesis_report:
-            findings.extend(_plan_synthesis_findings(synthesis_report, apply=False))
+            findings.extend(_plan_synthesis_findings(inventory, synthesis_report, apply=False))
             verification_profile = _repo_verification_gate_profile(inventory, request, synthesis_report, slice_contract)
             findings.extend(_plan_verification_gate_findings(synthesis_report, verification_profile, apply=False))
     if source_plans:
         findings.extend(_plan_source_incubation_findings(source_plans, apply=False))
+    findings.extend(roadmap_evidence_findings)
     if errors:
         findings.extend(_with_severity(errors, "warn"))
         findings.append(Finding("info", "plan-validation-posture", "dry-run refused before apply; fix refusal reasons, then rerun dry-run before writing a plan"))
@@ -986,7 +1121,9 @@ def plan_dry_run_findings(inventory: Inventory, request: PlanRequest) -> list[Fi
         plan_text = _render_plan_text_for_request(inventory, request)
         lifecycle = _plan_lifecycle_values()
         projected_state_text = sync_current_focus_block(_update_frontmatter_scalars(inventory.state.content, lifecycle))
-        findings.extend(_plan_route_write_findings(inventory, plan_text, projected_state_text, roadmap_plans, source_plans, apply=False))
+        route_writes = _plan_route_write_evidence(inventory, plan_text, projected_state_text, roadmap_plans, source_plans)
+        findings.extend(route_write_findings("plan-route-write", route_writes, apply=False))
+        findings.extend(route_reference_transaction_guard_findings(inventory, route_writes, apply=False))
     findings.extend(_boundary_findings())
     findings.append(Finding("info", "plan-docs-decision", f"generated plan frontmatter starts with docs_decision={DEFAULT_DOCS_DECISION!r}", DEFAULT_PLAN_REL))
     findings.append(
@@ -1011,8 +1148,18 @@ def plan_apply_findings(inventory: Inventory, request: PlanRequest) -> list[Find
     errors.extend(roadmap_errors)
     source_plans, source_errors = _plan_source_incubation_plans(inventory, request)
     errors.extend(source_errors)
+    roadmap_item_ids = _plan_roadmap_item_ids(inventory, request)
+    roadmap_evidence_findings = [
+        *roadmap_source_incubation_evidence_findings(inventory, roadmap_item_ids),
+        *roadmap_related_specs_evidence_findings(inventory, roadmap_item_ids),
+        *roadmap_human_review_gate_findings(inventory, roadmap_item_ids),
+        *roadmap_compacted_dependency_archive_evidence_findings(inventory, roadmap_item_ids),
+    ]
     if errors:
-        return errors
+        return [
+            *roadmap_evidence_findings,
+            *errors,
+        ]
 
     state = inventory.state
     assert state is not None
@@ -1073,14 +1220,25 @@ def plan_apply_findings(inventory: Inventory, request: PlanRequest) -> list[Find
         operations.append(AtomicFileWrite(roadmap_target_path, roadmap_tmp, roadmap_plans[-1].updated_text, roadmap_backup))
     for source_tmp, source_backup, source_plan in source_plan_tmps:
         operations.append(AtomicFileWrite(source_plan.target_path, source_tmp, source_plan.updated_text, source_backup))
-    route_write_evidence = _plan_route_write_findings(
+    route_writes = _plan_route_write_evidence(
         inventory,
         plan_text,
         state_text,
         roadmap_plans,
         source_plans,
-        apply=True,
     )
+    guard_findings = route_reference_transaction_guard_findings(inventory, route_writes, apply=True)
+    if any(finding.severity == "error" for finding in guard_findings):
+        return [
+            *guard_findings,
+            Finding(
+                "info",
+                "plan-validation-posture",
+                "plan apply refused before writing files; review unresolved required route references, then rerun dry-run",
+                DEFAULT_PLAN_REL,
+            ),
+        ]
+    route_write_evidence = route_write_findings("plan-route-write", route_writes, apply=True)
     try:
         cleanup_warnings = apply_file_transaction(operations)
     except FileTransactionError as exc:
@@ -1094,6 +1252,7 @@ def plan_apply_findings(inventory: Inventory, request: PlanRequest) -> list[Find
         Finding("info", "plan-lifecycle-updated", "updated project-state lifecycle frontmatter: operating_mode, plan_status, active_plan, active_phase, phase_status", state.rel_path),
         Finding("info", "plan-current-focus-updated", "updated project-state Current Focus managed block from lifecycle frontmatter", state.rel_path),
         *route_write_evidence,
+        *guard_findings,
         Finding("info", "plan-docs-decision", f"generated plan frontmatter starts with docs_decision={DEFAULT_DOCS_DECISION!r}", DEFAULT_PLAN_REL),
         Finding(
             "info",
@@ -1105,6 +1264,7 @@ def plan_apply_findings(inventory: Inventory, request: PlanRequest) -> list[Find
         Finding("info", "plan-validation-posture", "run check after apply to verify lifecycle state, active-plan validation, and compact operating memory posture"),
     ]
     findings.extend(_plan_input_resolution_findings(resolution, apply=True))
+    findings.extend(roadmap_evidence_findings)
     if roadmap_plans:
         findings.extend(_plan_roadmap_findings(roadmap_plans, apply=True))
     if source_plans:
@@ -1114,7 +1274,7 @@ def plan_apply_findings(inventory: Inventory, request: PlanRequest) -> list[Find
     if request.only_requested_item:
         findings.append(_plan_only_requested_item_finding(request, apply=True))
     if synthesis_report:
-        findings.extend(_plan_synthesis_findings(synthesis_report, apply=True))
+        findings.extend(_plan_synthesis_findings(inventory, synthesis_report, apply=True))
         findings.extend(_plan_verification_gate_findings(synthesis_report, verification_profile, apply=True))
     if request.roadmap_item:
         findings.append(
@@ -1155,15 +1315,13 @@ def _plan_lifecycle_values() -> dict[str, str]:
     }
 
 
-def _plan_route_write_findings(
+def _plan_route_write_evidence(
     inventory: Inventory,
     plan_text: str,
     state_text: str,
     roadmap_plans: tuple[RoadmapPlan, ...],
     source_plans: tuple[RelationshipUpdatePlan, ...],
-    *,
-    apply: bool,
-) -> list[Finding]:
+) -> tuple[RouteWriteEvidence, ...]:
     writes = [
         RouteWriteEvidence(DEFAULT_PLAN_REL, _existing_plan_text(inventory), plan_text),
     ]
@@ -1175,7 +1333,7 @@ def _plan_route_write_findings(
         RouteWriteEvidence(plan.target_rel, plan.current_text, plan.updated_text)
         for plan in source_plans
     )
-    return route_write_findings("plan-route-write", tuple(writes), apply=apply)
+    return tuple(writes)
 
 
 def _existing_plan_text(inventory: Inventory) -> str | None:
@@ -1202,6 +1360,17 @@ def _plan_preflight_errors(inventory: Inventory, request: PlanRequest) -> list[F
         errors.append(Finding("error", "plan-refused", dangerous))
     if request.only_requested_item and not request.roadmap_item:
         errors.append(Finding("error", "plan-refused", "--only-requested-item requires --roadmap-item"))
+    if request.roadmap_item:
+        next_safe_command = roadmap_plan_scope_next_safe_command(request.roadmap_item)
+        for blocker in roadmap_plan_scope_blockers(inventory, request.roadmap_item):
+            errors.append(
+                Finding(
+                    "error",
+                    "plan-target-artifacts-refused",
+                    f"{blocker}; next_safe_command={next_safe_command}",
+                    ROADMAP_REL,
+                )
+            )
 
     if inventory.root_kind == "product_source_fixture":
         errors.append(Finding("error", "plan-refused", "target is a product-source compatibility fixture; plan --apply is refused", DEFAULT_PLAN_REL))
@@ -1269,6 +1438,7 @@ def _root_posture_finding(inventory: Inventory) -> Finding:
 
 def _boundary_findings() -> list[Finding]:
     return [
+        rails_not_cognition_boundary_finding(DEFAULT_PLAN_REL),
         Finding(
             "info",
             "plan-boundary",
@@ -1363,7 +1533,44 @@ def _plan_source_incubation_plans(inventory: Inventory, request: PlanRequest) ->
         errors.extend(plan_errors)
         if plan is not None:
             plans.append(plan)
+    if request.update_active:
+        detach_plans, detach_errors = _replaced_active_source_incubation_detach_plans(inventory, seen_sources)
+        errors.extend(detach_errors)
+        plans.extend(detach_plans)
     return tuple(plans), errors
+
+
+def _replaced_active_source_incubation_detach_plans(inventory: Inventory, active_sources: set[str]) -> tuple[tuple[RelationshipUpdatePlan, ...], list[Finding]]:
+    active_plan = inventory.active_plan_surface
+    if active_plan is None or not active_plan.exists or not active_plan.frontmatter.has_frontmatter or active_plan.frontmatter.errors:
+        return (), []
+    source_rels = _active_plan_source_incubation_rels(active_plan.frontmatter.data)
+    plans: list[RelationshipUpdatePlan] = []
+    errors: list[Finding] = []
+    for source_rel in source_rels:
+        if source_rel in active_sources:
+            continue
+        source_path = inventory.root / source_rel
+        try:
+            source_text = source_path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if _frontmatter_scalar_value(source_text, "related_plan") != DEFAULT_PLAN_REL:
+            continue
+        plan, plan_errors = relationship_update_plan(
+            inventory,
+            source_rel,
+            {},
+            clear_fields=("related_plan",),
+        )
+        errors.extend(plan_errors)
+        if plan is not None:
+            plans.append(plan)
+    return tuple(plans), errors
+
+
+def _active_plan_source_incubation_rels(data: dict[str, object]) -> tuple[str, ...]:
+    return tuple(_dedupe_nonempty((_normalize_rel(str(data.get("source_incubation") or "")),)))
 
 
 def _plan_source_incubation_tmp(plan: RelationshipUpdatePlan) -> Path:
@@ -1385,6 +1592,21 @@ def _plan_source_incubation_findings(plans: tuple[RelationshipUpdatePlan, ...], 
             f"{action} source incubation relationship metadata for {len(plans)} roadmap source file(s)",
         )
     ]
+    if plans:
+        findings.append(
+            Finding(
+                "info",
+                "plan-relationship-graph-before",
+                "source incubation relationship graph before: " + _relationship_plan_graph(plans, before=True),
+            )
+        )
+        findings.append(
+            Finding(
+                "info",
+                "plan-relationship-graph-after",
+                "source incubation relationship graph after: " + _relationship_plan_graph(plans, before=False),
+            )
+        )
     for plan in changed_plans:
         findings.extend(
             Finding(
@@ -1408,24 +1630,35 @@ def _plan_source_incubation_findings(plans: tuple[RelationshipUpdatePlan, ...], 
     return findings
 
 
+def _relationship_plan_graph(plans: tuple[RelationshipUpdatePlan, ...], *, before: bool) -> str:
+    edges: list[str] = []
+    for plan in plans:
+        text = plan.current_text if before else plan.updated_text
+        related_plan = _frontmatter_scalar_value(text, "related_plan") or "<detached>"
+        related_item = _frontmatter_scalar_value(text, "related_roadmap_item") or "<none>"
+        edges.append(f"{plan.source_rel} -> related_plan={related_plan}, related_roadmap_item={related_item}")
+    return "; ".join(edges) if edges else "<empty>"
+
+
 def _plan_slice_contract(inventory: Inventory, request: PlanRequest) -> RoadmapSliceContract | None:
     if not request.roadmap_item:
         return None
     contract = roadmap_slice_contract_for_item(inventory, request.roadmap_item)
     fields = roadmap_item_fields(inventory, request.roadmap_item)
     source_excerpt = _roadmap_source_excerpt(inventory, fields)
-    domain_context = _roadmap_domain_context(contract.domain_context, source_excerpt) if contract else ""
+    domain_context = _roadmap_domain_context(contract.domain_context, source_excerpt, fields) if contract else ""
     if contract is None:
         return None
+    target_artifacts = _plan_target_artifacts(fields, source_excerpt, contract.target_artifacts)
     if not request.only_requested_item:
-        return replace(contract, domain_context=domain_context)
+        return replace(contract, domain_context=domain_context, target_artifacts=target_artifacts)
     return RoadmapSliceContract(
         primary_roadmap_item=contract.primary_roadmap_item,
         execution_slice=contract.execution_slice,
         slice_goal=contract.slice_goal,
         covered_roadmap_items=(request.roadmap_item,),
         domain_context=domain_context,
-        target_artifacts=tuple(_dedupe_nonempty(_field_list(fields.get("target_artifacts")))),
+        target_artifacts=target_artifacts,
         execution_policy=contract.execution_policy,
         closeout_boundary=contract.closeout_boundary,
         source_incubation=_normalize_rel(str(fields.get("source_incubation") or "")),
@@ -1443,7 +1676,10 @@ def _plan_synthesis_report(
     if not request.roadmap_item:
         return None
     if not request.only_requested_item:
-        return roadmap_synthesis_report_for_item(inventory, request.roadmap_item)
+        report = roadmap_synthesis_report_for_item(inventory, request.roadmap_item)
+        if report is None:
+            return None
+        return _synthesis_report_with_contract_targets(report, slice_contract)
     contract = slice_contract or _plan_slice_contract(inventory, request)
     if contract is None:
         return None
@@ -1492,6 +1728,51 @@ def _plan_synthesis_report(
     )
 
 
+def _synthesis_report_with_contract_targets(
+    report: RoadmapSynthesisReport,
+    slice_contract: RoadmapSliceContract | None,
+) -> RoadmapSynthesisReport:
+    if slice_contract is None or not slice_contract.target_artifacts:
+        return report
+    target_artifacts = tuple(slice_contract.target_artifacts)
+    if target_artifacts == tuple(report.target_artifacts):
+        return report
+    recommended_phase_count = _recommended_phase_count_for_values(
+        covered_count=len(report.covered_roadmap_items),
+        target_count=len(target_artifacts),
+        related_spec_count=len(report.related_specs),
+        verification_summary_count=report.verification_summary_count,
+        docs_update_count=getattr(report, "docs_update_count", 0),
+    )
+    docs_update_count = getattr(report, "docs_update_count", 0)
+    docs_pressure = (
+        f" and {docs_update_count} docs update {_plural('decision', docs_update_count)}"
+        if docs_update_count
+        else ""
+    )
+    bundle_signals = tuple(report.bundle_signals)
+    if not report.target_artifacts:
+        bundle_signals = (
+            *bundle_signals,
+            f"source route hints supplied {len(target_artifacts)} target_artifacts",
+        )
+    return replace(
+        report,
+        target_artifacts=target_artifacts,
+        bundle_signals=bundle_signals,
+        target_artifact_pressure=(
+            f"{len(target_artifacts)} target artifacts across {len(report.covered_roadmap_items)} roadmap items; "
+            "report-only sizing signal, not a hard gate"
+        ),
+        phase_pressure=(
+            f"{len(report.domain_contexts)} {_plural('domain context', len(report.domain_contexts))} and "
+            f"{report.verification_summary_count} {_plural('verification summary', report.verification_summary_count)}"
+            f"{docs_pressure}; "
+            f"candidate plan outline: {recommended_phase_count} {_plural('phase', recommended_phase_count)} or explicit one-shot rationale"
+        ),
+    )
+
+
 def _roadmap_source_incubation(inventory: Inventory, roadmap_item: str) -> str:
     if not roadmap_item:
         return ""
@@ -1511,15 +1792,17 @@ def _roadmap_candidate_title(inventory: Inventory, roadmap_item: str) -> str:
 
 
 def _roadmap_candidate_objective(item_id: str, fields: dict[str, object], source_excerpt: str) -> str:
-    source_first = source_excerpt if _source_excerpt_has_route_hints(source_excerpt) else ""
-    for value in (
-        source_first,
+    recovery_only_source = _source_excerpt_is_recovery_only(source_excerpt)
+    values: tuple[object, ...] = (
+        source_excerpt if _source_excerpt_should_lead(fields, source_excerpt) else "",
         fields.get("slice_goal"),
+        fields.get("carry_forward") if recovery_only_source else "",
         source_excerpt,
         fields.get("verification_summary"),
         fields.get("carry_forward"),
         fields.get("execution_slice"),
-    ):
+    )
+    for value in values:
         text = _clean_candidate_text(value)
         if text:
             return text
@@ -1541,7 +1824,10 @@ def _roadmap_candidate_task(item_id: str, fields: dict[str, object], source_exce
         related_source = _normalize_rel(str(fields.get(RELATED_INCUBATION_FIELD) or ""))
         if related_source:
             parts.append(f"Related incubation: {related_source}.")
-    context = _clean_candidate_text(source_excerpt or fields.get("slice_goal"))
+    context_source = source_excerpt
+    if _source_excerpt_is_recovery_only(source_excerpt):
+        context_source = fields.get("slice_goal") or fields.get("carry_forward") or source_excerpt
+    context = _clean_candidate_text(context_source or fields.get("slice_goal"))
     if context:
         parts.append(f"Context: {context}")
     verification = _clean_candidate_text(fields.get("verification_summary"))
@@ -1569,19 +1855,36 @@ def _roadmap_source_excerpt(inventory: Inventory, fields: dict[str, object]) -> 
         return ""
     body = _body_without_frontmatter(text)
     paragraphs = _candidate_paragraphs(body)
-    tagged = next((paragraph for paragraph in paragraphs if paragraph.lstrip().startswith("[MLH-Fix-Candidate]")), "")
-    if not tagged:
-        tagged = next((paragraph for paragraph in paragraphs if "[MLH-Fix-Candidate]" in paragraph), "")
+    tagged = _select_source_excerpt_paragraph(paragraphs, text)
     excerpt = _clean_candidate_text(tagged or (paragraphs[0] if paragraphs else ""))
     if tagged:
         excerpt = _source_excerpt_with_hints(excerpt, text)
     return excerpt
 
 
-def _roadmap_domain_context(roadmap_context: str, source_excerpt: str) -> str:
-    if _source_excerpt_has_route_hints(source_excerpt):
+def _select_source_excerpt_paragraph(paragraphs: tuple[str, ...], source_text: str) -> str:
+    tagged = tuple(paragraph for paragraph in paragraphs if paragraph.lstrip().startswith("[MLH-Fix-Candidate]"))
+    if not tagged:
+        tagged = tuple(paragraph for paragraph in paragraphs if "[MLH-Fix-Candidate]" in paragraph)
+    if not tagged:
+        return ""
+    enriched: list[tuple[str, str]] = []
+    for paragraph in tagged:
+        cleaned = _clean_candidate_text(paragraph)
+        enriched.append((paragraph, _source_excerpt_with_hints(cleaned, source_text)))
+    for paragraph, excerpt in reversed(enriched):
+        if _source_excerpt_has_route_hints(excerpt) and not _source_excerpt_is_recovery_only(excerpt):
+            return paragraph
+    for paragraph, excerpt in reversed(enriched):
+        if _source_excerpt_has_route_hints(excerpt):
+            return paragraph
+    return tagged[-1]
+
+
+def _roadmap_domain_context(roadmap_context: str, source_excerpt: str, fields: dict[str, object]) -> str:
+    if _source_excerpt_should_lead(fields, source_excerpt):
         return source_excerpt
-    return roadmap_context
+    return roadmap_context or source_excerpt
 
 
 def _body_without_frontmatter(text: str) -> str:
@@ -1632,6 +1935,159 @@ def _source_hint_field(text: str, key: str) -> str:
 def _source_excerpt_has_route_hints(value: str) -> bool:
     text = value.casefold()
     return "affected_routes:" in text or "expected_owner_command:" in text
+
+
+def _source_excerpt_should_lead(fields: dict[str, object], source_excerpt: str) -> bool:
+    if not _source_excerpt_has_route_hints(source_excerpt):
+        return False
+    if _source_excerpt_is_recovery_only(source_excerpt):
+        return False
+    return not _roadmap_item_has_grouped_slice_members(fields)
+
+
+def _source_excerpt_is_recovery_only(value: str) -> bool:
+    text = value.casefold()
+    return any(
+        marker in text
+        for marker in (
+            "recovered missing source-incubation evidence",
+            "recovered missing source incubation evidence",
+            "recreated missing source-incubation evidence",
+            "source-incubation evidence recovery",
+            "source incubation recovery",
+            "source-note evidence is recovery-only",
+            "safe_boundary: evidence recovery only",
+        )
+    )
+
+
+def _roadmap_item_has_grouped_slice_members(fields: dict[str, object]) -> bool:
+    item_id = _normalized_item_id(fields.get("id"))
+    members = tuple(_normalized_item_id(member) for member in _field_list(fields.get("slice_members")))
+    members = tuple(member for member in members if member)
+    if len(members) > 1:
+        return True
+    return bool(members and item_id and members[0] != item_id)
+
+
+def _plan_target_artifacts(
+    fields: dict[str, object],
+    source_excerpt: str,
+    contract_target_artifacts: tuple[str, ...],
+) -> tuple[str, ...]:
+    explicit = tuple(_dedupe_nonempty(_field_list(fields.get("target_artifacts"))))
+    if explicit:
+        return explicit
+    if contract_target_artifacts:
+        return contract_target_artifacts
+    return tuple(_dedupe_nonempty(_target_artifacts_from_source_context(source_excerpt)))
+
+
+def _target_artifacts_from_source_context(value: str) -> tuple[str, ...]:
+    hint = _affected_routes_hint(value)
+    routes = [route for route in _parse_route_hint_list(hint) if _looks_like_target_artifact_route(route)] if hint else []
+    routes.extend(route for route in _explicit_artifact_routes_from_text(value) if _looks_like_target_artifact_route(route))
+    return _pruned_target_artifact_routes(tuple(_dedupe_nonempty(routes)))
+
+
+def _affected_routes_hint(value: str) -> str:
+    match = re.search(
+        r"(?is)(?:^|\s)affected_routes:\s*(.+?)(?=\s+(?:agent_friction|authority_boundary|command_choreography|drift_risk|expected_owner_command|false_positive_risk|leak_shape|manual_step|repeatability|safe_boundary|severity|signal_type):|$)",
+        value,
+    )
+    return match.group(1).strip() if match else ""
+
+
+def _parse_route_hint_list(value: str) -> tuple[str, ...]:
+    cleaned = value.strip().strip("`")
+    if cleaned.startswith("["):
+        try:
+            parsed = json.loads(cleaned)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, list):
+            normalized = tuple(_normalize_route_hint(item) for item in parsed)
+            return tuple(route for route in normalized if route)
+    return tuple(route for route in (_normalize_route_hint(part) for part in cleaned.split(",")) if route)
+
+
+def _normalize_route_hint(value: object) -> str:
+    route = str(value or "").strip().strip("`\"'")
+    route = route.strip()
+    if route.endswith("."):
+        route = route[:-1].rstrip()
+    return _normalize_rel(route.strip("[] "))
+
+
+def _explicit_artifact_routes_from_text(value: str) -> tuple[str, ...]:
+    text = str(value or "").replace("\\", "/")
+    routes: list[str] = []
+    group_pattern = re.compile(
+        r"(?P<first>(?:src|tests|docs|project/specs)/[A-Za-z0-9_./-]+\.[A-Za-z0-9]+)"
+        r"(?P<tail>(?:\s*,\s*(?:and\s+)?[A-Za-z0-9_-]+\.[A-Za-z0-9]+)*)",
+        flags=re.IGNORECASE,
+    )
+    for match in group_pattern.finditer(text):
+        first = _normalize_route_hint(match.group("first"))
+        if first:
+            routes.append(first)
+        base = first.rsplit("/", 1)[0] if "/" in first else ""
+        for sibling in re.findall(r"(?:,|\band\b)\s*(?:and\s+)?([A-Za-z0-9_-]+\.[A-Za-z0-9]+)", match.group("tail")):
+            if base and sibling:
+                routes.append(_normalize_rel(f"{base}/{sibling}"))
+    path_pattern = re.compile(
+        r"(?<![A-Za-z0-9_./-])((?:src|tests|docs|project/specs)/[A-Za-z0-9_./*-]+)",
+        flags=re.IGNORECASE,
+    )
+    for match in path_pattern.finditer(text):
+        route = _normalize_route_hint(match.group(1))
+        if route:
+            routes.append(route)
+    return tuple(_dedupe_nonempty(routes))
+
+
+def _pruned_target_artifact_routes(routes: tuple[str, ...]) -> tuple[str, ...]:
+    exact = tuple(route for route in routes if not _is_broad_target_artifact_route(route))
+    if not exact:
+        return routes
+    pruned: list[str] = []
+    for route in routes:
+        if _is_ambiguous_context_route(route):
+            continue
+        if _is_broad_target_artifact_route(route) and any(_route_is_within_broad_target(exact_route, route) for exact_route in exact):
+            continue
+        pruned.append(route)
+    return tuple(_dedupe_nonempty(pruned))
+
+
+def _is_ambiguous_context_route(route: str) -> bool:
+    return _normalize_rel(route).casefold() in {"docs/tests", "tests/docs"}
+
+
+def _is_broad_target_artifact_route(route: str) -> bool:
+    normalized = _normalize_rel(route).casefold()
+    if "*" in normalized:
+        return True
+    leaf = normalized.rstrip("/").rsplit("/", 1)[-1]
+    return "." not in leaf and normalized.startswith(("src/", "tests/", "docs/", "project/specs/"))
+
+
+def _route_is_within_broad_target(route: str, broad: str) -> bool:
+    exact = _normalize_rel(route).casefold()
+    broad_norm = _normalize_rel(broad).casefold().rstrip("/")
+    if "*" in broad_norm:
+        return exact.startswith(broad_norm.split("*", 1)[0])
+    return exact.startswith(f"{broad_norm}/")
+
+
+def _looks_like_target_artifact_route(value: str) -> bool:
+    route = _normalize_rel(value)
+    lower = route.casefold()
+    if not route or "://" in route or lower.startswith("..") or "/../" in lower:
+        return False
+    if lower.startswith(("src/", "tests/", "docs/", "build_backend/", "packages/", "apps/", "project/specs/")):
+        return True
+    return lower in {"agents.md", "readme.md", "package.json", "pyproject.toml", "uv.lock", "pytest.ini", "tox.ini"}
 
 
 def _clean_candidate_text(value: object) -> str:
@@ -1741,10 +2197,22 @@ def _plan_slice_contract_findings(contract: RoadmapSliceContract, apply: bool) -
                 DEFAULT_PLAN_REL,
             )
         )
+    if contract.closeout_boundary.startswith(ACCEPTED_BOUNDARY_NORMALIZATION_PREFIX):
+        findings.append(
+            Finding(
+                "info",
+                "plan-accepted-closeout-boundary-normalized",
+                (
+                    f"{prefix}normalize accepted roadmap closeout_boundary from stale no-plan/no-archive wording; "
+                    "the active plan may open, while closeout, archive, and lifecycle movement still require explicit review"
+                ),
+                DEFAULT_PLAN_REL,
+            )
+        )
     return findings
 
 
-def _plan_synthesis_findings(report: RoadmapSynthesisReport, apply: bool) -> list[Finding]:
+def _plan_synthesis_findings(inventory: Inventory, report: RoadmapSynthesisReport, apply: bool) -> list[Finding]:
     prefix = "" if apply else "would "
     findings = [
         Finding(
@@ -1778,6 +2246,7 @@ def _plan_synthesis_findings(report: RoadmapSynthesisReport, apply: bool) -> lis
             DEFAULT_PLAN_REL,
         ),
     ]
+    findings.extend(_target_artifact_ownership_findings(inventory, report.target_artifacts, prefix, "plan-target-artifact-ownership", DEFAULT_PLAN_REL))
     docs_update_count = getattr(report, "docs_update_count", 0)
     if docs_update_count > 0:
         docs_scope = _docs_impact_scope(report, _artifact_groups(tuple(report.target_artifacts)))
@@ -1795,6 +2264,28 @@ def _plan_synthesis_findings(report: RoadmapSynthesisReport, apply: bool) -> lis
             )
         )
     return findings
+
+
+def _target_artifact_ownership_findings(
+    inventory: Inventory,
+    artifacts: tuple[str, ...],
+    prefix: str,
+    code: str,
+    source: str,
+) -> list[Finding]:
+    records = target_artifact_ownerships(inventory, artifacts)
+    if not records:
+        return []
+    summary = "; ".join(f"{record.artifact}->{record.ownership} ({record.intended_root})" for record in records)
+    guidance = "; ".join(sorted({record.guidance for record in records}))
+    return [
+        Finding(
+            "info",
+            code,
+            f"{prefix}classify target artifact ownership: {summary}; guidance: {guidance}",
+            source,
+        )
+    ]
 
 
 def _dangerous_input_reason(value: str) -> str | None:
@@ -1846,6 +2337,43 @@ def _update_frontmatter_scalars(text: str, updates: dict[str, str]) -> str:
         insert_lines = [f'{key}: "{_yaml_double_quoted_value(updates[key])}"\n' for key in missing]
         lines[closing_index:closing_index] = insert_lines
     return "".join(lines)
+
+
+def _frontmatter_scalar_value(text: str, key: str) -> str:
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return ""
+    for index, line in enumerate(lines[1:], start=1):
+        if line.strip() == "---":
+            return ""
+        match = re.match(rf"^{re.escape(key)}:\s*(.*?)\s*$", line)
+        if match:
+            value = _strip_frontmatter_quotes(match.group(1).strip())
+            if value:
+                return value
+            return _frontmatter_scalar_continuation_value(lines[index + 1 :])
+    return ""
+
+
+def _frontmatter_scalar_continuation_value(lines: list[str]) -> str:
+    for line in lines:
+        stripped = line.strip()
+        if stripped == "---" or re.match(r"^[A-Za-z0-9_-]+:", line):
+            return ""
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("- "):
+            return _strip_frontmatter_quotes(stripped[2:].strip())
+        if line.startswith((" ", "\t")):
+            return _strip_frontmatter_quotes(stripped)
+        return ""
+    return ""
+
+
+def _strip_frontmatter_quotes(value: str) -> str:
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        value = value[1:-1]
+    return value.replace('\\"', '"').replace("\\\\", "\\")
 
 
 def _path_escapes_root(root: Path, path: Path) -> bool:

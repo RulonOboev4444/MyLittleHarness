@@ -6,6 +6,10 @@ This spec defines how the MyLittleHarness product repository stays separate from
 
 The shipped product serves one explicit target repository at a time.
 
+Retired cross-repository parity-copy workflows are not part of the product CLI surface; workspace cleanup belongs to separately reviewed operating work, not reusable product commands.
+
+Live operating-root validation compares command-shaped references in selected operating product-doc copies and docmap surfaces with the configured `product_source_root` CLI command surface. When the operating copy still names a retired command that the product source no longer exposes, `check` reports `product-doc-copy-retired-command-drift` as read-only evidence and does not auto-copy docs, install tools, restore retired commands, or approve repair, lifecycle movement, archive, staging, or commit.
+
 ## Portable Root Roles
 
 - Product repository: reusable product source, tests, product README/operator orientation, product docs under `docs/...`, and minimal compatibility fixtures for CLI/tests.
@@ -39,7 +43,7 @@ The product source checkout must not hold:
 - research/history/raw intake
 - archived plans
 - workflow execution state
-- runtime/demo debris
+- runtime debris
 - generated validation artifacts
 - repair snapshots
 - logs, caches, local databases, package archives, pycache, or temporary outputs

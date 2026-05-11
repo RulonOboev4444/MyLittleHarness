@@ -17,7 +17,7 @@ This framing does not create a second authority model: durable authority still c
 
 ## MyLittleHarness Core v0 Posture
 
-In the MyLittleHarness source repository, MyLittleHarness is the target system. The terms `workflow` and `workflow-core` may remain as compatibility, package, manifest, or operator-contract vocabulary, but they do not make the old demo harness the architectural baseline.
+In the MyLittleHarness source repository, MyLittleHarness is the target system. The terms `workflow` and `workflow-core` may remain as compatibility, package, manifest, or operator-contract vocabulary, but they do not make the old compatibility harness the architectural baseline.
 
 Core v0 consists of the small repo-native contract that keeps agent work recoverable from files:
 - repo-native authority in inspectable artifacts
@@ -40,7 +40,7 @@ The product repository may contain product source, tests, README/product docs, a
 
 Rules:
 - future reusable product implementation plans open in the operating project root and name the product checkout as the target root
-- the product checkout must not hold active working memory, implementation plans, research/history/raw intake, archived plans, workflow execution state, runtime debris, or demo-workflow residue
+- the product checkout must not hold active working memory, implementation plans, research/history/raw intake, archived plans, workflow execution state, runtime debris, or legacy workflow residue
 - compatibility fixtures retained in the product checkout must be explicitly fixture/product-compatibility surfaces, not operating state
 - product-source hygiene includes keeping temporary files, logs, caches, package archives, generated validation artifacts, local databases, pycache, and other runtime outputs out of the product tree unless a later product feature deliberately owns them
 
@@ -64,6 +64,16 @@ The contract must remain understandable without installed skills, hooks, MCP ser
 
 CLI route-table output is a compact discovery view over this artifact model. `status`, `check`, and `intelligence --focus routes` may name the live-root routes for state, active plans, incubation, research, stable specs, verification through the active-plan block and optional `project/verification/*.md` proof/evidence records, closeout/writeback, archive, and docs routing, but the output is advisory only. It does not replace these repo-visible artifacts and does not authorize mutation, repair, closeout, archive, commit, or lifecycle decisions.
 
+Route and role manifests are protocol views over the same artifact model, not a new authority layer. `route_manifest` may expose orchestration fields such as `parallelism_class`, `authority_lane`, `exclusive_owner`, `claim_scope`, `claim_required`, `merge_policy`, `fan_in_gate`, `max_parallelism_hint`, `stale_claim_policy`, and `conflict_policy`; lifecycle routes remain sequential and coordinator-owned. `role_manifest` may expose coordination fields such as `orchestration_role`, `may_spawn_workers`, `worker_space_boundary`, `isolation_contract`, `fan_in_output_required`, `work_claim_required`, `work_claim_contract`, `route_receipt_contract`, `fan_in_authority`, `runtime_boundary`, and `coordination_budget`; these fields describe packet and fan-in expectations without spawning workers or granting direct apply authority.
+
+Repo-visible coordination artifacts may live under `project/verification/**` when they are useful fan-in evidence. Work claims belong under `project/verification/work-claims/*.json`, handoff packets under `project/verification/handoffs/*.json`, route receipts under `project/verification/route-receipts/*.json`, and approval packets under `project/verification/approval-packets/*.json`. These records coordinate scoped work, handoff context, route-write evidence, human-gate evidence, and overlap checks, but they remain evidence routes: they do not create a hidden queue, grant worker lifecycle authority, approve archive, mutate roadmap status, stage, commit, push, or release. Review tokens are deterministic report outputs that bind current route and role manifest fingerprints, active-plan identity, claims, evidence, patch, verifier, and human-gate inputs for fan-in review; matching tokens are still guards, not authority. In this contract, work claims and review tokens are evidence, not authority. The coordinator retains lifecycle authority; worker packets are evidence only, and route receipts are protocol/report data only.
+
+Approval relay adapters may read these approval packets and render serializable transport previews, but the relay payload is adapter evidence only. Relay output must not copy packet bodies into hidden adapter state, store secrets, attempt delivery by default, install daemons, create queues, or treat approved packet status as lifecycle, archive, roadmap, Git, or release authority.
+
+Approval packets are required for risky operations that cross a human gate. Gate classes include lifecycle authority mutation, write-scope expansion, dependency/package/supply-chain change, destructive archive/VCS/rollback action, external service/secrets/network use, fan-in/merge/review-token conservation, and repeated verifier failure or uncertain evidence. The packet should identify the requester or actor/session, subject, requested decision, gate and risk class, validity window, target artifacts, planned writes and boundaries, allowed command/network/auth scopes, blast radius, source/dry-run/verifier refs, patch or base/head identity, review-token hash when available, docs/lifecycle impact, stop or reopen conditions, human decision, approver and decision timestamp, fallback or rejection reason, and residual risk. The packet is cold evidence that a bounded risky decision was requested or recorded; it is not implementation proof or lifecycle authority.
+
+Reconcile reports are terminal diagnostics over these repo-visible artifacts. They may read active-plan references, route/spec/source paths, agent-run source hashes, work claims, approval packets, and worker-space residue to classify current posture, but they do not create a durable database, hidden queue, worker cleanup rail, or amendment authority. Human-gated proposals from reconcile output are review prompts only until a later explicit lifecycle or cleanup command owns the mutation.
+
 ## Attention Tiers
 
 Authority and attention are related but not identical.
@@ -76,7 +86,7 @@ Preferred attention tiers:
   - same-topic stable specs or decision docs
   - the active same-topic incubation or active-reference artifact when the task is about that topic
 - `task-conditional`
-  - research artifacts, verification artifacts, helper surfaces, prompt packets, and package-source mirrors
+  - research artifacts, verification artifacts, helper surfaces, prompt guides, and package-source mirrors
   - these are read only when the task explicitly needs their lane, evidence, or projection behavior
 - `historical-only`
   - archived plans and historical reference materials unless current state, current specs, or the current topic explicitly pull them in
@@ -89,7 +99,7 @@ This repository also maintains a small navigation set so the cheap start pass st
 
 Current navigation set:
 - `project/project-state.md`
-- `project/research/2026-04-23-markdown-artifact-map-and-hierarchy.md`
+- same-topic research evidence under `project/research/*.md`
 - `.agents/docmap.yaml`
 - `project/plan-incubation/mylittleharness.md`
 - `project/implementation-plan.md` only when active or explicitly requested
@@ -110,7 +120,7 @@ Rules:
 Some repositories that host the workflow source package may also contain package-source or projection surfaces outside `project/**`, for example:
 - `specs/**`
 - `templates/**`
-- `research/README.md`
+- `research/**` in historical or package-mirror layouts
 - `codex-home/skills/**`
 
 Rules:
@@ -168,6 +178,8 @@ Not allowed:
 - low-level execution logs
 
 Stable specs are the winning source for contract-level questions unless a later decision doc explicitly supersedes them.
+
+Plan-facing stable specs may carry explicit lifecycle posture without making metadata stronger than the body. `spec_status` names the spec document lifecycle (`draft`, `accepted`, `superseded`, or `archived`) while `implementation_posture` names implementation evidence (`not-applicable`, `target-only`, `in-progress`, `partially-verified`, `synced`, `drift-detected`, `deprecated-compat`, or `retired`). These fields stay separate from `docs_decision`, which remains a closeout-local decision. `target-only` preserves an accepted target contract even when implementation has not caught up; deletion, supersession, deprecation, retirement, or sync claims require human-gated evidence and cannot be inferred from read-only diagnostics.
 
 ### Research artifacts
 
@@ -449,6 +461,7 @@ Do not promote a note into `project-state` just because it was mentioned twice i
 - if an incubation artifact has been absorbed into a stable spec or active plan, mark it promoted and retire it from active use
 - if an incubation artifact is no longer referenced, no longer active, and no longer shaping future work, mark it stale and archive or otherwise retire it explicitly
 - unresolved, deferred, or needs-more-research directions should point to an explicit carry-forward destination instead of fading out by silence
+- when many incubation notes have ambiguous fate, `incubation-reconcile --dry-run` may classify them from repo-visible roadmap, archive, promotion, supersession, and follow-up evidence; reviewed apply may write only diagnostic reconciliation metadata such as `lifecycle_status`, `resolution`, `resolved_by`, `superseded_by`, and `last_reconciled`
 - do not silently delete temporary reasoning that still carries unique design signal
 - archive entries should point to the winner artifact when one exists, or to the named carry-forward destination when promotion did not happen
 
@@ -459,6 +472,11 @@ The current workflow prefers explicit retirement over background cleanup.
 The workflow should use explicit status language for temporary and transitional artifacts.
 
 Preferred vocabulary:
+- `draft`
+- `accepted`
+- `synced`
+- `partially_verified`
+- `drift_detected`
 - `incubating`
 - `active-reference`
 - `promoted`
@@ -467,13 +485,22 @@ Preferred vocabulary:
 - `superseded`
 
 Rules:
+- `draft` means the artifact is recorded input or synthesis, not accepted authority
+- `accepted` means the artifact may feed a plan or stable route through explicit lifecycle commands, not that implementation is done
+- `synced` means the route's declared source and evidence match the latest recorded inspection
+- `partially_verified` means some evidence exists but verification is incomplete or intentionally scoped
+- `drift_detected` means route metadata, implementation, or evidence disagree and need explicit amendment or carry-forward
 - `incubating` means the artifact is still shaping an unsettled direction
 - `active-reference` means the artifact is temporary but still actively feeding planning
 - `promoted` means its durable output now lives elsewhere
 - `stale` means it is no longer current but still may retain rationale
 - `archived` means it has left active circulation
 - `superseded` means a newer artifact replaced it explicitly
+- status changes are human-gated amendments; read-only reports may name the current state and next safe command but cannot promote, archive, verify, or synchronize an artifact by inference
 - temporary artifacts should not linger indefinitely in `incubating` or `active-reference`; each provisional note should eventually resolve through `merge`, `promote`, `retire`, or `archive`
+- reconciliation lifecycle classes such as `active-roadmap-source`, `archived-covered`, `promoted-compacted`, `orphan-needs-triage`, `duplicate-or-superseded`, and `still-live-followup` are diagnostic fate labels; by themselves they do not promote, retire, archive, or verify an incubation artifact
+
+For stable specs, `spec_status` is the spec lifecycle and `implementation_posture` is the implementation/evidence relation. Read-only reconcile diagnostics may report `spec-posture-missing`, `spec-synced-without-verification`, `spec-target-only-has-implementation-evidence`, `spec-drift-detected-without-carry-forward`, or `spec-superseded-without-target`, but those findings only name review work. They do not rewrite accepted specs to match code, delete target-only specs, approve supersession, archive plans, or move lifecycle state.
 
 This vocabulary is most important for incubation and verification surfaces; durable specs and `project-state` remain canonical without needing lifecycle frontmatter on every file.
 
@@ -488,4 +515,3 @@ The workflow must avoid:
 - using archive artifacts as default authority for current execution
 - copying stable rules into temporary notes instead of linking to canonical docs
 - introducing new hidden memory layers instead of improving the repo-native markdown surfaces
-

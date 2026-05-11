@@ -69,7 +69,7 @@ def cue_findings(code: str, label: str, cues: list[EvidenceCue], limit: int = MA
             "info",
             code,
             (
-                f"candidate: {label}: {cue.preview}; "
+                f"candidate evidence cue only: {label}: {cue.preview}; "
                 f"identity={cue.identity}; kind={cue.kind}; source={cue.source}:{cue.line}"
             ),
             cue.source,
@@ -78,7 +78,7 @@ def cue_findings(code: str, label: str, cues: list[EvidenceCue], limit: int = MA
         for cue in cues[:limit]
     ]
     if len(cues) > limit:
-        findings.append(Finding("info", code, f"candidate: {label} truncated at {limit} deterministic matches", cues[0].source))
+        findings.append(Finding("info", code, f"candidate evidence cue only: {label} truncated at {limit} deterministic matches", cues[0].source))
     return findings
 
 

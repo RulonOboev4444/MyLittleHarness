@@ -8,20 +8,16 @@ from datetime import date
 from hashlib import sha256
 
 from .atomic_files import AtomicFileWrite, FileTransactionError, apply_file_transaction
+from .command_discovery import rails_not_cognition_boundary_finding
 from .incubate import INCUBATION_DIR_REL, incubate_apply_findings, incubate_dry_run_findings, make_incubate_request
 from .inventory import Inventory, load_inventory
 from .models import Finding
 from .reporting import RouteWriteEvidence, route_write_findings
-from .roadmap import make_roadmap_request, roadmap_apply_findings, roadmap_item_fields, roadmap_plan_for_request
 
 
-ROADMAP_STATUS = "accepted"
-DEFAULT_DOCS_DECISION = "uncertain"
-DEFAULT_ORDER = 900
 RELEASE_BOUNDARY = "no automatic release removal, lifecycle movement, closeout, archive, staging, commit, or next-plan opening"
 CENTRAL_META_FEEDBACK_PROJECT = "MyLittleHarness-dev"
 META_FEEDBACK_ROOT_ENV_VAR = "MYLITTLEHARNESS_META_FEEDBACK_ROOT"
-TERMINAL_DUPLICATE_STATUSES = {"done", "rejected", "superseded"}
 AGENT_OPERABILITY_SIGNAL_TYPES = {"agent-operability", "agent-operability-micro-friction"}
 AGENT_OPERABILITY_OWNER_COMMANDS = "meta-feedback, check, writeback, and the mlh-meta-feedback skill"
 AGENT_OPERABILITY_FRICTION_SCOPE = (
@@ -31,7 +27,11 @@ CLUSTER_BEGIN = "<!-- BEGIN mylittleharness-meta-feedback-cluster v1 -->"
 CLUSTER_END = "<!-- END mylittleharness-meta-feedback-cluster v1 -->"
 UNSPECIFIED_ROUTE = "unspecified"
 KNOWN_OWNER_COMMANDS = (
+    "adapter",
+    "approval-packet",
+    "claim",
     "check",
+    "evidence",
     "incubate",
     "memory-hygiene",
     "meta-feedback",
@@ -79,6 +79,13 @@ class MetaFeedbackRequest:
     roadmap_item: str
     order: int | None
     dedupe_to: str
+    correction_of: str
+    capture_mode: str
+    requested_root: str
+    destination_root: str
+    destination_source: str
+    env_destination_root: str
+    to_root: str
 
 
 @dataclass(frozen=True)
@@ -98,6 +105,7 @@ class ClusterObservation:
     source_rel: str
     friction_signature: str
     latest_observation_hash: str
+    previous_observation_hash: str
     signal_type: str
     expected_owner_command: str
     affected_routes: tuple[str, ...]
@@ -106,6 +114,9 @@ class ClusterObservation:
     observed_roots: tuple[str, ...]
     duplicate_topics: tuple[str, ...]
     occurrence_count: int
+    occurrence_count_delta: int
+    correction_count: int
+    correction_of: str
     recurrence_score: int
     first_seen: str
     exact_matches: tuple[ClusterRecord, ...]
@@ -123,19 +134,36 @@ def make_meta_feedback_request(
     roadmap_item: str | None = None,
     order: int | None = None,
     dedupe_to: str | None = None,
+    correction_of: str | None = None,
+    capture_mode: str | None = None,
+    requested_root: str | None = None,
+    destination_root: str | None = None,
+    destination_source: str | None = None,
+    env_destination_root: str | None = None,
+    to_root: str | None = None,
 ) -> MetaFeedbackRequest:
     normalized_topic = _normalized_text(topic)
+    normalized_note = str(note or "").strip()
+    note_signal_type = _structured_line_field(normalized_note, "signal_type")
+    note_severity = _structured_line_field(normalized_note, "severity")
     item_id = _normalized_item_id(roadmap_item) or _safe_slug(normalized_topic)
     return MetaFeedbackRequest(
         topic=normalized_topic,
-        note=str(note or "").strip(),
+        note=normalized_note,
         note_source=note_source,
         from_root=_normalized_pathish(from_root),
-        signal_type=_normalized_text(signal_type) or "meta-feedback",
-        severity=_normalized_text(severity) or "medium",
+        signal_type=_normalized_text(signal_type) or _normalized_text(note_signal_type) or "meta-feedback",
+        severity=_normalized_text(severity) or _normalized_text(note_severity) or "medium",
         roadmap_item=item_id,
         order=order,
         dedupe_to=_normalized_item_id(dedupe_to),
+        correction_of=_normalized_text(correction_of).casefold(),
+        capture_mode=_normalized_text(capture_mode),
+        requested_root=_normalized_pathish(requested_root),
+        destination_root=_normalized_pathish(destination_root),
+        destination_source=_normalized_text(destination_source),
+        env_destination_root=_normalized_pathish(env_destination_root),
+        to_root=_normalized_pathish(to_root),
     )
 
 
@@ -159,30 +187,30 @@ def meta_feedback_dry_run_findings(inventory: Inventory, request: MetaFeedbackRe
         return findings
 
     observation = _cluster_observation(inventory, request)
-    source_rel = observation.source_rel
+    correction_errors = _correction_errors(inventory, request, observation)
+    if correction_errors:
+        findings.extend(_with_severity(correction_errors, "warn"))
+        findings.append(
+            Finding(
+                "info",
+                "meta-feedback-validation-posture",
+                "dry-run refused before apply; fix correction target, then rerun dry-run before collecting meta-feedback",
+            )
+        )
+        return findings
     incubate_request = make_incubate_request(_canonical_topic(request, observation), _note_body(request, observation), request.note_source, fix_candidate=True)
     findings.extend(incubate_dry_run_findings(inventory, incubate_request))
     findings.extend(_cluster_findings(observation, apply=False))
     findings.extend(_cluster_route_write_findings(inventory, observation, apply=False))
-    roadmap_request = _roadmap_request(inventory, request, observation)
-    roadmap_plan, roadmap_errors = roadmap_plan_for_request(inventory, roadmap_request, allowed_missing_paths={source_rel})
     findings.append(_dedupe_finding(inventory, observation, apply=False))
     findings.extend(_agent_operability_findings(request, apply=False))
-    findings.append(Finding("info", "meta-feedback-roadmap-target", f"would place roadmap item: {observation.canonical_id}", "project/roadmap.md"))
-    findings.append(Finding("info", "meta-feedback-roadmap-status", f"roadmap placement status: {ROADMAP_STATUS}; next-plan opening remains explicit", "project/roadmap.md"))
-    findings.append(Finding("info", "meta-feedback-release-boundary", RELEASE_BOUNDARY, "project/roadmap.md"))
-    if roadmap_plan:
-        findings.append(Finding("info", "meta-feedback-roadmap-action", f"would {roadmap_plan.action} roadmap item {roadmap_plan.item_id!r}", "project/roadmap.md"))
-        if roadmap_plan.changed_fields:
-            findings.append(Finding("info", "meta-feedback-roadmap-fields", f"would change fields: {', '.join(roadmap_plan.changed_fields)}", "project/roadmap.md"))
-    if roadmap_errors:
-        findings.extend(_with_severity(roadmap_errors, "warn"))
+    findings.extend(_roadmap_detached_findings(request, apply=False))
     findings.extend(_boundary_findings(apply=False))
     findings.append(
         Finding(
             "info",
             "meta-feedback-validation-posture",
-            "apply would write one incubation note and one accepted roadmap item/update in an eligible live operating root",
+            "apply would write one incubation note plus canonical cluster metadata only; roadmap promotion requires an explicit roadmap --dry-run/--apply command",
         )
     )
     return findings
@@ -194,7 +222,9 @@ def meta_feedback_apply_findings(inventory: Inventory, request: MetaFeedbackRequ
         return errors
 
     observation = _cluster_observation(inventory, request)
-    source_rel = observation.source_rel
+    correction_errors = _correction_errors(inventory, request, observation)
+    if correction_errors:
+        return correction_errors
     incubate_request = make_incubate_request(_canonical_topic(request, observation), _note_body(request, observation), request.note_source, fix_candidate=True)
     findings = [
         Finding("info", "meta-feedback-apply", "meta-feedback apply started"),
@@ -205,7 +235,7 @@ def meta_feedback_apply_findings(inventory: Inventory, request: MetaFeedbackRequ
     incubate_findings = incubate_apply_findings(inventory, incubate_request)
     findings.extend(incubate_findings)
     if any(finding.severity == "error" for finding in incubate_findings):
-        findings.append(Finding("info", "meta-feedback-validation-posture", "roadmap placement skipped because incubation write was refused"))
+        findings.append(Finding("info", "meta-feedback-validation-posture", "cluster metadata write skipped because incubation write was refused"))
         return findings
 
     refreshed = load_inventory(inventory.root)
@@ -213,23 +243,18 @@ def meta_feedback_apply_findings(inventory: Inventory, request: MetaFeedbackRequ
     findings.extend(_cluster_findings(observation, apply=True))
     findings.extend(cluster_findings)
     if any(finding.severity == "error" for finding in cluster_findings):
-        findings.append(Finding("info", "meta-feedback-validation-posture", "roadmap placement skipped because cluster metadata write was refused"))
+        findings.append(Finding("info", "meta-feedback-validation-posture", "meta-feedback intake stopped after cluster metadata write was refused"))
         return findings
 
-    refreshed = load_inventory(inventory.root)
-    roadmap_request = _roadmap_request(refreshed, request, observation)
-    roadmap_findings = roadmap_apply_findings(refreshed, roadmap_request)
-    findings.append(_dedupe_finding(refreshed, observation, apply=True))
+    findings.append(_dedupe_finding(inventory, observation, apply=True))
     findings.extend(_agent_operability_findings(request, apply=True))
-    findings.append(Finding("info", "meta-feedback-roadmap-status", f"roadmap placement status: {ROADMAP_STATUS}; next-plan opening remains explicit", "project/roadmap.md"))
-    findings.append(Finding("info", "meta-feedback-release-boundary", RELEASE_BOUNDARY, "project/roadmap.md"))
-    findings.extend(roadmap_findings)
+    findings.extend(_roadmap_detached_findings(request, apply=True))
     findings.extend(_boundary_findings(apply=True))
     findings.append(
         Finding(
             "info",
             "meta-feedback-validation-posture",
-            "run check after apply; collected meta-feedback is operating memory and accepted roadmap sequencing, not lifecycle approval",
+            "run check after apply; collected meta-feedback is operating memory, not roadmap sequencing or lifecycle approval",
         )
     )
     return findings
@@ -278,43 +303,40 @@ def _request_errors(inventory: Inventory, request: MetaFeedbackRequest) -> list[
                 Finding(
                     "error",
                     "meta-feedback-refused",
-                    "--dedupe-to must name an existing canonical incubation note or roadmap item",
+                    "--dedupe-to must name an existing canonical incubation note",
                     f"{INCUBATION_DIR_REL}/{request.dedupe_to}.md",
                 )
             )
+    if request.correction_of and not re.fullmatch(r"(latest|[a-z0-9][a-z0-9_.:-]{0,79})", request.correction_of):
+        errors.append(Finding("error", "meta-feedback-refused", "--correction-of must be 'latest' or a compact observation/hash id without whitespace"))
     if request.order is not None and request.order < 0:
         errors.append(Finding("error", "meta-feedback-refused", "--order must be a non-negative integer"))
     return errors
 
 
-def _roadmap_request(inventory: Inventory, request: MetaFeedbackRequest, observation: ClusterObservation):
-    existing = roadmap_item_fields(inventory, observation.canonical_id)
-    action = "update" if existing else "add"
-    existing_status = str(existing.get("status") or "").strip().casefold().replace("_", "-") if existing else ""
-    status = existing_status if existing_status in TERMINAL_DUPLICATE_STATUSES else ROADMAP_STATUS
-    return make_roadmap_request(
-        action=action,
-        item_id=observation.canonical_id,
-        title=_title_from_topic(observation.canonical_id),
-        status=status,
-        order=request.order if request.order is not None else (_next_roadmap_order(inventory, status=ROADMAP_STATUS) if not existing else None),
-        execution_slice=observation.canonical_id,
-        slice_goal=_roadmap_goal(observation),
-        slice_closeout_boundary=f"accepted sequencing only; {RELEASE_BOUNDARY}",
-        source_incubation=observation.source_rel,
-        verification_summary=(
-            "Future implementation should prove meta-feedback collection preserves provenance, dedupes safely, "
-            "clusters recurring pain transparently, and cannot approve lifecycle, release removal, staging, commit, or next-plan opening"
-        ),
-        docs_decision=DEFAULT_DOCS_DECISION,
-        carry_forward=(
-            f"Meta-feedback candidate observed from {request.from_root}; signal_type={request.signal_type}; "
-            f"severity={request.severity}; canonical_id={observation.canonical_id}; "
-            f"occurrence_count={observation.occurrence_count}; recurrence_score={observation.recurrence_score}; "
-            f"friction_signature={observation.friction_signature}; {RELEASE_BOUNDARY}."
-        ),
-        slice_members=[observation.canonical_id],
-    )
+def _correction_errors(inventory: Inventory, request: MetaFeedbackRequest, observation: ClusterObservation) -> list[Finding]:
+    if not request.correction_of:
+        return []
+    path = inventory.root / observation.source_rel
+    if not path.is_file() or path.is_symlink():
+        return [
+            Finding(
+                "error",
+                "meta-feedback-correction-refused",
+                "--correction-of requires an existing canonical incubation note; create the original observation first or use --dedupe-to <canonical-id>",
+                observation.source_rel,
+            )
+        ]
+    if request.correction_of == "latest" and not observation.previous_observation_hash:
+        return [
+            Finding(
+                "error",
+                "meta-feedback-correction-refused",
+                "--correction-of latest requires existing cluster metadata with latest_observation_hash",
+                observation.source_rel,
+            )
+        ]
+    return []
 
 
 def _note_body(request: MetaFeedbackRequest, observation: ClusterObservation) -> str:
@@ -323,43 +345,45 @@ def _note_body(request: MetaFeedbackRequest, observation: ClusterObservation) ->
         agent_operability_fields = (
             f"- agent_friction: {AGENT_OPERABILITY_FRICTION_SCOPE} are valid capture subjects\n"
         )
+    correction_fields = ""
+    if observation.correction_of:
+        correction_fields = (
+            f"- correction_of: {observation.correction_of}\n"
+            f"- occurrence_count_delta: {observation.occurrence_count_delta}\n"
+            "- correction_boundary: correction marker only; historical entries remain append-only evidence.\n"
+        )
     return (
         f"{request.note}\n\n"
         "Meta-feedback intake fields:\n"
         f"- signal_type: {request.signal_type}\n"
         f"- severity: {request.severity}\n"
         f"- observed_root: {request.from_root}\n"
+        f"- capture_mode: {request.capture_mode or 'unspecified'}\n"
+        f"- requested_root: {request.requested_root or '<unspecified>'}\n"
+        f"- destination_root: {request.destination_root or '<unspecified>'}\n"
+        f"- destination_source: {request.destination_source or '<unspecified>'}\n"
+        f"- to_root_arg: {request.to_root or '<none>'}\n"
+        f"- env_destination_root: {request.env_destination_root or '<none>'}\n"
+        f"- note_source: {request.note_source}\n"
+        "- dry_run_apply_pairing: not enforced by meta-feedback; rerun a matching dry-run before apply when review evidence matters.\n"
         f"- dedupe_key: {observation.canonical_id}\n"
         f"- canonical_id: {observation.canonical_id}\n"
         f"- duplicate_topic: {request.topic}\n"
         f"- friction_signature: {observation.friction_signature}\n"
         f"- occurrence_count: {observation.occurrence_count}\n"
+        f"{correction_fields}"
         f"- recurrence_score: {observation.recurrence_score}\n"
         f"- affected_routes: {_json_list(observation.affected_routes)}\n"
         f"- latest_observation_hash: {observation.latest_observation_hash}\n"
         f"- expected_owner_command: {_expected_owner_command(request)}\n"
         f"{agent_operability_fields}"
-        "- authority_boundary: operating-memory capture and accepted roadmap placement only; "
+        "- authority_boundary: operating-memory capture only; roadmap promotion requires explicit roadmap review; "
         f"{RELEASE_BOUNDARY}.\n"
     )
 
 
 def _source_incubation_rel(canonical_id: str) -> str:
     return f"{INCUBATION_DIR_REL}/{canonical_id}.md"
-
-
-def _next_roadmap_order(inventory: Inventory, *, status: str) -> int:
-    path = inventory.root / "project/roadmap.md"
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        return DEFAULT_ORDER
-    orders = [
-        order
-        for item_status, order in _roadmap_status_order_rows(text)
-        if item_status == status
-    ]
-    return (max(orders) + 1) if orders else DEFAULT_ORDER
 
 
 def _root_posture_finding(inventory: Inventory) -> Finding:
@@ -377,10 +401,11 @@ def _source_root_finding(request: MetaFeedbackRequest) -> Finding:
 def _boundary_findings(*, apply: bool) -> list[Finding]:
     verb = "writes" if apply else "would write"
     return [
+        rails_not_cognition_boundary_finding(INCUBATION_DIR_REL),
         Finding(
             "info",
             "meta-feedback-boundary",
-            f"meta-feedback {verb} only the destination root's project/plan-incubation/<safe-topic>.md and accepted project/roadmap.md item/update in eligible live operating roots",
+            f"meta-feedback {verb} only the destination root's project/plan-incubation/<safe-topic>.md and managed cluster metadata in eligible live operating roots",
         ),
         Finding(
             "info",
@@ -388,6 +413,31 @@ def _boundary_findings(*, apply: bool) -> list[Finding]:
             "meta-feedback output cannot approve repair, closeout, archive, lifecycle movement, next-plan opening, release removal, staging, commit, or push",
         ),
     ]
+
+
+def _roadmap_detached_findings(request: MetaFeedbackRequest, *, apply: bool) -> list[Finding]:
+    prefix = "" if apply else "would "
+    findings = [
+        Finding(
+            "info",
+            "meta-feedback-roadmap-detached",
+            (
+                f"{prefix}leave project/roadmap.md unchanged; meta-feedback no longer creates or updates accepted roadmap items. "
+                "Promote mature clusters through an explicit roadmap --dry-run/--apply command after review."
+            ),
+            "project/roadmap.md",
+        )
+    ]
+    if request.order is not None:
+        findings.append(
+            Finding(
+                "info",
+                "meta-feedback-roadmap-order-ignored",
+                "--order is ignored because meta-feedback does not write roadmap placement",
+                "project/roadmap.md",
+            )
+        )
+    return findings
 
 
 def _agent_operability_findings(request: MetaFeedbackRequest, *, apply: bool) -> list[Finding]:
@@ -415,24 +465,16 @@ def _agent_operability_findings(request: MetaFeedbackRequest, *, apply: bool) ->
 
 
 def _dedupe_finding(inventory: Inventory, observation: ClusterObservation, *, apply: bool) -> Finding:
-    existing = roadmap_item_fields(inventory, observation.canonical_id)
+    existing = (inventory.root / observation.source_rel).is_file()
     prefix = "" if apply else "would "
     if existing:
-        status = str(existing.get("status") or "<unset>")
-        if status.strip().casefold().replace("_", "-") in TERMINAL_DUPLICATE_STATUSES:
-            return Finding(
-                "info",
-                "meta-feedback-dedupe",
-                f"{prefix}reuse existing terminal roadmap item {observation.canonical_id!r} with status {status!r}; duplicate item creation is skipped",
-                "project/roadmap.md",
-            )
         return Finding(
             "info",
             "meta-feedback-dedupe",
-            f"{prefix}update existing roadmap item {observation.canonical_id!r}; duplicate item creation is skipped",
-            "project/roadmap.md",
+            f"{prefix}append to existing canonical incubation cluster {observation.canonical_id!r}; duplicate note creation is skipped",
+            observation.source_rel,
         )
-    return Finding("info", "meta-feedback-dedupe", f"{prefix}create new roadmap item {observation.canonical_id!r}; no exact duplicate id was found", "project/roadmap.md")
+    return Finding("info", "meta-feedback-dedupe", f"{prefix}create new canonical incubation cluster {observation.canonical_id!r}; no exact duplicate id was found", observation.source_rel)
 
 
 def _cluster_observation(inventory: Inventory, request: MetaFeedbackRequest) -> ClusterObservation:
@@ -461,7 +503,11 @@ def _cluster_observation(inventory: Inventory, request: MetaFeedbackRequest) -> 
     source_rel = _source_incubation_rel(canonical_id)
     metadata = _existing_cluster_metadata(inventory.root / source_rel)
     today = date.today().isoformat()
-    occurrence_count = _existing_occurrence_count(metadata, inventory.root / source_rel) + 1
+    previous_hash = _metadata_scalar(metadata, "latest_observation_hash")
+    correction_of = previous_hash if request.correction_of == "latest" else request.correction_of
+    occurrence_delta = 0 if request.correction_of else 1
+    occurrence_count = _existing_occurrence_count(metadata, inventory.root / source_rel) + occurrence_delta
+    correction_count = _existing_correction_count(metadata) + (1 if request.correction_of else 0)
     observed_roots = tuple(_dedupe_nonempty((*_metadata_list(metadata, "observed_roots"), request.from_root)))
     duplicate_topics = tuple(_dedupe_nonempty((*_metadata_list(metadata, "duplicate_topics"), request.topic)))
     first_seen = _metadata_scalar(metadata, "first_seen") or today
@@ -477,6 +523,7 @@ def _cluster_observation(inventory: Inventory, request: MetaFeedbackRequest) -> 
         source_rel=source_rel,
         friction_signature=friction_signature,
         latest_observation_hash=latest_hash,
+        previous_observation_hash=previous_hash,
         signal_type=signal_type,
         expected_owner_command=expected_owner_command,
         affected_routes=affected_routes,
@@ -485,6 +532,9 @@ def _cluster_observation(inventory: Inventory, request: MetaFeedbackRequest) -> 
         observed_roots=observed_roots,
         duplicate_topics=duplicate_topics,
         occurrence_count=occurrence_count,
+        occurrence_count_delta=occurrence_delta,
+        correction_count=correction_count,
+        correction_of=correction_of,
         recurrence_score=recurrence_score,
         first_seen=first_seen,
         exact_matches=exact_matches,
@@ -546,11 +596,26 @@ def _cluster_findings(observation: ClusterObservation, *, apply: bool) -> list[F
                 observation.source_rel,
             )
         )
+    if observation.correction_of:
+        findings.append(
+            Finding(
+                "info",
+                "meta-feedback-correction-marker",
+                (
+                    f"{prefix}record correction_of={observation.correction_of}; "
+                    f"previous_latest_observation_hash={observation.previous_observation_hash or '<missing>'}; "
+                    f"new_latest_observation_hash={observation.latest_observation_hash}; "
+                    f"occurrence_count_delta={observation.occurrence_count_delta}; "
+                    f"correction_count={observation.correction_count}"
+                ),
+                observation.source_rel,
+            )
+        )
     findings.append(
         Finding(
             "info",
             "meta-feedback-cluster-boundary",
-            f"{prefix}update only canonical incubation cluster metadata plus the bounded roadmap item/update; {RELEASE_BOUNDARY}",
+            f"{prefix}update only canonical incubation cluster metadata; roadmap promotion remains explicit; {RELEASE_BOUNDARY}",
             observation.source_rel,
         )
     )
@@ -633,6 +698,7 @@ def _cluster_block(observation: ClusterObservation) -> str:
         f"- `observed_roots`: `{_json_list(observation.observed_roots)}`\n"
         f"- `affected_routes`: `{_json_list(observation.affected_routes)}`\n"
         f"- `duplicate_topics`: `{_json_list(observation.duplicate_topics)}`\n"
+        f"{_correction_metadata_lines(observation)}"
         f"- `recurrence_score`: `{observation.recurrence_score}`\n"
         f"- `representative_examples`: `{_json_list((observation.representative_example,))}`\n"
         f"- `latest_observation_hash`: `{observation.latest_observation_hash}`\n"
@@ -719,10 +785,18 @@ def _existing_occurrence_count(metadata: dict[str, object], path) -> int:
     return text.count("Meta-feedback intake fields:")
 
 
+def _existing_correction_count(metadata: dict[str, object]) -> int:
+    value = _metadata_scalar(metadata, "correction_count")
+    if value:
+        try:
+            return max(int(value), 0)
+        except ValueError:
+            return 0
+    return 0
+
+
 def _canonical_target_exists(inventory: Inventory, canonical_id: str) -> bool:
-    if (inventory.root / _source_incubation_rel(canonical_id)).is_file():
-        return True
-    return bool(roadmap_item_fields(inventory, canonical_id))
+    return (inventory.root / _source_incubation_rel(canonical_id)).is_file()
 
 
 def _canonical_topic(request: MetaFeedbackRequest, observation: ClusterObservation) -> str:
@@ -733,12 +807,15 @@ def _canonical_topic(request: MetaFeedbackRequest, observation: ClusterObservati
 
 def _affected_routes(request: MetaFeedbackRequest) -> tuple[str, ...]:
     haystack = f"{request.topic}\n{request.note}"
+    structured_routes = _structured_list_field(request.note, "affected_routes")
+    if structured_routes:
+        return tuple(_dedupe_nonempty(structured_routes))
     routes: list[str] = []
     for match in re.finditer(r"(?<![A-Za-z0-9_.-])((?:project|docs|src|tests|\.codex|\.agents)/[A-Za-z0-9_./-]+)", haystack):
         routes.append(match.group(1).strip("./"))
     lowered = haystack.casefold()
     for command in KNOWN_OWNER_COMMANDS:
-        if re.search(rf"\b{re.escape(command)}\b", lowered):
+        if re.search(rf"(?<![A-Za-z0-9_-]){re.escape(command)}(?![A-Za-z0-9_-])", lowered):
             routes.append(command)
     deduped = tuple(_dedupe_nonempty(routes))
     return deduped or (UNSPECIFIED_ROUTE,)
@@ -771,7 +848,7 @@ def _friction_signature(
 
 
 def _normalized_observation_text(request: MetaFeedbackRequest) -> str:
-    return "|".join((request.topic, request.note, request.from_root, request.signal_type, request.severity))
+    return "|".join((request.topic, request.note, request.from_root, request.signal_type, request.severity, request.correction_of))
 
 
 def _cluster_record_looks_related(
@@ -802,17 +879,6 @@ def _recurrence_score(
     if agent_operability:
         score += 2
     return score
-
-
-def _roadmap_status_order_rows(text: str) -> list[tuple[str, int]]:
-    rows: list[tuple[str, int]] = []
-    for block in re.split(r"(?m)^###\s+", text):
-        status_match = re.search(r"- `status`:\s*`([^`]+)`", block)
-        order_match = re.search(r"- `order`:\s*`([0-9]+)`", block)
-        if not status_match or not order_match:
-            continue
-        rows.append((status_match.group(1).strip().casefold().replace("_", "-"), int(order_match.group(1))))
-    return rows
 
 
 def _new_cluster_placeholder_text(observation: ClusterObservation) -> str:
@@ -876,6 +942,16 @@ def _json_list(values: tuple[str, ...] | list[str]) -> str:
     return json.dumps(list(values), ensure_ascii=True)
 
 
+def _correction_metadata_lines(observation: ClusterObservation) -> str:
+    if observation.correction_count <= 0:
+        return ""
+    latest = observation.correction_of or ""
+    return (
+        f"- `correction_count`: `{observation.correction_count}`\n"
+        f"- `latest_correction_of`: `{_safe_backtick_value(latest)}`\n"
+    )
+
+
 def _safe_backtick_value(value: str) -> str:
     return str(value).replace("`", "'")
 
@@ -895,19 +971,6 @@ def _single_line_goal(topic: str, note: str) -> str:
             continue
         paragraph.append(line)
     goal = " ".join(paragraph) or topic
-    return _roadmap_scalar_text(goal).rstrip(".")
-
-
-def _roadmap_goal(observation: ClusterObservation) -> str:
-    goal = observation.representative_example
-    lower_goal = goal.casefold()
-    hints: list[str] = []
-    if observation.affected_routes and "affected_route" not in lower_goal:
-        hints.append(f"affected_routes: {_json_list(observation.affected_routes)}")
-    if observation.expected_owner_command and "expected_owner_command" not in lower_goal:
-        hints.append(f"expected_owner_command: {observation.expected_owner_command}")
-    if hints:
-        goal = f"{goal}. {'; '.join(hints)}"
     return _roadmap_scalar_text(goal).rstrip(".")
 
 
@@ -932,9 +995,31 @@ def _is_agent_operability_signal(request: MetaFeedbackRequest) -> bool:
 
 
 def _expected_owner_command(request: MetaFeedbackRequest) -> str:
+    note_owner = _structured_line_field(request.note, "expected_owner_command")
+    if note_owner:
+        return note_owner
     if _is_agent_operability_signal(request):
         return AGENT_OPERABILITY_OWNER_COMMANDS
     return "meta-feedback"
+
+
+def _structured_line_field(text: str, key: str) -> str:
+    match = re.search(rf"(?im)^\s*(?:-\s*)?`?{re.escape(key)}`?\s*:\s*(.+?)\s*$", text)
+    if not match:
+        return ""
+    value = match.group(1).strip()
+    if value.startswith("`") and value.endswith("`") and value.count("`") == 2:
+        return value[1:-1].strip()
+    return value
+
+
+def _structured_list_field(text: str, key: str) -> tuple[str, ...]:
+    raw = _structured_line_field(text, key)
+    if not raw:
+        return ()
+    if raw.startswith("[") and raw.endswith("]"):
+        return tuple(_parse_json_list(raw))
+    return tuple(item.strip().strip("`") for item in re.split(r"[,;]", raw) if item.strip().strip("`"))
 
 
 def _safe_slug(topic: str) -> str:

@@ -9,7 +9,7 @@ repo_summary:
     - "docs/architecture/clean-room-carry-forward.md"
     - "docs/specs/"
     - "pyproject.toml"
-    - "../build_backend/mylittleharness_build.py"
+    - "build_backend/mylittleharness_build.py"
     - "src/mylittleharness/"
     - "tests/"
     - ".codex/project-workflow.toml"
@@ -137,7 +137,7 @@ rules:
   - area: "Analyzer CLI"
     code:
       - "pyproject.toml"
-      - "../build_backend/mylittleharness_build.py"
+      - "build_backend/mylittleharness_build.py"
       - "src/mylittleharness/**"
       - "tests/**"
     canonical_docs:

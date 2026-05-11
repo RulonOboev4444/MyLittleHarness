@@ -23,6 +23,20 @@ class IntakeRouteAdvice:
     apply_allowed: bool
 
 
+@dataclass(frozen=True)
+class RouteOrchestrationPolicy:
+    parallelism_class: str
+    authority_lane: str
+    exclusive_owner: str
+    claim_scope: tuple[str, ...]
+    claim_required: bool
+    merge_policy: str
+    fan_in_gate: tuple[str, ...]
+    max_parallelism_hint: str
+    stale_claim_policy: str
+    conflict_policy: str
+
+
 LIVE_LIFECYCLE_ROUTES: tuple[MemoryRoute, ...] = (
     MemoryRoute(
         "state",
@@ -92,6 +106,13 @@ LIVE_LIFECYCLE_ROUTES: tuple[MemoryRoute, ...] = (
         "project/verification/agent-runs/*.md",
         "source-bound durable agent run evidence records",
         "at explicit run evidence record",
+        "evidence",
+    ),
+    MemoryRoute(
+        "work-claims",
+        "project/verification/work-claims/*.json",
+        "repo-visible scoped work and fan-in coordination evidence",
+        "at explicit work claim record",
         "evidence",
     ),
     MemoryRoute(
@@ -190,8 +211,26 @@ INTAKE_ROUTE_CUES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("product-docs", ("docs impact:", "doc impact:", "documentation:", "readme", "docs update", "documentation update")),
     ("archive", ("archive reference:", "archived reference", "historical reference", "legacy reference", "for reference only")),
     ("research", ("research import:", "research:", "distillate:", "source notes", "imported research", "raw import")),
-    ("incubation", ("future idea:", "idea:", "follow-up:", "follow up:", "later:", "todo:", "proposal:", "candidate:")),
+    (
+        "incubation",
+        (
+            "future idea:",
+            "idea:",
+            "feature idea",
+            "future feature",
+            "future product idea",
+            "product idea",
+            "follow-up:",
+            "follow up:",
+            "later:",
+            "todo:",
+            "proposal:",
+            "candidate:",
+        ),
+    ),
 )
+FUTURE_FEATURE_INTAKE_CUES = ("feature idea", "future feature", "future product idea", "product idea")
+DEEP_RESEARCH_PROMPT_COMPOSITION_INTAKE_CUES = ("deep research prompt", "research prompt", "prompt composition")
 AMBIGUOUS_INTAKE = IntakeRouteAdvice(
     route_id="ambiguous",
     target="<manual-route-required>",
@@ -224,6 +263,7 @@ _ROUTE_MUTABILITY = {
     "adrs": "human-reviewed-authority",
     "archive": "archive-apply-rail",
     "agent-runs": "evidence-record-apply-rail",
+    "work-claims": "claim-apply-rail",
     "closeout-writeback": "lifecycle-apply-rail",
     "decisions": "human-reviewed-authority",
     "docs-routing": "advisory-file",
@@ -243,6 +283,7 @@ _ROUTE_GATE_CLASS = {
     "adrs": "authority",
     "archive": "archive",
     "agent-runs": "evidence",
+    "work-claims": "evidence",
     "closeout-writeback": "lifecycle",
     "decisions": "authority",
     "operating-guardrails": "authority",
@@ -257,6 +298,7 @@ _ROUTE_ALLOWED_DECISIONS = {
     "adrs": ("accept", "supersede", "archive"),
     "archive": ("archive", "restore-reference"),
     "agent-runs": ("record", "inspect"),
+    "work-claims": ("create", "release", "inspect"),
     "closeout-writeback": ("writeback", "transition"),
     "decisions": ("accept", "supersede", "archive"),
     "operating-guardrails": ("repair", "manual-review"),
@@ -266,9 +308,165 @@ _ROUTE_ALLOWED_DECISIONS = {
     "state": ("writeback", "compact", "transition"),
 }
 
+_LIFECYCLE_ORCHESTRATION = RouteOrchestrationPolicy(
+    parallelism_class="sequential_only",
+    authority_lane="lifecycle",
+    exclusive_owner="coordinator",
+    claim_scope=("route", "lifecycle"),
+    claim_required=True,
+    merge_policy="pessimistic_lock",
+    fan_in_gate=("review_token", "deterministic_verifier", "human_gate_when_required"),
+    max_parallelism_hint="1",
+    stale_claim_policy="coordinator_review",
+    conflict_policy="refuse",
+)
+_AUTHORITY_ORCHESTRATION = RouteOrchestrationPolicy(
+    parallelism_class="human_gated",
+    authority_lane="product_source",
+    exclusive_owner="coordinator_or_human_reviewer",
+    claim_scope=("path", "route"),
+    claim_required=True,
+    merge_policy="reviewed_fan_in",
+    fan_in_gate=("evidence_packet", "review_token", "human_gate"),
+    max_parallelism_hint="1",
+    stale_claim_policy="manual_release",
+    conflict_policy="human_gate",
+)
+_EVIDENCE_ORCHESTRATION = RouteOrchestrationPolicy(
+    parallelism_class="safe_parallel",
+    authority_lane="verification",
+    exclusive_owner="assigned_verifier",
+    claim_scope=("path", "execution_slice"),
+    claim_required=True,
+    merge_policy="reviewed_fan_in",
+    fan_in_gate=("evidence_packet", "deterministic_verifier"),
+    max_parallelism_hint="2-3",
+    stale_claim_policy="coordinator_review",
+    conflict_policy="queue_or_refuse",
+)
+_SYNTHESIS_ORCHESTRATION = RouteOrchestrationPolicy(
+    parallelism_class="safe_parallel",
+    authority_lane="research",
+    exclusive_owner="assigned_researcher",
+    claim_scope=("topic", "path"),
+    claim_required=True,
+    merge_policy="reviewed_fan_in",
+    fan_in_gate=("source_bound_summary", "coordinator_review"),
+    max_parallelism_hint="3-6",
+    stale_claim_policy="manual_release",
+    conflict_policy="queue_or_refuse",
+)
+_GENERATED_ORCHESTRATION = RouteOrchestrationPolicy(
+    parallelism_class="safe_parallel",
+    authority_lane="generated_cache",
+    exclusive_owner="generated_cache_builder",
+    claim_scope=("generated_cache",),
+    claim_required=False,
+    merge_policy="rebuildable_no_merge",
+    fan_in_gate=("deterministic_rebuild", "source_files_remain_authority"),
+    max_parallelism_hint="read_only_unbounded_with_budget",
+    stale_claim_policy="discard_and_rebuild",
+    conflict_policy="regenerate",
+)
+_DEFAULT_ORCHESTRATION = RouteOrchestrationPolicy(
+    parallelism_class="risky_parallel",
+    authority_lane="product_source",
+    exclusive_owner="coordinator_review",
+    claim_scope=("path",),
+    claim_required=True,
+    merge_policy="reviewed_fan_in",
+    fan_in_gate=("evidence_packet", "review_token"),
+    max_parallelism_hint="2-3",
+    stale_claim_policy="coordinator_review",
+    conflict_policy="human_gate",
+)
+_ROUTE_ORCHESTRATION = {
+    "active-plan": _LIFECYCLE_ORCHESTRATION,
+    "closeout-writeback": _LIFECYCLE_ORCHESTRATION,
+    "roadmap": _LIFECYCLE_ORCHESTRATION,
+    "state": _LIFECYCLE_ORCHESTRATION,
+    "adrs": _AUTHORITY_ORCHESTRATION,
+    "decisions": _AUTHORITY_ORCHESTRATION,
+    "operating-guardrails": _AUTHORITY_ORCHESTRATION,
+    "product-docs": _AUTHORITY_ORCHESTRATION,
+    "stable-specs": _AUTHORITY_ORCHESTRATION,
+    "verification": _EVIDENCE_ORCHESTRATION,
+    "agent-runs": _EVIDENCE_ORCHESTRATION,
+    "work-claims": _EVIDENCE_ORCHESTRATION,
+    "incubation": _SYNTHESIS_ORCHESTRATION,
+    "research": _SYNTHESIS_ORCHESTRATION,
+    "archive": RouteOrchestrationPolicy(
+        parallelism_class="sequential_only",
+        authority_lane="archive",
+        exclusive_owner="archivist_or_coordinator",
+        claim_scope=("archive_route", "source_route"),
+        claim_required=True,
+        merge_policy="pessimistic_lock",
+        fan_in_gate=("coverage_evidence", "review_token"),
+        max_parallelism_hint="1",
+        stale_claim_policy="coordinator_review",
+        conflict_policy="refuse",
+    ),
+    "docs-routing": RouteOrchestrationPolicy(
+        parallelism_class="risky_parallel",
+        authority_lane="adapter",
+        exclusive_owner="docs_router",
+        claim_scope=("path", "doc_route"),
+        claim_required=True,
+        merge_policy="reviewed_fan_in",
+        fan_in_gate=("doc_impact_evidence", "coordinator_review"),
+        max_parallelism_hint="2-3",
+        stale_claim_policy="manual_release",
+        conflict_policy="human_gate",
+    ),
+    "generated-cache": _GENERATED_ORCHESTRATION,
+    "orientation": RouteOrchestrationPolicy(
+        parallelism_class="human_gated",
+        authority_lane="product_source",
+        exclusive_owner="human_reviewer",
+        claim_scope=("path",),
+        claim_required=True,
+        merge_policy="reviewed_fan_in",
+        fan_in_gate=("docs_decision", "review_token"),
+        max_parallelism_hint="1",
+        stale_claim_policy="manual_release",
+        conflict_policy="human_gate",
+    ),
+    "package-mirror": RouteOrchestrationPolicy(
+        parallelism_class="risky_parallel",
+        authority_lane="product_source",
+        exclusive_owner="package_maintainer",
+        claim_scope=("path", "mirror_group"),
+        claim_required=True,
+        merge_policy="reviewed_fan_in",
+        fan_in_gate=("mirror_parity_evidence", "deterministic_verifier"),
+        max_parallelism_hint="2-3",
+        stale_claim_policy="coordinator_review",
+        conflict_policy="queue_or_refuse",
+    ),
+    "unclassified": _DEFAULT_ORCHESTRATION,
+}
+
 
 def lifecycle_route_rows() -> tuple[tuple[str, str, str], ...]:
     return tuple((route.route_id, route.target, route.purpose) for route in LIVE_LIFECYCLE_ROUTES)
+
+
+def route_orchestration_for_id(route_id: str | None) -> dict[str, object]:
+    normalized = route_id if route_id in ROUTE_BY_ID else "unclassified"
+    policy = _ROUTE_ORCHESTRATION.get(normalized, _DEFAULT_ORCHESTRATION)
+    return {
+        "parallelism_class": policy.parallelism_class,
+        "authority_lane": policy.authority_lane,
+        "exclusive_owner": policy.exclusive_owner,
+        "claim_scope": list(policy.claim_scope),
+        "claim_required": policy.claim_required,
+        "merge_policy": policy.merge_policy,
+        "fan_in_gate": list(policy.fan_in_gate),
+        "max_parallelism_hint": policy.max_parallelism_hint,
+        "stale_claim_policy": policy.stale_claim_policy,
+        "conflict_policy": policy.conflict_policy,
+    }
 
 
 def route_protocol_for_id(route_id: str | None) -> dict[str, object]:
@@ -281,6 +479,7 @@ def route_protocol_for_id(route_id: str | None) -> dict[str, object]:
         if requires_gate
         else "route is read-only, advisory, generated, or does not carry authority by itself"
     )
+    orchestration = route_orchestration_for_id(normalized)
     return {
         "route_id": normalized,
         "mutability": _ROUTE_MUTABILITY.get(normalized, "unknown"),
@@ -294,6 +493,7 @@ def route_protocol_for_id(route_id: str | None) -> dict[str, object]:
         "human_gate_reason": reason,
         "allowed_decisions": list(allowed_decisions),
         "advisory": normalized not in {"state", "active-plan", "stable-specs", "closeout-writeback"},
+        **orchestration,
     }
 
 
@@ -301,6 +501,7 @@ def route_manifest() -> tuple[dict[str, object], ...]:
     rows: list[dict[str, object]] = []
     for route in ROUTE_REGISTRY:
         protocol = route_protocol_for_id(route.route_id)
+        orchestration = route_orchestration_for_id(route.route_id)
         rows.append(
             {
                 "route_id": route.route_id,
@@ -314,6 +515,7 @@ def route_manifest() -> tuple[dict[str, object], ...]:
                 "human_gate_reason": protocol["human_gate_reason"],
                 "allowed_decisions": protocol["allowed_decisions"],
                 "advisory": protocol["advisory"],
+                **orchestration,
             }
         )
     return tuple(rows)
@@ -323,6 +525,10 @@ def classify_intake_text(text: str) -> IntakeRouteAdvice:
     normalized = _normalized_intake_text(text)
     if not normalized:
         return AMBIGUOUS_INTAKE
+
+    future_prompt_advice = _future_manual_deep_research_request_incubation_advice(normalized)
+    if future_prompt_advice:
+        return future_prompt_advice
 
     matches: list[tuple[int, int, str, tuple[str, ...]]] = []
     for index, (route_id, cues) in enumerate(INTAKE_ROUTE_CUES):
@@ -353,6 +559,23 @@ def classify_intake_text(text: str) -> IntakeRouteAdvice:
         confidence=confidence,
         reason=f"matched cue(s): {', '.join(top_cues)}",
         next_action=_intake_next_action(route_id),
+        apply_allowed=True,
+    )
+
+
+def _future_manual_deep_research_request_incubation_advice(normalized: str) -> IntakeRouteAdvice | None:
+    future_matches = tuple(cue for cue in FUTURE_FEATURE_INTAKE_CUES if cue in normalized)
+    prompt_matches = tuple(cue for cue in DEEP_RESEARCH_PROMPT_COMPOSITION_INTAKE_CUES if cue in normalized)
+    if not future_matches or not prompt_matches:
+        return None
+    route = ROUTE_BY_ID["incubation"]
+    matched = ", ".join((*future_matches, *prompt_matches))
+    return IntakeRouteAdvice(
+        route_id="incubation",
+        target=route.target,
+        confidence="high",
+        reason=f"matched future feature/Deep Research prompt-composition incubation cue(s): {matched}",
+        next_action=_intake_next_action("incubation"),
         apply_allowed=True,
     )
 
@@ -392,6 +615,7 @@ def classify_memory_route(rel_path: str, role: str = "") -> MemoryRoute:
         ("project/plan-incubation/", "incubation"),
         ("project/research/", "research"),
         ("project/verification/agent-runs/", "agent-runs"),
+        ("project/verification/work-claims/", "work-claims"),
         ("project/specs/", "stable-specs"),
         ("project/verification/", "verification"),
         ("specs/workflow/", "package-mirror"),
@@ -414,7 +638,7 @@ def _intake_next_action(route_id: str) -> str:
         "adrs": "write an ADR under project/adrs/ only when an architecture decision is accepted",
         "archive": "write under project/archive/reference/** only for explicit historical reference material",
         "decisions": "write a decision record under project/decisions/ when rationale should not be rediscovered",
-        "incubation": "use project/plan-incubation/*.md for future ideas that are not yet accepted work",
+        "incubation": "use project/plan-incubation/*.md for future ideas that are not yet accepted work; safest write rail: `mylittleharness --root <root> incubate --dry-run --topic \"<topic>\" --note \"<note>\"` before the matching apply",
         "product-docs": "route docs impact to the relevant docs/**/*.md product contract or README surface",
         "research": "write imported or distilled research under project/research/*.md before promotion",
         "verification": "write durable proof under project/verification/*.md only when reusable evidence is worth the ceremony",

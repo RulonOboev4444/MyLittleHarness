@@ -8,7 +8,7 @@
 | Contract and rules | Normative safety boundaries, source-set discipline, risk rules, field split | Product docs/specs state the reusable rule; operating specs govern current workflow | Product specs and compatibility fixture checks |
 | Navigation and routing | Cheap start, attention tiers, docmap, policy/evidence routing | Advisory unless promoted into state/specs | Docmap/link/stale-pointer reports |
 | Lifecycle and planning | Incubation, research, active plans, Horizon posture, closeout | Current operating-root workflow concern; the operating root owns live lifecycle state | Plan synthesis and closeout helpers |
-| Power layer | Replay packets, comparative research, selective helpers | Evidence and leverage, not authority | Research, evidence, and closeout helpers |
+| Power layer | Replay packets, research artifact intake, distillate validation, comparative research, selective helpers | Evidence and leverage, not authority; substantive synthesis belongs to agents/humans | Research, evidence, and closeout helpers |
 | Projection, cache, and index | Generated maps, SQLite, search, semantic readiness/evaluation inputs, backlinks, telemetry | Rebuildable and subordinate | Repo-map/search/SQLite tooling plus later semantic retrieval gates |
 | Automation and analyzer | Diagnostics, project intelligence reports, detach dry-run/apply marker posture, hidden-help tasks/bootstrap diagnostics, explicit package-smoke verification, semantic readiness inspection, bounded no-runtime semantic evaluation, optional preflight warnings/templates, consistency checks, dry-run proposals, no-write snapshot plans, explicit safe apply, bounded state frontmatter repair, bounded docmap repair, create-only AGENTS repair, create-only stable spec repair, and explicit closeout/state writeback | Reports, stdout-only templates, temporary package-smoke workspaces outside the product root, create-only writes, marker-only detach evidence, selected state frontmatter updates, selected AGENTS creation, selected docmap creation, selected stable spec fixture creation, selected docmap route updates, synchronized closeout writeback state and derived active-plan metadata, and snapshot evidence only under scoped product contracts | Analyzer CLI modules |
 | Adapter | Skills, MCP read projection, browser, IDE, Git/GitHub/CI, hooks, task runners | Optional and fail-open | Current MCP-style inspect report and explicit stdio tool server, current preflight warning feed and hook template, plus future adapter/projection packages |
@@ -62,5 +62,4 @@ A capability can move down the layer stack only when its safety boundary is expl
 - non-goals and rejected shapes visible
 
 Capabilities that cannot pass those gates stay as research-only carry-forward or explicit rejects.
-
 

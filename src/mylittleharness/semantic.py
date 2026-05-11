@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .command_discovery import rails_not_cognition_boundary_finding
 from .inventory import Inventory
 from .models import Finding
 from .projection import Projection, build_projection
@@ -397,10 +398,11 @@ def _evaluation_query_findings(
 
 def _boundary_findings() -> list[Finding]:
     return [
+        rails_not_cognition_boundary_finding(SEMANTIC_OUTPUT_REL),
         Finding(
             "info",
             "semantic-no-authority",
-            "semantic readiness output is advisory evidence only and cannot authorize accepted decisions, repair, closeout, archive, commit, lifecycle changes",
+            "semantic readiness output is advisory retrieval evidence only and cannot authorize accepted decisions, repair, closeout, archive, commit, lifecycle changes",
         ),
         Finding(
             "info",
@@ -462,10 +464,11 @@ def _evaluation_degraded_mode_findings(blocking: list[Finding]) -> list[Finding]
 
 def _evaluation_boundary_findings() -> list[Finding]:
     return [
+        rails_not_cognition_boundary_finding(SEMANTIC_OUTPUT_REL),
         Finding(
             "info",
             "semantic-evaluation-no-authority",
-            "semantic evaluation output is advisory evidence only and cannot authorize accepted decisions, repair, closeout, archive, commit, lifecycle changes",
+            "semantic evaluation output is advisory retrieval evidence only and cannot authorize accepted decisions, repair, closeout, archive, commit, lifecycle changes",
         ),
         Finding(
             "info",

@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 
 from .atomic_files import AtomicFileWrite, FileTransactionError, apply_file_transaction
+from .command_discovery import rails_not_cognition_boundary_finding
 from .inventory import Inventory, Surface
 from .models import Finding
 from .evidence_cues import CLOSEOUT_FIELD_NAMES, closeout_field_cues, cue_findings, find_cues
@@ -29,6 +30,11 @@ CARRY_FORWARD_PATTERNS = (
     r"later-extension",
     r"needs-more-research",
     r"\bopen questions?\b",
+)
+GIT_CONTEXT_TRAILERS = (
+    ("MLH-Plan", ("plan_id",)),
+    ("MLH-Phase", ("active_phase",)),
+    ("MLH-Slice", ("execution_slice", "primary_roadmap_item", "related_roadmap_item")),
 )
 SKIP_RATIONALE_PATTERNS = (
     r"skip rationale",
@@ -112,7 +118,7 @@ def agent_run_record_dry_run_findings(inventory: Inventory, request: AgentRunRec
     ]
     request_findings = _agent_run_request_findings(inventory, request, apply=False)
     findings.extend(request_findings)
-    if any(finding.severity == "error" for finding in request_findings):
+    if any(finding.severity in {"warn", "error"} and finding.code == "agent-run-record-refused" for finding in request_findings):
         findings.append(Finding("info", "agent-run-record-validation-posture", "dry-run refused before apply; fix explicit record fields before writing evidence"))
         findings.extend(_agent_run_record_boundary_findings())
         return findings
@@ -236,6 +242,7 @@ def evidence_findings(inventory: Inventory) -> list[Finding]:
     state_data = state.frontmatter.data if state and state.exists else {}
     active_plan = inventory.active_plan_surface if inventory.active_plan_surface and inventory.active_plan_surface.exists else None
     findings: list[Finding] = [
+        rails_not_cognition_boundary_finding("project/verification"),
         Finding(
             "info",
             "evidence-boundary",
@@ -261,6 +268,7 @@ def evidence_findings(inventory: Inventory) -> list[Finding]:
     findings.extend(_anchor_findings(active_plan, inventory))
     findings.extend(_identity_findings(active_plan))
     findings.extend(_closeout_findings(active_plan, inventory))
+    findings.extend(_git_trailer_suggestion_findings(active_plan, inventory))
     findings.extend(_quality_cue_findings(active_plan, inventory))
     findings.extend(_operator_required_findings(inventory))
     findings.extend(_line_group_findings(active_plan, "evidence-residual-risk", "residual risk", (r"residual risk", r"residual risks"), inventory))
@@ -273,6 +281,68 @@ def evidence_findings(inventory: Inventory) -> list[Finding]:
             "candidate evidence can guide closeout assembly, but source files, observed verification, and operator decisions remain authority",
         )
     )
+    return findings
+
+
+def git_context_trailer_values(
+    inventory: Inventory,
+    active_plan: Surface | None,
+    facts: dict[str, WritebackFact],
+) -> list[tuple[str, str]]:
+    plan_data = active_plan.frontmatter.data if active_plan and active_plan.exists else {}
+    state_data = inventory.state.frontmatter.data if inventory.state and inventory.state.exists else {}
+    values: list[tuple[str, str]] = []
+    for trailer_name, keys in GIT_CONTEXT_TRAILERS:
+        value = _first_trailer_value(plan_data, state_data, facts, keys)
+        if value:
+            values.append((trailer_name, value))
+    return values
+
+
+def _first_trailer_value(
+    plan_data: dict[str, object],
+    state_data: dict[str, object],
+    facts: dict[str, WritebackFact],
+    keys: tuple[str, ...],
+) -> str:
+    for key in keys:
+        for value in (plan_data.get(key), facts.get(key).value if key in facts else "", state_data.get(key)):
+            normalized = _normalize_trailer_value(value)
+            if normalized:
+                return normalized
+    return ""
+
+
+def _normalize_trailer_value(value: object) -> str:
+    if isinstance(value, (list, tuple)):
+        return ", ".join(str(item).strip() for item in value if str(item).strip())
+    return re.sub(r"\s+", " ", str(value or "").strip()).rstrip(".")
+
+
+def _git_trailer_suggestion_findings(active_plan: Surface | None, inventory: Inventory) -> list[Finding]:
+    facts = state_writeback_facts(inventory.state)
+    source = active_plan.rel_path if active_plan else (inventory.state.rel_path if inventory.state and inventory.state.exists else None)
+    findings = [
+        Finding(
+            "info",
+            "evidence-git-trailer-boundary",
+            "paste-ready Git trailer suggestions are report text only; evidence does not run Git, stage, commit, amend, push, mutate Git config, install hooks, or write evidence manifests",
+            source,
+        )
+    ]
+    values = git_context_trailer_values(inventory, active_plan, facts)
+    if not values:
+        findings.append(
+            Finding(
+                "info",
+                "evidence-git-trailer-skipped",
+                "no plan, phase, or slice metadata is available for paste-ready Git trailer suggestions",
+                source,
+            )
+        )
+        return findings
+    for trailer_name, value in values:
+        findings.append(Finding("info", "evidence-git-trailer", f"suggestion: {trailer_name}: {value}", source))
     return findings
 
 

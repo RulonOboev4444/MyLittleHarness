@@ -102,6 +102,81 @@ class Inventory:
         return rows
 
 
+@dataclass(frozen=True)
+class TargetArtifactOwnership:
+    artifact: str
+    ownership: str
+    intended_root: str
+    guidance: str
+
+
+PRODUCT_SOURCE_TARGET_PREFIXES = ("build_backend/", "docs/", "src/", "tests/")
+PRODUCT_SOURCE_TARGET_NAMES = {"AGENTS.md", "README.md", "pyproject.toml", "uv.lock"}
+OPERATING_MEMORY_TARGET_PREFIXES = (".agents/", ".codex/", "project/")
+GENERATED_CACHE_TARGET_PREFIXES = (".mylittleharness/generated/",)
+ARCHIVE_EVIDENCE_TARGET_PREFIXES = ("project/archive/",)
+
+
+def target_artifact_ownerships(inventory: Inventory, artifacts: tuple[str, ...] | list[str]) -> tuple[TargetArtifactOwnership, ...]:
+    return tuple(target_artifact_ownership(inventory, artifact) for artifact in artifacts if str(artifact or "").strip())
+
+
+def target_artifact_ownership(inventory: Inventory, artifact: str) -> TargetArtifactOwnership:
+    rel = _normalize_target_artifact(artifact)
+    if not rel:
+        return TargetArtifactOwnership(artifact=artifact, ownership="unknown", intended_root="unknown", guidance="empty target artifact")
+    if rel.startswith(ARCHIVE_EVIDENCE_TARGET_PREFIXES):
+        return TargetArtifactOwnership(rel, "archive-evidence", "operating-root", "historical evidence route; not a live product write target")
+    if rel.startswith(GENERATED_CACHE_TARGET_PREFIXES):
+        return TargetArtifactOwnership(rel, "generated-cache", "generated-output", "disposable generated cache; source files remain authority")
+    if rel.startswith(OPERATING_MEMORY_TARGET_PREFIXES):
+        return TargetArtifactOwnership(rel, "operating-memory-route", "operating-root", "MLH operating memory route owned by the serviced root")
+    if _is_product_source_target_artifact(rel):
+        if inventory.root_kind == "product_source_fixture":
+            return TargetArtifactOwnership(rel, "product-compat-fixture", "product-source-fixture", "product fixture target; not live operating memory")
+        product_root = _configured_product_source_root(inventory)
+        if inventory.root_kind == "live_operating_root" and product_root:
+            return TargetArtifactOwnership(
+                rel,
+                "product-source-artifact",
+                f"product_source_root={product_root}",
+                "edit in configured product_source_root; no automatic mirror or product mutation is implied",
+            )
+        return TargetArtifactOwnership(
+            rel,
+            "unknown",
+            "product-source-uncertain",
+            "source-like target but product_source_root is not configured; keep closeout wording provisional",
+        )
+    return TargetArtifactOwnership(rel, "unknown", "unknown", "no ownership rule matched; inspect the route before mutation")
+
+
+def _normalize_target_artifact(value: str) -> str:
+    rel = str(value or "").strip().replace("\\", "/")
+    while rel.startswith("./"):
+        rel = rel[2:]
+    return rel.strip("/")
+
+
+def _is_product_source_target_artifact(rel: str) -> bool:
+    return rel in PRODUCT_SOURCE_TARGET_NAMES or any(rel.startswith(prefix) for prefix in PRODUCT_SOURCE_TARGET_PREFIXES)
+
+
+def _configured_product_source_root(inventory: Inventory) -> str:
+    state = inventory.state
+    data = state.frontmatter.data if state and state.exists else {}
+    value = str(data.get("product_source_root") or data.get("projection_root") or "").strip()
+    if not value:
+        return ""
+    try:
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            path = inventory.root / path
+        return str(path.resolve())
+    except (OSError, RuntimeError):
+        return value
+
+
 def load_inventory(root: Path | str) -> Inventory:
     root_path = Path(root).expanduser().resolve()
     if not root_path.exists():

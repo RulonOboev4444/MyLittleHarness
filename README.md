@@ -1,10 +1,10 @@
 # MyLittleHarness
 
-MyLittleHarness helps AI-assisted projects keep their truth in the repository.
+MyLittleHarness helps AI-assisted projects keep their truth in the repository, so agents can move with clearer rails and humans stay in control without babysitting every step.
 
-AI coding tools are good at producing code. The harder problem is what happens after a few long sessions: state hides in chat, generated reports start looking official, a cache becomes a source of truth, and the next agent cannot tell what is accepted work and what is only a suggestion.
+AI coding tools are good at producing code. The harder problem is the work around the code: state hides in chat, generated reports start looking official, a cache becomes a source of truth, and the next agent cannot tell what is accepted work and what is only a suggestion.
 
-MyLittleHarness is the small repo-native layer for that moment. It gives agents and developers a shared place to recover project state, inspect workflow posture, preview bounded repair, and close out work without making generated output authoritative.
+MyLittleHarness is the small repo-native layer for that moment. It moves process state out of the prompt and into visible files: current focus, active plans, repair boundaries, docs decisions, verification, and closeout evidence. The repo keeps the truth; tools get better rails; people keep the final say.
 
 It is deliberately not an agent framework, workflow runner, dashboard, scheduler, CI replacement, or control plane. Workflow tools decide what to do next. MyLittleHarness decides what the repository is allowed to treat as true.
 
@@ -17,7 +17,7 @@ Use MyLittleHarness when an AI-assisted repository needs answers like:
 - Which files are authority, and which files are generated cache?
 - Can a new agent recover context from the repo alone?
 - What repair is safe to apply, and what is only a warning?
-- How do we close out work without pretending a report or demo is durable evidence?
+- How do we close out work without pretending a report or throwaway run is durable evidence?
 
 The product formula is intentionally plain:
 
@@ -84,7 +84,7 @@ If the console script is installed, the same target-root command can be shorter:
 mylittleharness --root /path/to/target check
 ```
 
-Apply modes stay explicit and target-bound. Use `repair --apply`, `detach --apply`, or advanced apply rails only after the matching dry-run names the expected target repository and write boundary. Advanced diagnostics exist, but they are not required first-contact steps.
+Apply modes stay explicit and target-bound. Use `repair --apply`, `detach --apply`, or advanced apply rails only after the matching dry-run names the expected target repository and write boundary. Advanced diagnostics exist, but they are not required first-contact steps. `meta-feedback` is opt-in and is not part of the default start pass.
 
 ## Command Shape
 
@@ -93,11 +93,11 @@ Apply modes stay explicit and target-bound. Use `repair --apply`, `detach --appl
 - `repair` previews or applies one bounded repair class at a time.
 - `detach` creates a marker-only detach posture without deleting authority files.
 
-`check` includes compact link/docmap/stale-root/rule-context/remainder drift reporting, including primary instruction-surface size warnings. `check --deep` adds links, context, hygiene, and report-only grain diagnostics. Grain diagnostics inspect active-plan slice size, roadmap mapping/hygiene, and archived-plan calibration samples as advisory signals only. Deeper section-size detail remains in advanced `context-budget` and `doctor` diagnostics. `check --focus validation|links|context|hygiene|grain` runs one focused read-only diagnostic.
+`check` includes compact link/docmap/stale-root/rule-context/remainder drift reporting, live `product_source_root` validation, installed-console command-surface lag warnings for advanced lifecycle sentinels, Deep Research rubric recovery hints, and primary instruction-surface size warnings. `check --deep` adds links, context, hygiene, and report-only grain diagnostics. Grain diagnostics inspect active-plan slice size, roadmap mapping/hygiene, and archived-plan calibration samples as advisory signals only. `check --focus archive-context` audits archived-plan context coverage, missing archive targets, reconstructed source evidence, stale source references, and suspect incomplete-context archives without writing files. `check --focus route-references` inventories missing route references and reports per-class bounded recovery actions with next safe commands, while keeping repair, archive recreation, metadata retargeting, lifecycle movement, and generated-cache rebuilding explicit. `check --focus agents` runs the report-only reconcile/drift view for route, source, evidence, claim, approval, and worker-space residue posture. Deeper section-size detail remains in advanced `context-budget` and `doctor` diagnostics. `check --focus validation|links|context|hygiene|grain|archive-context|route-references|agents` runs one focused read-only diagnostic.
 
-Advanced and compatibility commands remain available for recovery and deeper review: `status`, `validate`, `audit-links`, `context-budget`, `doctor`, `preflight`, `suggest --intent`, `intelligence`, `projection`, `snapshot`, `adapter`, `semantic`, `evidence`, `closeout`, `bootstrap --inspect`, `bootstrap --package-smoke`, explicit `mirror`, explicit `writeback`, explicit `transition`, explicit `incubate`, opt-in `meta-feedback`, explicit `plan`, explicit `memory-hygiene`, and explicit `roadmap`.
+Advanced and compatibility commands remain available for recovery and deeper review: `status`, `validate`, `audit-links`, `context-budget`, `doctor`, `preflight`, `suggest --intent`, `intelligence`, `projection`, `snapshot`, `adapter`, `semantic`, bare `evidence`, `evidence --record`, `reconcile`, `closeout`, `bootstrap --inspect`, `bootstrap --package-smoke`, explicit `research-import`, explicit `research-distill`, explicit `research-compare`, explicit `writeback`, explicit `transition`, explicit `incubate`, opt-in `meta-feedback`, explicit `plan`, explicit `memory-hygiene`, and explicit `roadmap`.
 
-Focused write rails include `incubate --fix-candidate` for standard MLH debt capture, opt-in `meta-feedback --to-root <mlh-dev-root>` for routing observed-root feedback into a central incubation note plus global roadmap placement, `meta-feedback --dedupe-to <canonical-id>` for appending related observations to a canonical friction cluster, `mirror --dry-run|--apply` for declared product-to-demo file parity with product-source rerun guidance and local Python dependency-closure gap reports, `memory-hygiene --archive-covered` with explicit Entry Coverage for terminal incubation cleanup, `writeback --from-active-plan` with project-state closeout authority fallback, and `writeback --product-source-root <path>` for validated clean product source metadata.
+Focused write rails include `incubate --fix-candidate` for standard MLH debt capture, opt-in `meta-feedback --to-root <mlh-dev-root>` for routing observed-root feedback into a central incubation note plus managed cluster metadata, `meta-feedback --dedupe-to <canonical-id>` for appending related observations to a canonical friction cluster, `evidence --record --dry-run|--apply` for one source-bound agent run record in a live operating root, explicit `roadmap --dry-run|--apply` for reviewed promotion of mature clusters into accepted work, `research-distill` quality gates for provisional-vs-planning-ready distillates, `research-compare --archive-sources --repair-links` for reviewed multi-source comparison plus archive-before-removal source cleanup, local Python dependency-closure gap or ok reports, `roadmap normalize --dry-run|--apply` for canonical roadmap item-block housekeeping, `memory-hygiene --archive-covered` with explicit Entry Coverage for terminal incubation cleanup, `writeback --from-active-plan` with project-state closeout authority fallback, and `writeback --product-source-root <path>` for validated clean product source metadata. `memory-hygiene --dry-run --scan` emits reviewable cleanup proposal details for covered incubation candidates, including candidate ids, archive targets, exact link-repair files, a proposal token, and per-candidate dry-run/apply command shapes; the scan itself still has no matching apply mode. `suggest --intent "phase closeout handoff"` and matching writeback refusals surface the reviewed two-step sequence for phase evidence handoff followed by archive closeout replacement, without passing explicit `--active-phase` to the archive command.
 
 ## Safety Model
 
@@ -183,7 +183,7 @@ Wheel, build, and install artifacts are verification outputs only unless a later
 - no mandatory MCP, hooks, CI, IDE, browser, or adapter dependency
 - no broad rollback automation or cleanup by implication
 - no package publishing, global install, PATH/profile edits, user-config mutation, or workstation mutation as part of the current product surface
-- no product-root storage of operating memory, plans, research, archives, generated validation reports, local databases, package artifacts, pycache, or demo residue
+- no product-root storage of operating memory, plans, research, archives, generated validation reports, local databases, package artifacts, pycache, or runtime residue
 
 ## Docs Map
 
@@ -202,6 +202,6 @@ Start at `docs/README.md` for the deeper documentation spine.
 
 ## Docs Decisions
 
-Docs decision values are `updated`, `not-needed`, and `uncertain`. A docs decision is required when behavior, CLI usage, configuration, setup, contract meaning, permissions, output shape, UX/copy, terminology, rollout, migration, or other user-facing meaning changes. Closeout facts live in the marked `project/project-state.md` writeback block; active-plan closeout bullets are derived copies, and `writeback --from-active-plan` may fall back to complete matching project-state closeout authority when the active plan has no explicit closeout section. For phase-only ready-for-closeout handoff, `docs_decision = uncertain` with `phase_status = complete` may replace mismatched stale closeout facts with current plan identity while keeping closeout language provisional.
+Docs decision values are `updated`, `not-needed`, and `uncertain`. A docs decision is required when behavior, CLI usage, configuration, setup, contract meaning, permissions, output shape, UX/copy, terminology, rollout, migration, or other user-facing meaning changes. Closeout facts live in the marked `project/project-state.md` writeback block; active-plan closeout bullets are derived copies, and `writeback --from-active-plan` may fall back to complete matching project-state closeout authority when the active plan has no explicit closeout section. Read-only `closeout` reports ignore project-state closeout blocks whose `plan_id`, `active_plan`, or `archived_plan` identity does not match the current lifecycle target, then prefer active-plan fields instead of emitting stale trailer suggestions. For phase-only ready-for-closeout handoff, `docs_decision = uncertain` with `phase_status = complete` may replace mismatched stale closeout facts with current plan identity while keeping closeout language provisional.
 
 Use `.agents/docmap.yaml`, `audit-links`, `check`, relevant specs, and observed diff evidence as portable inputs. no Codex skill or generated docs-impact report is required for v1.

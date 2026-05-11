@@ -48,6 +48,17 @@ class RoleProfile:
     permissions: tuple[RolePermission, ...]
     forbidden_actions: tuple[str, ...]
     stop_conditions: tuple[str, ...]
+    orchestration_role: str = "specialist"
+    may_spawn_workers: bool = False
+    worker_space_boundary: str = "assigned root and declared write scope only"
+    isolation_contract: tuple[str, ...] = ()
+    fan_in_output_required: tuple[str, ...] = ()
+    work_claim_required: bool = False
+    work_claim_contract: tuple[str, ...] = ()
+    route_receipt_contract: tuple[str, ...] = ()
+    fan_in_authority: str = "coordinator retains lifecycle authority; worker packets are evidence only"
+    runtime_boundary: str = "protocol/report data only; no worker lifecycle writes, hidden daemons, or model calls"
+    coordination_budget: str = "single assigned packet; no hidden retry loop"
 
     def to_manifest(self) -> dict[str, object]:
         permission_rows = tuple(permission.to_manifest() for permission in self.permissions)
@@ -73,6 +84,18 @@ class RoleProfile:
             "human_gates": list(human_gates),
             "forbidden_actions": list(self.forbidden_actions),
             "stop_conditions": list(self.stop_conditions),
+            "orchestration_role": self.orchestration_role,
+            "may_spawn_workers": self.may_spawn_workers,
+            "worker_space_boundary": self.worker_space_boundary,
+            "isolation_contract": list(self.isolation_contract),
+            "fan_in_output_required": list(self.fan_in_output_required),
+            "work_claim_required": self.work_claim_required,
+            "work_claim_contract": list(self.work_claim_contract or COMMON_WORK_CLAIM_CONTRACT),
+            "route_receipt_contract": list(self.route_receipt_contract or COMMON_ROUTE_RECEIPT_CONTRACT),
+            "fan_in_authority": self.fan_in_authority,
+            "runtime_boundary": self.runtime_boundary,
+            "coordination_budget": self.coordination_budget,
+            "authority_boundary": COMMON_ROLE_AUTHORITY_BOUNDARY,
             "apply_authority": any(permission.apply for permission in self.permissions),
             "advisory": True,
         }
@@ -103,6 +126,40 @@ COMMON_STOP_CONDITIONS = (
     "requested write is outside the assigned scope",
     "verification is missing or failed",
     "human gate is required but no reviewed decision is present",
+)
+COMMON_ISOLATION_CONTRACT = (
+    "operate only in the assigned root or isolated worker space",
+    "respect declared allowed routes and write scope",
+    "stop on overlapping claims, stale base revision, missing isolation, or merge conflict",
+)
+COMMON_FAN_IN_OUTPUT = (
+    "changed_paths_or_output_refs",
+    "commands_or_method",
+    "deterministic_verification",
+    "residual_risk",
+)
+COMMON_WORK_CLAIM_CONTRACT = (
+    "claim_id",
+    "run_id",
+    "role_id",
+    "owned_paths",
+    "read_only_paths",
+    "expires_at",
+    "release_condition",
+)
+COMMON_ROUTE_RECEIPT_CONTRACT = (
+    "route_receipt",
+    "route_id",
+    "decision",
+    "dry_run_ref",
+    "apply_ref_or_refusal",
+    "source_hashes",
+    "review_token_status",
+    "boundary_statement",
+)
+COMMON_ROLE_AUTHORITY_BOUNDARY = (
+    "role profiles describe permission, context, and output packet shape only; they do not encode domain reasoning "
+    "authority or approve lifecycle decisions"
 )
 
 
@@ -147,6 +204,8 @@ ROLE_PROFILES: tuple[RoleProfile, ...] = (
             "mark roadmap items done",
         ),
         stop_conditions=COMMON_STOP_CONDITIONS + ("input matches multiple destination routes",),
+        isolation_contract=COMMON_ISOLATION_CONTRACT,
+        fan_in_output_required=COMMON_FAN_IN_OUTPUT + ("target_route",),
     ),
     RoleProfile(
         role_id="researcher",
@@ -165,11 +224,16 @@ ROLE_PROFILES: tuple[RoleProfile, ...] = (
         ),
         forbidden_actions=COMMON_FORBIDDEN_ACTIONS + ("make research findings authoritative",),
         stop_conditions=COMMON_STOP_CONDITIONS + ("source provenance cannot be preserved",),
+        orchestration_role="read_only_worker",
+        worker_space_boundary="read-only source/research packet; no lifecycle writes",
+        isolation_contract=COMMON_ISOLATION_CONTRACT + ("preserve source provenance before fan-in",),
+        fan_in_output_required=COMMON_FAN_IN_OUTPUT + ("citations", "limits_and_uncertainties"),
+        work_claim_required=True,
     ),
     RoleProfile(
         role_id="specifier",
         title="Specifier",
-        purpose="Turn accepted evidence into candidate contracts and amendments.",
+        purpose="Draft candidate contracts and amendments from accepted evidence for review.",
         default_inputs=("research_refs", "incubation_refs", "existing_specs", "decisions"),
         context_packet_requirements=COMMON_CONTEXT_PACKET + ("contract_status",),
         required_outputs=("draft_spec_delta", "affected_contracts", "open_questions"),
@@ -183,11 +247,14 @@ ROLE_PROFILES: tuple[RoleProfile, ...] = (
         ),
         forbidden_actions=COMMON_FORBIDDEN_ACTIONS + ("silently change accepted contracts",),
         stop_conditions=COMMON_STOP_CONDITIONS + ("accepted contract status is unclear",),
+        worker_space_boundary="draft contract packet only until reviewed by coordinator or human",
+        isolation_contract=COMMON_ISOLATION_CONTRACT + ("do not rewrite accepted specs during parallel drafting",),
+        fan_in_output_required=COMMON_FAN_IN_OUTPUT + ("contract_refs", "open_questions"),
     ),
     RoleProfile(
         role_id="planner",
         title="Planner",
-        purpose="Convert accepted intent into a bounded implementation-plan scaffold.",
+        purpose="Convert accepted intent into a bounded implementation-plan scaffold proposal.",
         default_inputs=("roadmap_item", "project_state", "related_specs", "product_target_context"),
         context_packet_requirements=COMMON_CONTEXT_PACKET + ("execution_slice",),
         required_outputs=("plan_scaffold", "write_scope", "verification_gates", "stop_conditions"),
@@ -205,6 +272,11 @@ ROLE_PROFILES: tuple[RoleProfile, ...] = (
             "approve closeout",
         ),
         stop_conditions=COMMON_STOP_CONDITIONS + ("requested slice cannot be bounded",),
+        orchestration_role="coordinator",
+        worker_space_boundary="main operating root plan proposal lane; one active plan at a time",
+        isolation_contract=COMMON_ISOLATION_CONTRACT + ("plan one execution slice without spawning workers",),
+        fan_in_output_required=COMMON_FAN_IN_OUTPUT + ("active_plan_ref", "write_scope"),
+        coordination_budget="one active implementation plan; fan-in requires repo-visible evidence before lifecycle writeback",
     ),
     RoleProfile(
         role_id="coder",
@@ -228,6 +300,15 @@ ROLE_PROFILES: tuple[RoleProfile, ...] = (
             "rewrite accepted specs as part of implementation",
         ),
         stop_conditions=COMMON_STOP_CONDITIONS + ("source reality invalidates the active write scope",),
+        orchestration_role="worker",
+        worker_space_boundary="assigned source write scope or isolated worker space only; no shared lifecycle authority",
+        isolation_contract=COMMON_ISOLATION_CONTRACT
+        + (
+            "hold an explicit handoff or claim before parallel source edits",
+            "return patch evidence instead of writing lifecycle routes",
+        ),
+        fan_in_output_required=COMMON_FAN_IN_OUTPUT + ("changed_paths", "cleanup_status"),
+        work_claim_required=True,
     ),
     RoleProfile(
         role_id="reviewer",
@@ -246,6 +327,11 @@ ROLE_PROFILES: tuple[RoleProfile, ...] = (
         ),
         forbidden_actions=COMMON_FORBIDDEN_ACTIONS + ("approve release alone",),
         stop_conditions=COMMON_STOP_CONDITIONS + ("patch scope cannot be matched to the plan",),
+        orchestration_role="read_only_worker",
+        worker_space_boundary="review packet only; may not fan in or approve lifecycle",
+        isolation_contract=COMMON_ISOLATION_CONTRACT + ("review from source refs and supplied diff only",),
+        fan_in_output_required=COMMON_FAN_IN_OUTPUT + ("review_findings",),
+        work_claim_required=True,
     ),
     RoleProfile(
         role_id="verifier",
@@ -263,6 +349,11 @@ ROLE_PROFILES: tuple[RoleProfile, ...] = (
         ),
         forbidden_actions=COMMON_FORBIDDEN_ACTIONS + ("change scope or product promises",),
         stop_conditions=COMMON_STOP_CONDITIONS + ("deterministic success signal is missing",),
+        orchestration_role="worker",
+        worker_space_boundary="verification lane only; may record evidence proposals but not lifecycle decisions",
+        isolation_contract=COMMON_ISOLATION_CONTRACT + ("commands must be deterministic and named before fan-in",),
+        fan_in_output_required=COMMON_FAN_IN_OUTPUT + ("commands", "verdict"),
+        work_claim_required=True,
     ),
     RoleProfile(
         role_id="devops-sandbox-operator",
@@ -286,11 +377,16 @@ ROLE_PROFILES: tuple[RoleProfile, ...] = (
             "decide architecture",
         ),
         stop_conditions=COMMON_STOP_CONDITIONS + ("command requires destructive or sensitive host access",),
+        orchestration_role="worker",
+        worker_space_boundary="approved command sandbox only; no workstation adoption or secret ownership",
+        isolation_contract=COMMON_ISOLATION_CONTRACT + ("name environment, ports, databases, and cleanup before use",),
+        fan_in_output_required=COMMON_FAN_IN_OUTPUT + ("artifacts", "environment_notes", "cleanup_status"),
+        work_claim_required=True,
     ),
     RoleProfile(
         role_id="reconciler",
         title="Reconciler",
-        purpose="Compare intended contracts with observed code and evidence, then propose drift handling.",
+        purpose="Compare intended contracts with observed code and evidence, then propose drift-handling candidates.",
         default_inputs=("spec_refs", "code_refs", "evidence_refs", "diff"),
         context_packet_requirements=COMMON_CONTEXT_PACKET + ("drift_basis",),
         required_outputs=("drift_record", "classification", "proposal", "affected_authority"),
@@ -304,6 +400,10 @@ ROLE_PROFILES: tuple[RoleProfile, ...] = (
         ),
         forbidden_actions=COMMON_FORBIDDEN_ACTIONS + ("silently normalize authority to implementation",),
         stop_conditions=COMMON_STOP_CONDITIONS + ("contract and implementation cannot be compared from source refs",),
+        orchestration_role="coordinator",
+        worker_space_boundary="drift proposal lane only; no accepted truth rewrite during fan-in",
+        isolation_contract=COMMON_ISOLATION_CONTRACT + ("classify drift before proposing any mutation",),
+        fan_in_output_required=COMMON_FAN_IN_OUTPUT + ("drift_refs", "classification"),
     ),
     RoleProfile(
         role_id="archivist",
@@ -322,6 +422,11 @@ ROLE_PROFILES: tuple[RoleProfile, ...] = (
         ),
         forbidden_actions=COMMON_FORBIDDEN_ACTIONS + ("delete unresolved provenance",),
         stop_conditions=COMMON_STOP_CONDITIONS + ("entry coverage is incomplete",),
+        orchestration_role="coordinator",
+        worker_space_boundary="archive proposal lane; one archive transaction at a time",
+        isolation_contract=COMMON_ISOLATION_CONTRACT + ("coverage evidence must exist before archive fan-in",),
+        fan_in_output_required=COMMON_FAN_IN_OUTPUT + ("archive_refs", "provenance_summary"),
+        coordination_budget="single archive transaction; unresolved coverage stays active",
     ),
     RoleProfile(
         role_id="governor",
@@ -346,6 +451,17 @@ ROLE_PROFILES: tuple[RoleProfile, ...] = (
             "depend on hidden memory",
         ),
         stop_conditions=COMMON_STOP_CONDITIONS + ("review token or source hash has drifted",),
+        orchestration_role="coordinator",
+        worker_space_boundary="main operating root lifecycle coordinator only",
+        isolation_contract=COMMON_ISOLATION_CONTRACT
+        + (
+            "one reviewed dry-run/apply transition at a time",
+            "workers return evidence packets rather than lifecycle writes",
+        ),
+        fan_in_output_required=COMMON_FAN_IN_OUTPUT + ("review_token_status", "route_write_evidence"),
+        fan_in_authority="governor/coordinator retains lifecycle authority; route receipts and review tokens are evidence only",
+        runtime_boundary="protocol/report data only; no worker lifecycle writes, hidden daemons, model calls, or provider gateway",
+        coordination_budget="single lifecycle coordinator; fan-in requires evidence packet and matching review token",
     ),
 )
 ROLE_PROFILE_BY_ID = {profile.role_id: profile for profile in ROLE_PROFILES}

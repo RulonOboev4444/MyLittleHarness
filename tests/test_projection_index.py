@@ -33,9 +33,20 @@ class ProjectionIndexTests(unittest.TestCase):
             self.assertTrue(index_path.is_file())
             with closing(sqlite3.connect(index_path)) as connection:
                 metadata = dict(connection.execute("SELECT key, value FROM metadata").fetchall())
+                table_names = {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type IN ('table', 'view')"
+                    ).fetchall()
+                }
                 source_count = connection.execute("SELECT COUNT(*) FROM source_records").fetchone()[0]
+                path_count = connection.execute("SELECT COUNT(*) FROM path_rows").fetchone()[0]
+                path_fts_count = connection.execute("SELECT COUNT(*) FROM path_fts").fetchone()[0]
                 row = connection.execute(
                     "SELECT source_path, line_start, line_end, source_hash, source_role, source_type, indexed_text, provenance FROM index_rows ORDER BY row_id LIMIT 1"
+                ).fetchone()
+                path_row = connection.execute(
+                    "SELECT row_kind, source_path, line_number, target_path, indexed_text, provenance FROM path_rows ORDER BY row_id LIMIT 1"
                 ).fetchone()
 
             self.assertEqual(str(INDEX_SCHEMA_VERSION), metadata["schema_version"])
@@ -44,11 +55,20 @@ class ProjectionIndexTests(unittest.TestCase):
             self.assertEqual("true", metadata["fts5_available"])
             self.assertEqual("true", metadata["bm25_available"])
             self.assertEqual("mylittleharness-sqlite-fts-bm25-projection", metadata["index_kind"])
+            self.assertTrue({"path_rows", "path_fts"}.issubset(table_names))
             self.assertGreater(source_count, 0)
+            self.assertGreater(path_count, 0)
+            self.assertEqual(path_count, path_fts_count)
+            self.assertEqual(str(path_count), metadata["path_row_count"])
             self.assertIsNotNone(row)
             self.assertEqual(row[1], row[2])
             self.assertEqual("inventory-surface", row[5])
             self.assertIn(f"{row[0]}:{row[1]}", row[7])
+            self.assertIsNotNone(path_row)
+            self.assertEqual("source", path_row[0])
+            self.assertEqual(path_row[1], path_row[3])
+            self.assertEqual(path_row[1], path_row[4])
+            self.assertEqual(path_row[1], path_row[5])
             metadata_text = json.dumps(metadata, sort_keys=True)
             for forbidden in ("plan_status", "active_plan", "repair approved", "closeout", "commit"):
                 self.assertNotIn(forbidden, metadata_text)
@@ -99,6 +119,28 @@ class ProjectionIndexTests(unittest.TestCase):
             self.assertIn("projection-index-stale", rendered)
             self.assertIn("projection-index-count", rendered)
             self.assertIn("projection-index-unexpected-sidecar", rendered)
+            self.assertIn("next_safe_command=mylittleharness --root <root> projection --rebuild --target all", rendered)
+
+    def test_projection_index_inspect_reports_missing_path_navigation_tables(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=False)
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--root", str(root), "projection", "--build", "--target", "index"]), 0)
+
+            index_path = root / INDEX_REL_PATH
+            with closing(sqlite3.connect(index_path)) as connection:
+                connection.execute("DROP TABLE path_fts")
+                connection.execute("DROP TABLE path_rows")
+                connection.commit()
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "projection", "--inspect", "--target", "index"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("expected SQLite index table is missing: path_fts", rendered)
+            self.assertIn("expected SQLite index table is missing: path_rows", rendered)
 
     def test_projection_index_inspect_reports_corrupt_database(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -326,7 +368,7 @@ class ProjectionIndexTests(unittest.TestCase):
 
             attach_output = io.StringIO()
             with redirect_stdout(attach_output):
-                attach_code = main(["--root", str(root), "attach", "--apply", "--project", "Demo"])
+                attach_code = main(["--root", str(root), "attach", "--apply", "--project", "Sample"])
             repair_output = io.StringIO()
             with redirect_stdout(repair_output):
                 repair_code = main(["--root", str(root), "repair", "--apply"])

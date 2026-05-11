@@ -90,6 +90,7 @@ class ProjectionArtifactTests(unittest.TestCase):
             self.assertIn("projection-artifact-corrupt", rendered)
             self.assertIn("projection-artifact-schema", rendered)
             self.assertIn("projection-artifact-root-mismatch", rendered)
+            self.assertIn("next_safe_command=mylittleharness --root <root> projection --rebuild --target all", rendered)
 
     def test_projection_inspect_reports_v2_integrity_unexpected_v1_and_malformed_payloads(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -121,6 +122,7 @@ class ProjectionArtifactTests(unittest.TestCase):
             self.assertIn("stale v1 projection artifacts", rendered)
             self.assertIn("projection-artifact-malformed", rendered)
             self.assertIn("projection-artifact-hash", rendered)
+            self.assertIn("next_safe_command=mylittleharness --root <root> projection --rebuild --target all", rendered)
 
     def test_projection_delete_and_rebuild_are_idempotent_and_bound_to_projection_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -197,7 +199,7 @@ class ProjectionArtifactTests(unittest.TestCase):
 
             attach_output = io.StringIO()
             with redirect_stdout(attach_output):
-                attach_code = main(["--root", str(root), "attach", "--apply", "--project", "Demo"])
+                attach_code = main(["--root", str(root), "attach", "--apply", "--project", "Sample"])
             repair_output = io.StringIO()
             with redirect_stdout(repair_output):
                 repair_code = main(["--root", str(root), "repair", "--apply"])

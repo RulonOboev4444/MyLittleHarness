@@ -18,7 +18,7 @@ The supported distribution posture is deliberately local before publication. Sou
 
 The first-run path is source checkout first, package-smoke when the operator wants package evidence, and target-repository `init` / `check` / `repair` / `detach` after that. `bootstrap --inspect`, publishing, global install, workstation adoption, semantic/provider setup, MCP clients, hooks, and CI are progressive-disclosure or future-contract surfaces, not prerequisites for first-contact correctness.
 
-The default operating-root start pass is file and shell based: read `AGENTS.md`, `.codex/project-workflow.toml`, `project/project-state.md`, and the active plan only when `plan_status = "active"` or the operator asks about plan/phase/closeout; use `active_phase` and `phase_status` as the structured continuation pointers when present; use `check` before mutation; use `.agents/docmap.yaml`, `audit-links`, and relevant specs as docs-routing inputs when user-facing meaning changes. No skill, IDE rule, MCP client, hook, CI job, or workstation adoption step is part of the correctness path.
+The default operating-root start pass is file and shell based: read `AGENTS.md`, `.codex/project-workflow.toml`, `project/project-state.md`, and the active plan only when `plan_status = "active"` or the operator asks about plan/phase/closeout; use `active_phase` and `phase_status` as the structured continuation pointers when present; use `check` before mutation; use `.agents/docmap.yaml`, `audit-links`, and relevant specs as docs-routing inputs when user-facing meaning changes. Meta-feedback is an opt-in capture rail, not a default start-pass requirement. No skill, IDE rule, MCP client, hook, CI job, or workstation adoption step is part of the correctness path.
 
 The formula is:
 
@@ -27,6 +27,7 @@ Files hold authority; metadata routes; Git records durable history; generated pr
 ## Design Axioms
 
 - Authority before automation: automation may suggest, summarize, validate, report, or project, but accepted decisions live in repo-visible artifacts.
+- Rails, not cognition: MLH may route, store, validate, warn, and preserve provenance for agent or human work, but it must not perform the substantive research, synthesis, planning judgment, or prompt authorship that belongs to the active agent/human operator.
 - Repo-native recovery: the harness must remain understandable without installed skills, hooks, MCP clients, GitHub, browser state, IDE state, CI, SQLite, or hidden runtimes.
 - Portable docs decisions: behavior, CLI, config, setup, contract, permissions, output shape, UX/copy, terminology, rollout, migration, or other user-facing changes require an explicit `docs_decision` of `updated`, `not-needed`, or `uncertain`; `uncertain` prevents confident closeout wording. The MLH-owned closeout writeback block in `project/project-state.md` is the current closeout fact authority, while active-plan frontmatter/body copies and project-state hot pointers are derived diagnostics synchronized by `writeback --apply`; optional roadmap sync records only same-request writeback facts plus plan relationships.
 - Git-native evidence first: when a repository uses Git, durable closeout history should prefer commit metadata such as trailers over generated evidence files.
@@ -122,7 +123,7 @@ Release evidence must include tests, smoke matrices, docs audits, product-root a
 - Semantic matches as mutation, repair, closeout, archive, commit, lifecycle authority.
 - Mandatory adapters or hook-only correctness.
 - Issue-board or CI state as project authority.
-- Product-root contamination with plans, research, archives, logs, caches, generated reports, local databases, or demo residue.
+- Product-root contamination with plans, research, archives, logs, caches, generated reports, local databases, or runtime residue.
 - Wholesale adoption of external candidate systems.
 - Operational boundary changes from docs alone.
 - Any extra operating layer, supervisor, evidence authority, or product runtime between MyLittleHarness and the target repository.

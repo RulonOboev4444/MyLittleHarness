@@ -8,6 +8,7 @@ from pathlib import Path
 from .inventory import Inventory, Surface
 from .models import Finding
 from .parsing import Heading, extract_headings, parse_frontmatter
+from .roadmap_semantics import roadmap_item_is_terminal_history_stub
 
 
 REQUIRED_PLAN_FRONTMATTER = (
@@ -284,7 +285,7 @@ def _roadmap_grain_findings(inventory: Inventory, active_stats: PlanGrainStats |
         verification_summary = _field_scalar(item.fields, "verification_summary")
         archived_plan = _field_scalar(item.fields, "archived_plan")
         related_plan = _field_scalar(item.fields, "related_plan")
-        if status == "done" and not archived_plan:
+        if status == "done" and not archived_plan and not roadmap_item_is_terminal_history_stub(item):
             findings.append(
                 Finding(
                     "warn",

@@ -35,7 +35,7 @@ Reusable MyLittleHarness behavior attaches to and services the target repository
 | Risk | Known portable rule | Remains to design | Must not happen |
 | --- | --- | --- | --- |
 | Product/operating boundary | Product docs and source stay separate from operating memory unless an explicit product plan changes that boundary. | Portable setup guidance for future operating-root changes. | Treating product docs or fixtures as live operating memory. |
-| Product-root contamination | Product source excludes active plans, research/history/raw intake, archives, logs, caches, local databases, generated reports, and demo residue. | Hygiene checks for each operator setup. | Using product source as the place for operating research, reports, or runtime output. |
+| Product-root contamination | Product source excludes active plans, research/history/raw intake, archives, logs, caches, local databases, generated reports, and runtime residue. | Hygiene checks for each operator setup. | Using product source as the place for operating research, reports, or runtime output. |
 | Adapter fail-open | Adapters can help, but correctness remains recoverable from repo files. | Adapter-specific test contracts and failure messages. | Making a skill, MCP server, browser session, IDE, GitHub state, or CI result mandatory for recovery. |
 | Generated state subordinate | Generated views are rebuildable, disposable, subordinate, inspectable, and fail open to files. | Storage paths, rebuild commands, and report retention boundaries. | Letting generated output become the only copy of decisions, focus, plan status, or carry-forward fate. |
 | Configurable roots/bootstrap | Local paths are operator evidence, not public product law. | Portable root config, platform differences, setup validation, and generated-output boundaries. | Hardcoding one workstation layout as reusable product contract. |
@@ -49,7 +49,7 @@ Reusable MyLittleHarness behavior attaches to and services the target repository
 - Raw external intake.
 - Old candidate studies.
 - Old migration evidence.
-- Demo residue.
+- Runtime residue.
 - Broad historical rationale.
 - Package/source mirror history.
 - Local path assumptions except as operator evidence.

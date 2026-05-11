@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import ast
 import difflib
 import glob
 import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -21,12 +23,32 @@ from .inventory import (
     LinkRef,
     Surface,
     load_inventory,
+    target_artifact_ownerships,
 )
 from .lifecycle_focus import CURRENT_FOCUS_BEGIN, CURRENT_FOCUS_END, MEMORY_ROADMAP_BEGIN, MEMORY_ROADMAP_END
 from .models import Finding
-from .memory_hygiene import relationship_hygiene_scan_findings
-from .roadmap import roadmap_order_namespace_findings, roadmap_terminal_related_plan_findings
-from .projection import Projection, ProjectionLinkRecord, build_projection, product_target_artifact_reason
+from .memory_hygiene import (
+    ARCHIVE_VERIFICATION_DIR_REL,
+    VERIFICATION_DIR_REL,
+    VERIFICATION_LEDGER_CONTINUITY_MARKER,
+    relationship_hygiene_scan_findings,
+)
+from .parsing import extract_path_refs, parse_frontmatter
+from .product_hygiene_checks import product_hygiene_findings
+from .roadmap import (
+    ROADMAP_REL,
+    roadmap_acceptance_readiness_findings,
+    roadmap_items_for_diagnostics,
+    roadmap_order_namespace_findings,
+    roadmap_compacted_dependency_archive_evidence_findings,
+    roadmap_done_docs_archive_evidence_findings,
+    roadmap_human_review_gate_findings,
+    roadmap_related_specs_evidence_findings,
+    roadmap_source_incubation_evidence_findings,
+    roadmap_terminal_related_plan_findings,
+)
+from .roadmap_semantics import roadmap_item_is_terminal_history_stub
+from .projection import Projection, ProjectionLinkRecord, build_projection, historical_link_context_reason, product_target_artifact_reason
 from .projection_artifacts import (
     ARTIFACT_DIR_REL,
     build_projection_artifacts,
@@ -35,6 +57,10 @@ from .projection_artifacts import (
     rebuild_projection_artifacts,
 )
 from .projection_index import INDEX_REL_PATH, build_projection_index, full_text_search_findings, inspect_projection_index, rebuild_projection_index
+from .research_recovery import (
+    deep_research_rubric_recovery_findings,
+    deep_research_rubric_recovery_target_label,
+)
 from .routes import (
     INTAKE_ROUTE_ALLOWED_TARGETS,
     INTAKE_ROUTE_DEFAULT_STATUS,
@@ -69,6 +95,18 @@ FAN_IN_RESULT_LIMIT = 20
 CURRENT_PHASE_ONLY_POLICY = "current-phase-only"
 CENTRAL_META_FEEDBACK_PROJECT = "MyLittleHarness-dev"
 META_FEEDBACK_ROOT_ENV_VAR = "MYLITTLEHARNESS_META_FEEDBACK_ROOT"
+COMMAND_SURFACE_SENTINEL_COMMANDS = ("transition", "roadmap", "meta-feedback")
+COMMAND_SURFACE_PROBE_TIMEOUT_SECONDS = 5
+RETIRED_COMMAND_DOC_SURFACES = ("mirror", "research-prompt")
+PRODUCT_DOC_COPY_DRIFT_SURFACES = (
+    "README.md",
+    "docs/README.md",
+    "docs/specs/attach-repair-status-cli.md",
+    ".agents/docmap.yaml",
+)
+DEFAULT_PLAN_REL = "project/implementation-plan.md"
+PHASE_WRITEBACK_BEGIN = "<!-- BEGIN mylittleharness-phase-writeback v1 -->"
+PHASE_WRITEBACK_END = "<!-- END mylittleharness-phase-writeback v1 -->"
 AUTO_CONTINUE_STOP_COVERAGE = (
     ("verification", ("verification", "deterministic success", "success signal")),
     ("authority", ("docs", "api", "lifecycle authority", "root classification")),
@@ -78,75 +116,6 @@ AUTO_CONTINUE_STOP_COVERAGE = (
     ("closeout_boundary", ("closeout", "archive", "next-slice", "next slice")),
 )
 
-PRODUCT_HYGIENE_OPERATIONAL_PREFIXES = {
-    "project/implementation-plan.md": "active implementation plans live in the operating root",
-    "project/roadmap.md": "roadmaps live in the operating root",
-    "project/adrs": "ADR records live in the operating root",
-    "project/decisions": "decision and do-not-revisit records live in the operating root",
-    "project/archive": "archives and historical memory live in the operating root",
-    "project/incubator": "legacy incubator notes must use canonical project/plan-incubation in the operating root",
-    "project/plan-incubation": "incubation notes live in the operating root",
-    "project/problem-reports": "problem reports and new intake live in the operating root",
-    "project/raw-intake": "raw intake lives in the operating root",
-    "project/research": "research and raw intake live in the operating root",
-    "project/reports": "reports live in the operating root",
-    "project/verification": "verification artifacts live in the operating root",
-}
-PRODUCT_HYGIENE_PACKAGE_PREFIXES = {
-    "codex-home": "skill projections are not part of the clean product source tree",
-    "research": "root research mirrors are excluded from the product source tree",
-    "specs": "root package-source mirrors are excluded from the product source tree",
-    "templates": "templates are package-source material, not product source",
-}
-PRODUCT_HYGIENE_DEBRIS_DIR_NAMES = {
-    ".cache",
-    ".eggs",
-    ".mypy_cache",
-    ".nox",
-    ".pytest_cache",
-    ".ruff_cache",
-    ".tox",
-    ".venv",
-    "__pycache__",
-    "artifacts",
-    "build",
-    "cache",
-    "dist",
-    "generated-validation",
-    "htmlcov",
-    "logs",
-    "reports",
-    "tmp",
-    "validation-artifacts",
-}
-PRODUCT_HYGIENE_DEBRIS_FILE_SUFFIXES = {
-    ".bak",
-    ".db",
-    ".egg",
-    ".log",
-    ".pyc",
-    ".pyo",
-    ".swo",
-    ".swp",
-    ".temp",
-    ".sqlite",
-    ".sqlite3",
-    ".tmp",
-    ".whl",
-    ".zip",
-}
-PRODUCT_HYGIENE_DEBRIS_FILE_NAMES = {
-    ".coverage",
-    "coverage.xml",
-    "validation-report.md",
-}
-PRODUCT_HYGIENE_ARCHIVE_SUFFIXES = (
-    ".tar",
-    ".tar.bz2",
-    ".tar.gz",
-    ".tar.xz",
-    ".tgz",
-)
 EXPECTED_PRODUCT_NAME = "MyLittleHarness"
 EXPECTED_PRODUCT_ROOT_ROLE = "product-source"
 EXPECTED_PRODUCT_FIXTURE_STATUS = "product-compatibility-fixture"
@@ -159,6 +128,7 @@ ROOT_RELATIVE_LINK_PREFIXES = (
     "specs/",
     "src/",
     "tests/",
+    "build_backend/",
 )
 ROOT_RELATIVE_LINK_NAMES = {"README.md", "AGENTS.md", "pyproject.toml"}
 SNAPSHOT_REPAIR_ROOT_REL = ".mylittleharness/snapshots/repair"
@@ -277,6 +247,44 @@ PHASE_STATUS_VALUES = {
 }
 PHASE_BODY_TERMINAL_STATUS_VALUES = {"complete", "done", "skipped"}
 DOCS_DECISION_VALUES = {"updated", "not-needed", "uncertain"}
+SPEC_STATUS_VALUES = ("draft", "accepted", "superseded", "archived")
+SPEC_IMPLEMENTATION_POSTURE_VALUES = (
+    "not-applicable",
+    "target-only",
+    "in-progress",
+    "partially-verified",
+    "synced",
+    "drift-detected",
+    "deprecated-compat",
+    "retired",
+)
+SPEC_LIFECYCLE_FIELDS = ("spec_status", "implementation_posture")
+SPEC_IMPLEMENTATION_EVIDENCE_FIELDS = (
+    "implemented_by",
+    "verification_refs",
+    "related_verification",
+    "closeout_evidence",
+    "implementation_evidence",
+)
+SPEC_CARRY_FORWARD_FIELDS = (
+    "carry_forward",
+    "related_plan",
+    "related_roadmap",
+    "related_decision",
+    "related_adr",
+    "amendment_plan",
+    "replan_route",
+    "drift_record",
+    "superseded_by",
+)
+SPEC_SUPERSESSION_TARGET_FIELDS = (
+    "superseded_by",
+    "replacement",
+    "replacement_route",
+    "retirement_path",
+    "deprecation_path",
+    "archived_to",
+)
 ROUTE_METADATA_VALIDATED_ROUTES = {"adrs", "decisions", "incubation", "research", "roadmap", "stable-specs", "verification"}
 ROUTE_METADATA_STATUS_VALUES = {
     "accepted",
@@ -295,6 +303,8 @@ ROUTE_METADATA_STATUS_VALUES = {
     "in_progress",
     "in-progress",
     "partial",
+    "partially-verified",
+    "partially_verified",
     "passed",
     "paused",
     "pending",
@@ -303,7 +313,54 @@ ROUTE_METADATA_STATUS_VALUES = {
     "rejected",
     "research-ready",
     "skipped",
+    "stale",
+    "synced",
+    "drift-detected",
+    "drift_detected",
     "superseded",
+}
+ROUTE_METADATA_STATUS_HINTS_BY_ROUTE = {
+    "adrs": ("draft", "accepted", "superseded", "archived"),
+    "decisions": ("draft", "accepted", "superseded", "archived"),
+    "incubation": ("incubating", "implemented", "rejected", "superseded", "archived", "stale"),
+    "research": ("imported", "distilled", "research-ready", "accepted", "superseded", "archived", "stale"),
+    "roadmap": ("proposed", "accepted", "active", "blocked", "done", "deferred", "rejected", "superseded"),
+    "stable-specs": ("draft", "accepted", "synced", "stale", "superseded", "archived"),
+    "verification": ("pending", "passed", "failed", "partial", "partially-verified", "archived"),
+}
+ROUTE_METADATA_LIFECYCLE_STATES = {
+    "draft": (
+        "intake recorded but not accepted as implementation truth",
+        "mylittleharness --root <root> intake --dry-run --text \"<text>\"",
+    ),
+    "accepted": (
+        "explicitly accepted for planning or route ownership, but not implemented by that fact alone",
+        "mylittleharness --root <root> plan --dry-run --roadmap-item <id>",
+    ),
+    "synced": (
+        "declared source and evidence are aligned as of the latest recorded check",
+        "mylittleharness --root <root> check",
+    ),
+    "partially_verified": (
+        "some evidence exists, but deterministic verification is incomplete",
+        "mylittleharness --root <root> evidence",
+    ),
+    "stale": (
+        "recorded source or evidence may lag current repo-visible authority",
+        "mylittleharness --root <root> check --deep",
+    ),
+    "drift_detected": (
+        "repo-visible authority disagrees with recorded route metadata or evidence",
+        "mylittleharness --root <root> suggest --intent reconcile drift",
+    ),
+    "superseded": (
+        "route has been replaced and should point at superseding authority before reuse",
+        "mylittleharness --root <root> check",
+    ),
+    "archived": (
+        "route is historical evidence only unless explicitly reopened through a lifecycle command",
+        "mylittleharness --root <root> check",
+    ),
 }
 ROUTE_METADATA_SCALAR_PATH_FIELDS = {"archived_to", "promoted_to"}
 ROUTE_METADATA_FLEXIBLE_PATH_FIELDS = {
@@ -322,6 +379,7 @@ ROUTE_METADATA_FLEXIBLE_PATH_FIELDS = {
     "related_verification",
     "archived_plan",
     "source_incubation",
+    "source_members",
     "source_roadmap",
     "source_research",
     "implemented_by",
@@ -344,6 +402,80 @@ ROUTE_METADATA_PROMOTION_TARGET_ROUTES = {
     "state",
     "verification",
 }
+ARCHIVE_CONTEXT_ARCHIVE_DIR_REL = "project/archive/plans"
+ARCHIVE_CONTEXT_SOURCE_FIELDS = ("source_incubation", "related_incubation", "source_research", "related_research")
+ARCHIVE_CONTEXT_ARCHIVED_SOURCE_PREFIXES = (
+    ("project/plan-incubation/", "project/archive/reference/incubation/"),
+    ("project/research/", "project/archive/reference/research/"),
+)
+ROUTE_REFERENCE_SCAN_EXTRA_GLOBS = (
+    "project/archive/plans/*.md",
+    "project/archive/reference/**/*.md",
+    ".mylittleharness/generated/projection/**/*.json",
+)
+ROUTE_REFERENCE_METADATA_FIELDS = frozenset(
+    {
+        "active_plan",
+        "last_archived_plan",
+        "dependencies",
+        "slice_dependencies",
+        "target_artifacts",
+        "covered_roadmap_items",
+        *ROUTE_METADATA_SCALAR_PATH_FIELDS,
+        *ROUTE_METADATA_FLEXIBLE_PATH_FIELDS,
+    }
+)
+ROUTE_REFERENCE_ACCEPTED_STATUSES = {"active", "accepted", "in_progress", "in-progress", "pending"}
+ROUTE_REFERENCE_TERMINAL_STATUSES = {"done", "complete", "implemented", "archived", "superseded", "rejected"}
+ROUTE_REFERENCE_WARN_CLASSES = {"required-lifecycle-evidence", "accepted-work-evidence", "stale-metadata"}
+ROUTE_REFERENCE_TEXT_REF_RE = re.compile(
+    r"(?<![\w:/.-])"
+    r"((?:\.mylittleharness|\.agents|\.codex|docs|project|specs|src|tests)/[A-Za-z0-9_./{}*\-]+"
+    r"|README\.md|AGENTS\.md|pyproject\.toml)"
+    r"(?![\w/.-])"
+)
+ROUTE_REFERENCE_TEXT_ONLY_LABELS = {
+    "docs/api",
+    "docs/spec/package",
+    "docs/tests",
+    "tests/check",
+    "tests/checks",
+    "tests/docs",
+}
+ROUTE_REFERENCE_OPTIONAL_EVIDENCE_ROUTES = {
+    "project/verification/agent-runs",
+    "project/verification/approval-packets",
+    "project/verification/work-claims",
+}
+ROUTE_REFERENCE_SAMPLE_LIMIT = 12
+ARCHIVE_CONTEXT_RECONSTRUCTED_MARKERS = (
+    "reconstructed",
+    "recovered from roadmap",
+    "recreated from roadmap",
+    "restored from roadmap",
+    "recovered note",
+    "source evidence was recovered",
+)
+ARCHIVE_CONTEXT_SUSPECT_MARKERS = (
+    "suspect-incomplete",
+    "proceeded from compact roadmap",
+    "compact roadmap title/carry_forward only",
+    "source notes were missing",
+    "missing source notes",
+    "incomplete input context",
+)
+ARCHIVE_CONTEXT_DIAGNOSTIC_MARKERS = (
+    "archive context completeness audit",
+    "archive-context-completeness-audit",
+    "context-completeness audit",
+    "diagnostic/reporting only",
+    "bounded recovery actions",
+    "accepted roadmap source_incubation evidence can be absent without a targeted check",
+    "missing accepted-item source_incubation evidence",
+    "suggest a bounded recovery route",
+)
+ARCHIVE_CONTEXT_SAMPLE_LIMIT = 12
+ARCHIVE_CONTEXT_CAUSE_SAMPLE_LIMIT = 5
 LIFECYCLE_ROUTE_ROWS = lifecycle_route_rows()
 
 
@@ -353,6 +485,33 @@ class IntakeRequest:
     text_source: str
     title: str
     target: str
+
+
+@dataclass(frozen=True)
+class ArchiveContextRouteRef:
+    owner: str
+    field: str
+    status: str
+    source: str
+    line: int | None = None
+
+
+@dataclass(frozen=True)
+class RouteReferenceRecord:
+    target: str
+    source: str
+    line: int | None
+    owner: str
+    field: str
+    owner_status: str = ""
+    context: str = ""
+
+
+@dataclass(frozen=True)
+class RouteReferenceRecoveryGuidance:
+    action: str
+    next_safe_command: str
+    boundary: str
 
 
 def make_intake_request(text: str | None, text_source: str, title: str | None, target: str | None) -> IntakeRequest:
@@ -369,16 +528,18 @@ def intake_dry_run_findings(inventory: Inventory, request: IntakeRequest) -> lis
         Finding("info", "intake-dry-run", "intake route proposal only; no files were written"),
         Finding("info", "intake-root-posture", f"root kind: {inventory.root_kind}"),
     ]
+    advice = classify_intake_text(request.text)
     errors = _intake_request_errors(inventory, request, apply=False)
     if errors:
         findings.extend(_with_severity(errors, "warn"))
+        findings.extend(_intake_incubation_fallback_findings(request, advice))
         findings.append(Finding("info", "intake-validation-posture", "dry-run refused before apply; classify the input and rerun dry-run before writing intake"))
         return findings
 
-    advice = classify_intake_text(request.text)
     findings.extend(_intake_advice_findings(advice, request, prefix="would "))
     if request.target:
         findings.extend(_intake_target_preview_findings(request, advice))
+    findings.extend(_intake_incubation_fallback_findings(request, advice))
     findings.extend(_intake_boundary_findings())
     findings.append(
         Finding(
@@ -505,7 +666,7 @@ def _meta_feedback_destination_status_findings(inventory: Inventory) -> list[Fin
                 "meta-feedback-central-destination",
                 (
                     f"this root is the central {CENTRAL_META_FEEDBACK_PROJECT} destination for canonical "
-                    "MLH-Fix-Candidate incubation notes and accepted roadmap placement; observed roots remain provenance"
+                    "MLH-Fix-Candidate incubation notes and cluster metadata; observed roots remain provenance"
                 ),
                 inventory.state.rel_path if inventory.state else None,
             )
@@ -682,13 +843,172 @@ def validation_findings(inventory: Inventory) -> list[Finding]:
     findings.extend(_product_posture_findings(inventory))
     findings.extend(_active_plan_findings(inventory))
     findings.extend(_spec_findings(inventory))
+    findings.extend(_spec_lifecycle_posture_findings(inventory))
     findings.extend(_frontmatter_findings(inventory))
     findings.extend(_route_metadata_findings(inventory))
     findings.extend(roadmap_order_namespace_findings(inventory))
     findings.extend(roadmap_terminal_related_plan_findings(inventory))
+    findings.extend(roadmap_source_incubation_evidence_findings(inventory))
+    findings.extend(roadmap_related_specs_evidence_findings(inventory))
+    findings.extend(roadmap_human_review_gate_findings(inventory))
+    findings.extend(deep_research_rubric_recovery_findings(inventory))
+    findings.extend(roadmap_compacted_dependency_archive_evidence_findings(inventory))
+    findings.extend(roadmap_done_docs_archive_evidence_findings(inventory))
+    findings.extend(roadmap_acceptance_readiness_findings(inventory))
+    findings.extend(_target_artifact_ownership_findings(inventory))
+    findings.extend(_verification_ledger_status_findings(inventory))
+    findings.extend(_working_memory_compaction_rail_findings(inventory))
     findings.extend(_docmap_findings(inventory))
     findings.extend(_mirror_findings(inventory))
     return findings
+
+
+def _working_memory_compaction_rail_findings(inventory: Inventory) -> list[Finding]:
+    if inventory.root_kind != "live_operating_root":
+        return []
+    return [
+        Finding(
+            "info",
+            "check-working-memory-compaction-rails",
+            (
+                "working-memory compaction is explicit and source-bound: project-state uses "
+                "writeback --dry-run --compact-only followed by writeback --apply --compact-only --source-hash <sha256>; "
+                "verification ledgers use memory-hygiene --dry-run --rotate-ledger followed by --apply --rotate-ledger --source-hash <sha256>; "
+                "memory-hygiene candidates stay read-only at --dry-run --scan until a per-source dry-run/apply or later token-bound rail is reviewed; "
+                "no hidden memory database, provider memory, daemon, closeout approval, archive approval, staging, commit, push, dependency adoption, or next-plan opening is implied"
+            ),
+            "project/project-state.md",
+        )
+    ]
+
+
+def _verification_ledger_status_findings(inventory: Inventory) -> list[Finding]:
+    if inventory.root_kind != "live_operating_root":
+        return []
+    active_dir = inventory.root / VERIFICATION_DIR_REL
+    archive_dir = inventory.root / ARCHIVE_VERIFICATION_DIR_REL
+    active_ledgers = _regular_markdown_files(active_dir)
+    archived_ledgers = _regular_markdown_files(archive_dir, recursive=True)
+    if not active_ledgers and not archived_ledgers:
+        return []
+    findings = [
+        Finding(
+            "info",
+            "check-verification-ledger-status",
+            (
+                f"verification ledger posture: active={len(active_ledgers)} under {VERIFICATION_DIR_REL}; "
+                f"archived={len(archived_ledgers)} under {ARCHIVE_VERIFICATION_DIR_REL}"
+            ),
+        )
+    ]
+    for path in active_ledgers:
+        rel_path = path.relative_to(inventory.root).as_posix()
+        text = _read_text_best_effort(path)
+        if VERIFICATION_LEDGER_CONTINUITY_MARKER in text:
+            findings.append(
+                Finding(
+                    "info",
+                    "check-verification-ledger-active",
+                    f"fresh active verification ledger with continuity pointer: {rel_path}",
+                    rel_path,
+                )
+            )
+        else:
+            findings.append(
+                Finding("info", "check-verification-ledger-active", f"active verification ledger: {rel_path}", rel_path)
+            )
+    if archived_ledgers:
+        examples = ", ".join(path.relative_to(inventory.root).as_posix() for path in archived_ledgers[:3])
+        if len(archived_ledgers) > 3:
+            examples += f", +{len(archived_ledgers) - 3} more"
+        findings.append(
+            Finding(
+                "info",
+                "check-verification-ledger-archive",
+                (
+                    f"archived verification ledger evidence is historical, not active continuation state: "
+                    f"{len(archived_ledgers)} file(s); examples: {examples}"
+                ),
+                ARCHIVE_VERIFICATION_DIR_REL,
+            )
+        )
+    return findings
+
+
+def _regular_markdown_files(path: Path, *, recursive: bool = False) -> list[Path]:
+    if not path.is_dir() or path.is_symlink():
+        return []
+    iterator = path.rglob("*.md") if recursive else path.glob("*.md")
+    return sorted(candidate for candidate in iterator if candidate.is_file() and not candidate.is_symlink())
+
+
+def _read_text_best_effort(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def _target_artifact_ownership_findings(inventory: Inventory) -> list[Finding]:
+    if inventory.root_kind != "live_operating_root":
+        return []
+    findings: list[Finding] = []
+    if inventory.active_plan_surface and inventory.active_plan_surface.exists:
+        artifacts = _target_artifact_values(inventory.active_plan_surface.frontmatter.data.get("target_artifacts"))
+        findings.extend(
+            _target_artifact_ownership_summary_findings(
+                inventory,
+                artifacts,
+                "check-target-artifact-ownership",
+                inventory.active_plan_surface.rel_path,
+                "active plan",
+            )
+        )
+    roadmap_items, parse_findings = roadmap_items_for_diagnostics(inventory)
+    findings.extend(parse_findings)
+    for item_id, item in sorted(roadmap_items.items()):
+        status = str(item.fields.get("status") or "").strip().casefold()
+        if status not in {"active", "accepted", "proposed"}:
+            continue
+        artifacts = _target_artifact_values(item.fields.get("target_artifacts"))
+        findings.extend(
+            _target_artifact_ownership_summary_findings(
+                inventory,
+                artifacts,
+                "check-target-artifact-ownership",
+                ROADMAP_REL,
+                f"roadmap item {item_id}",
+                line=item.start + 1,
+            )
+        )
+    return findings
+
+
+def _target_artifact_ownership_summary_findings(
+    inventory: Inventory,
+    artifacts: tuple[str, ...],
+    code: str,
+    source: str,
+    label: str,
+    *,
+    line: int | None = None,
+) -> list[Finding]:
+    records = target_artifact_ownerships(inventory, artifacts)
+    if not records:
+        return []
+    summary = "; ".join(f"{record.artifact}->{record.ownership} ({record.intended_root})" for record in records)
+    guidance = "; ".join(sorted({record.guidance for record in records}))
+    return [Finding("info", code, f"{label} target artifact ownership: {summary}; guidance: {guidance}", source, line)]
+
+
+def _target_artifact_values(value: object) -> tuple[str, ...]:
+    if value in (None, ""):
+        return ()
+    if isinstance(value, str):
+        return (value.strip(),) if value.strip() else ()
+    if isinstance(value, (list, tuple)):
+        return tuple(str(item).strip() for item in value if str(item or "").strip())
+    return (str(value).strip(),) if str(value).strip() else ()
 
 
 def _incubation_contract_findings(inventory: Inventory) -> list[Finding]:
@@ -768,6 +1088,8 @@ def _projection_cache_status(findings: list[Finding], current_code: str, missing
     codes = [finding.code for finding in findings]
     if any(code.endswith("fts5-unavailable") for code in codes):
         return "unavailable", _projection_cache_sample(codes)
+    if "projection-cache-operation-in-progress" in codes:
+        return "updating", "projection-cache-operation-in-progress"
     if missing_code in codes:
         return "missing", missing_code
     if any(
@@ -784,7 +1106,13 @@ def _projection_cache_status(findings: list[Finding], current_code: str, missing
 
 
 def _projection_cache_sample(codes: list[str]) -> str:
-    selected = [code for code in codes if not code.endswith("boundary")]
+    selected: list[str] = []
+    seen: set[str] = set()
+    for code in codes:
+        if code.endswith("boundary") or code in seen:
+            continue
+        seen.add(code)
+        selected.append(code)
     return ",".join(selected[:3]) if selected else "no-detail"
 
 
@@ -840,7 +1168,11 @@ def _large_rule_context_message(inventory: Inventory, surface: Surface, label: s
         f"{surface.char_count} chars, label={label}; use context-budget for section detail"
     )
     if inventory.root_kind == "live_operating_root" and surface.rel_path == "project/project-state.md":
-        message += "; preview/apply whole-state history compaction with writeback --dry-run --compact-only, then writeback --apply --compact-only after review"
+        message += (
+            "; preview/apply whole-state history compaction with writeback --dry-run --compact-only, "
+            "then writeback --apply --compact-only --source-hash <sha256-from-dry-run> after review; "
+            "next_safe_command=mylittleharness --root <root> writeback --dry-run --compact-only"
+        )
     return message
 
 
@@ -1018,6 +1350,8 @@ def audit_link_findings(inventory: Inventory) -> list[Finding]:
             if key in seen:
                 continue
             seen.add(key)
+            if link.source != "markdown-link" and _route_reference_is_text_only_label(_normalized_link_path(link.target)):
+                continue
             resolution = resolve_link(inventory.root, link.target, surface.rel_path)
             if resolution.kind == "external":
                 skipped_external += 1
@@ -1043,6 +1377,18 @@ def audit_link_findings(inventory: Inventory) -> list[Finding]:
                             )
                         )
                         continue
+                    historical_context_reason = historical_link_context_reason(surface, link.target, link.line)
+                    if historical_context_reason:
+                        findings.append(
+                            Finding(
+                                "info",
+                                "historical-link-context",
+                                f"{link.target} is not present; {historical_context_reason}",
+                                surface.rel_path,
+                                link.line,
+                            )
+                        )
+                        continue
                     findings.append(
                         Finding(
                             "info",
@@ -1061,6 +1407,18 @@ def audit_link_findings(inventory: Inventory) -> list[Finding]:
                             "info",
                             "product-target-artifact",
                             f"{link.target} is not present in the operating root; {product_target_reason}",
+                            surface.rel_path,
+                            link.line,
+                        )
+                    )
+                    continue
+                historical_context_reason = historical_link_context_reason(surface, link.target, link.line)
+                if historical_context_reason:
+                    findings.append(
+                        Finding(
+                            "info",
+                            "historical-link-context",
+                            f"{link.target} is not present; {historical_context_reason}",
                             surface.rel_path,
                             link.line,
                         )
@@ -1116,6 +1474,7 @@ def intelligence_sections(
     sections = [
         ("Boundary", _intelligence_boundary_findings(inventory, search_text, path_text, full_text)),
         ("Drift", diagnostic_drift_findings(inventory)),
+        ("Recovery Routes", deep_research_rubric_recovery_findings(inventory, include_present=True)),
         ("Repo Map", _repo_map_findings(projection)),
         ("Backlinks", _backlink_findings(projection.links)),
         ("Search", _search_findings(inventory, projection, search_text, path_text, full_text, limit, query_expansion)),
@@ -1259,6 +1618,9 @@ def _intelligence_query_label(search_text: str | None, path_text: str | None, fu
 
 def _intelligence_recovery_targets(inventory: Inventory) -> str:
     targets: list[str] = []
+    rubric_target = deep_research_rubric_recovery_target_label(inventory)
+    if rubric_target:
+        targets.append(rubric_target)
     for rel_path in (
         inventory.state.rel_path if inventory.state else "",
         inventory.active_plan_surface.rel_path if inventory.active_plan_surface else "",
@@ -3083,6 +3445,7 @@ def _repair_proposal_for(finding: Finding) -> Finding:
         "active-plan-manifest": "align active_plan with manifest memory.plan_file after confirming the active plan location",
         "stale-plan-file": "archive, remove, or reactivate the stale plan only through the operating root closeout path",
         "roadmap-terminal-stale-active-plan-link": "run a bounded roadmap, plan, or writeback sync to retarget the terminal roadmap relationship to archived_plan or clear it",
+        "roadmap-done-docs-archive-evidence-gap": "run check --focus archive-context, then restore or retarget archived evidence before finalizing docs_decision",
         "missing-stable-spec": "restore the expected workflow spec fixture from product docs or the operating source of truth",
         "frontmatter-parse": "fix malformed markdown frontmatter without changing body authority",
         "research-frontmatter": "add lightweight routing frontmatter only if the research artifact remains durable",
@@ -5183,27 +5546,6 @@ def _path_stays_within_root(root: Path, target: Path) -> bool:
         return False
 
 
-def product_hygiene_findings(inventory: Inventory) -> list[Finding]:
-    if not _is_product_source_inventory(inventory):
-        return [Finding("info", "product-hygiene-scope", "product hygiene check skipped because root is not marked as product source")]
-
-    findings: list[Finding] = []
-    for path, rel_path in _iter_hygiene_paths(inventory.root):
-        classification = _classify_product_hygiene_path(path, rel_path)
-        if classification is None:
-            continue
-        code, reason = classification
-        if code == "forbidden-product-surface":
-            message = f"operational surface must not live in product root: {rel_path}; {reason}"
-        else:
-            message = f"unexpected product-root debris: {rel_path}; {reason}; report only, no deletion performed"
-        findings.append(Finding("warn", code, message, rel_path))
-
-    if not findings:
-        findings.append(Finding("info", "product-hygiene-ok", "no product-root debris found"))
-    return findings
-
-
 class LinkResolution:
     def __init__(self, kind: str, exists: bool = False) -> None:
         self.kind = kind
@@ -5222,7 +5564,7 @@ def resolve_link(root: Path, target: str, source_rel: str | None = None) -> Link
     if not path_part:
         return LinkResolution("anchor", True)
     base = _link_base(root, path_part, source_rel)
-    if any(char in path_part for char in "*?[]{}"):
+    if any(char in path_part for char in "*?[]{}<>"):
         patterns = _expand_brace_pattern(path_part)
         exists = False
         for pattern in patterns:
@@ -5292,8 +5634,61 @@ def _state_findings(inventory: Inventory) -> list[Finding]:
             findings.append(Finding("error", "state-frontmatter-field", f"project-state.md missing frontmatter key: {key}", state.rel_path))
     if inventory.root_kind == "live_operating_root":
         findings.extend(_live_product_source_root_findings(inventory, state))
+        findings.extend(_live_product_command_surface_findings(inventory, state))
+        findings.extend(_live_product_doc_copy_drift_findings(inventory, state))
+        findings.extend(_stale_phase_writeback_tail_findings(state))
         findings.extend(_state_lifecycle_prose_drift_findings(state))
     return findings
+
+
+def _stale_phase_writeback_tail_findings(state: Surface) -> list[Finding]:
+    plan_status = str(state.frontmatter.data.get("plan_status") or "")
+    if plan_status not in {"none", ""}:
+        return []
+
+    findings: list[Finding] = []
+    lines = state.content.splitlines()
+    for start, end in _marker_spans(state.content, PHASE_WRITEBACK_BEGIN, PHASE_WRITEBACK_END):
+        active_plan_line = _marked_block_field_line(lines, start, end, "active_plan", DEFAULT_PLAN_REL)
+        if active_plan_line is None:
+            continue
+        findings.append(
+            Finding(
+                "warn",
+                "state-stale-phase-writeback-tail",
+                (
+                    "project-state frontmatter records plan_status='none' while an older MLH Phase Writeback block "
+                    f"still references {DEFAULT_PLAN_REL}; treat that block as historical carry-forward only, and use "
+                    "writeback/transition archive or whole-state compaction for any reviewed cleanup; this diagnostic "
+                    "does not approve lifecycle movement, archive, repair, staging, or commit"
+                ),
+                state.rel_path,
+                active_plan_line,
+            )
+        )
+    return findings
+
+
+def _marked_block_field_line(lines: list[str], start: int, end: int, field: str, expected_value: str) -> int | None:
+    expected = expected_value.replace("\\", "/").casefold()
+    for line_number in range(start + 1, end):
+        line = lines[line_number - 1]
+        match = re.match(rf"^\s*[-*]\s*`?{re.escape(field)}`?\s*:\s*(.+?)\s*$", line, re.IGNORECASE)
+        if not match:
+            continue
+        value = _normalized_block_field_value(match.group(1))
+        if value == expected:
+            return line_number
+    return None
+
+
+def _normalized_block_field_value(value: str) -> str:
+    raw = _display_path_value(value).strip()
+    if raw.startswith("`") and raw.endswith("`") and len(raw) >= 2:
+        raw = raw[1:-1].strip()
+    if (raw.startswith('"') and raw.endswith('"')) or (raw.startswith("'") and raw.endswith("'")):
+        raw = raw[1:-1].strip()
+    return raw.replace("\\", "/").casefold()
 
 
 def _state_lifecycle_prose_drift_findings(state: Surface) -> list[Finding]:
@@ -5358,6 +5753,7 @@ def _managed_state_spans(text: str) -> list[tuple[int, int]]:
         (CURRENT_FOCUS_BEGIN, CURRENT_FOCUS_END),
         (MEMORY_ROADMAP_BEGIN, MEMORY_ROADMAP_END),
         ("<!-- BEGIN mylittleharness-closeout-writeback v1 -->", "<!-- END mylittleharness-closeout-writeback v1 -->"),
+        (PHASE_WRITEBACK_BEGIN, PHASE_WRITEBACK_END),
     ):
         spans.extend(_marker_spans(text, begin, end))
     return spans
@@ -5407,9 +5803,18 @@ def _line_says_no_active_plan_is_open(normalized_line: str) -> bool:
 
 
 def _live_product_source_root_findings(inventory: Inventory, state: Surface) -> list[Finding]:
+    resolved, problem = _resolve_live_product_source_root(inventory, state)
+    if problem:
+        return [problem]
+    if not resolved:
+        return []
+    return [Finding("info", "product-source-root-ok", f"product_source_root exists: {resolved}", state.rel_path)]
+
+
+def _resolve_live_product_source_root(inventory: Inventory, state: Surface) -> tuple[Path | None, Finding | None]:
     value = state.frontmatter.data.get("product_source_root")
     if not value:
-        return []
+        return None, None
     text = _display_path_value(str(value)).strip()
     try:
         candidate = Path(text).expanduser()
@@ -5417,18 +5822,188 @@ def _live_product_source_root_findings(inventory: Inventory, state: Surface) -> 
             candidate = inventory.root / candidate
         resolved = candidate.resolve()
     except (OSError, RuntimeError) as exc:
-        return [Finding("warn", "product-source-root-invalid", f"product_source_root could not be resolved: {exc}", state.rel_path)]
+        return None, Finding("warn", "product-source-root-invalid", f"product_source_root could not be resolved: {exc}", state.rel_path)
     try:
         root_resolved = inventory.root.resolve()
     except (OSError, RuntimeError):
         root_resolved = inventory.root
     if not resolved.exists():
-        return [Finding("warn", "product-source-root-missing", f"product_source_root does not exist: {text}", state.rel_path)]
+        return None, Finding("warn", "product-source-root-missing", f"product_source_root does not exist: {text}", state.rel_path)
     if not resolved.is_dir():
-        return [Finding("warn", "product-source-root-invalid", f"product_source_root is not a directory: {text}", state.rel_path)]
+        return None, Finding("warn", "product-source-root-invalid", f"product_source_root is not a directory: {text}", state.rel_path)
     if str(resolved).casefold() == str(root_resolved).casefold():
-        return [Finding("warn", "product-source-root-invalid", "product_source_root points at the operating root", state.rel_path)]
-    return [Finding("info", "product-source-root-ok", f"product_source_root exists: {resolved}", state.rel_path)]
+        return None, Finding("warn", "product-source-root-invalid", "product_source_root points at the operating root", state.rel_path)
+    return resolved, None
+
+
+def _live_product_command_surface_findings(inventory: Inventory, state: Surface) -> list[Finding]:
+    product_root, problem = _resolve_live_product_source_root(inventory, state)
+    if problem or not product_root:
+        return []
+    product_commands = _product_source_command_names(product_root)
+    expected = [command for command in COMMAND_SURFACE_SENTINEL_COMMANDS if command in product_commands]
+    if not expected:
+        return []
+    console_script = shutil.which("mylittleharness")
+    if not console_script:
+        return []
+
+    missing: list[str] = []
+    probe_errors: list[str] = []
+    for command in expected:
+        accepts, error = _console_script_accepts_command(console_script, command)
+        if error:
+            probe_errors.append(f"{command}: {error}")
+        elif not accepts:
+            missing.append(command)
+
+    findings: list[Finding] = []
+    product_src = product_root / "src"
+    if missing:
+        findings.append(
+            Finding(
+                "warn",
+                "installed-cli-command-surface-lag",
+                (
+                    f"installed mylittleharness console script at {console_script} is missing product_source_root command(s): "
+                    f"{', '.join(missing)}; use `PYTHONPATH={product_src} python -m mylittleharness --root <root> ...` "
+                    "or explicitly install/mirror the updated CLI after review; diagnostic only, with no automatic install, mirror, lifecycle movement, closeout, archive, staging, or commit"
+                ),
+                state.rel_path,
+            )
+        )
+    if probe_errors:
+        findings.append(
+            Finding(
+                "warn",
+                "installed-cli-command-surface-probe",
+                (
+                    f"could not fully probe installed mylittleharness command surface at {console_script}: "
+                    f"{'; '.join(probe_errors)}; use `PYTHONPATH={product_src} python -m mylittleharness --root <root> ...` "
+                    "or explicitly install/mirror the updated CLI after review; command-surface diagnostics are read-only and advisory"
+                ),
+                state.rel_path,
+            )
+        )
+    if not findings:
+        findings.append(
+            Finding(
+                "info",
+                "installed-cli-command-surface-current",
+                f"installed mylittleharness console script accepts product_source_root sentinel command(s): {', '.join(expected)}",
+                state.rel_path,
+            )
+        )
+    return findings
+
+
+def _product_source_command_names(product_root: Path) -> set[str]:
+    cli_path = product_root / "src" / "mylittleharness" / "cli.py"
+    try:
+        source = cli_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return set()
+    try:
+        module = ast.parse(source)
+    except SyntaxError:
+        return set()
+    for node in module.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(target, ast.Name) and target.id == "COMMANDS" for target in node.targets):
+            continue
+        return _literal_string_collection(node.value)
+    return set()
+
+
+def _literal_string_collection(node: ast.AST) -> set[str]:
+    if not isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        return set()
+    values: set[str] = set()
+    for item in node.elts:
+        if isinstance(item, ast.Constant) and isinstance(item.value, str):
+            values.add(item.value)
+    return values
+
+
+def _live_product_doc_copy_drift_findings(inventory: Inventory, state: Surface) -> list[Finding]:
+    product_root, problem = _resolve_live_product_source_root(inventory, state)
+    if problem or not product_root:
+        return []
+    product_commands = _product_source_command_names(product_root)
+    if not product_commands:
+        return []
+
+    findings: list[Finding] = []
+    for surface in _product_doc_copy_drift_surfaces(inventory):
+        for command in RETIRED_COMMAND_DOC_SURFACES:
+            if command in product_commands:
+                continue
+            line_number = _first_command_shaped_reference_line(surface.content, command)
+            if line_number is None:
+                continue
+            findings.append(
+                Finding(
+                    "warn",
+                    "product-doc-copy-retired-command-drift",
+                    (
+                        f"{surface.rel_path} references retired command `{command}` while product_source_root command surface "
+                        f"at {product_root} no longer exposes it; update or retarget the operating-root doc copy after review. "
+                        "Diagnostic only: no automatic cross-root copy, install, mirror, repair approval, lifecycle movement, "
+                        "archive, staging, or commit is implied."
+                    ),
+                    surface.rel_path,
+                    line_number,
+                )
+            )
+    return findings
+
+
+def _product_doc_copy_drift_surfaces(inventory: Inventory) -> list[Surface]:
+    surfaces: list[Surface] = []
+    for rel_path in PRODUCT_DOC_COPY_DRIFT_SURFACES:
+        surface = inventory.surface_by_rel.get(rel_path)
+        if surface and surface.exists and surface.content:
+            surfaces.append(surface)
+    return surfaces
+
+
+def _first_command_shaped_reference_line(content: str, command: str) -> int | None:
+    backticked = re.compile(rf"`{re.escape(command)}(?:`|\s+--)")
+    quoted_scalar = re.compile(rf"(?<![\w-])['\"]{re.escape(command)}['\"](?![\w-])")
+    bare_with_option = re.compile(rf"(?<![\w-]){re.escape(command)}\s+--")
+    for line_number, line in enumerate(content.splitlines(), start=1):
+        if backticked.search(line) or quoted_scalar.search(line) or bare_with_option.search(line):
+            return line_number
+    return None
+
+
+def _console_script_accepts_command(console_script: str, command: str) -> tuple[bool, str]:
+    probe_env = {key: value for key, value in os.environ.items() if key.upper() != "PYTHONPATH"}
+    try:
+        completed = subprocess.run(
+            [console_script, command, "--help"],
+            capture_output=True,
+            text=True,
+            timeout=COMMAND_SURFACE_PROBE_TIMEOUT_SECONDS,
+            check=False,
+            env=probe_env,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, str(exc)
+    if completed.returncode == 0:
+        return True, ""
+    return False, _console_script_probe_error(completed.stdout, completed.stderr)
+
+
+def _console_script_probe_error(stdout: str, stderr: str) -> str:
+    combined = "\n".join(part for part in (stdout, stderr) if part)
+    if not re.search(r"\b(Traceback|ImportError|ModuleNotFoundError)\b", combined):
+        return ""
+    lines = [line.strip() for line in combined.splitlines() if line.strip()]
+    if not lines:
+        return "console script exited before command help could be inspected"
+    return lines[-1][:240]
 
 
 def _has_read_only_state_assignments(state: Surface) -> bool:
@@ -5574,7 +6149,7 @@ def _active_plan_findings(inventory: Inventory) -> list[Finding]:
                 Finding(
                     "warn",
                     "active-phase-field",
-                    "plan_status is active but active_phase is empty; record the current plan phase explicitly",
+                    "plan_status is active but active_phase is empty; record the current plan phase explicitly; next_safe_command=mylittleharness --root <root> writeback --dry-run --active-phase <phase-id> --phase-status pending",
                     state.rel_path if state else None,
                 )
             )
@@ -5584,7 +6159,7 @@ def _active_plan_findings(inventory: Inventory) -> list[Finding]:
                 Finding(
                     "warn",
                     "phase-status-field",
-                    "plan_status is active but phase_status is empty; record one of: active, blocked, complete, in_progress, paused, pending, skipped",
+                    "plan_status is active but phase_status is empty; record one of: active, blocked, complete, in_progress, paused, pending, skipped; next_safe_command=mylittleharness --root <root> writeback --dry-run --phase-status <value>",
                     state.rel_path if state else None,
                 )
             )
@@ -5593,7 +6168,7 @@ def _active_plan_findings(inventory: Inventory) -> list[Finding]:
                 Finding(
                     "warn",
                     "phase-status-value",
-                    f"phase_status is {phase_status!r}; expected one of: active, blocked, complete, in_progress, paused, pending, skipped",
+                    f"phase_status is {phase_status!r}; expected one of: active, blocked, complete, in_progress, paused, pending, skipped; next_safe_command=mylittleharness --root <root> writeback --dry-run --phase-status <value>",
                     state.rel_path if state else None,
                 )
             )
@@ -6302,7 +6877,7 @@ def _active_plan_docs_decision_findings(plan: Surface, state_data: dict[str, obj
             Finding(
                 "warn",
                 "active-plan-docs-decision-uncertain",
-                "active plan frontmatter docs_decision is uncertain while phase_status is complete; record updated/not-needed or keep closeout language provisional",
+                "active plan frontmatter docs_decision is uncertain while phase_status is complete; record updated/not-needed or keep closeout language provisional; next_safe_command=mylittleharness --root <root> suggest --intent \"docs decision closeout\"",
                 plan.rel_path,
             )
         ]
@@ -6351,6 +6926,21 @@ def _active_plan_writeback_drift_findings(inventory: Inventory, plan: Surface, s
                     body_fact.line,
                 )
             )
+    if findings and closeout_values_are_complete({field: fact.value for field, fact in facts.items()}):
+        findings.append(
+            Finding(
+                "info",
+                "active-plan-writeback-drift-rail",
+                (
+                    "matching project-state closeout authority is complete; preview the atomic closeout/archive rail with "
+                    "`mylittleharness --root <root> writeback --dry-run --archive-active-plan`, which carries those facts "
+                    "into the archived plan copy and retargets closeout identity before any apply. Use non-archive "
+                    "writeback only when the plan should stay active; this report does not approve archive, roadmap done-status, "
+                    "staging, commit, rollback, or next-plan opening"
+                ),
+                plan.rel_path,
+            )
+        )
     return findings
 
 
@@ -6383,9 +6973,18 @@ def _active_plan_work_result_capsule_findings(inventory: Inventory, plan: Surfac
 
     normalized = fact.value.casefold()
     has_result = "result:" in normalized
-    has_change = "what changed:" in normalized or "what was done:" in normalized
-    has_check = "how it was checked:" in normalized or "verification" in normalized
-    has_remaining = "what remains:" in normalized or "no required follow-up" in normalized
+    has_change = _work_result_contains_any_label(normalized, ("what changed:", "what was done:"))
+    has_check = _work_result_contains_any_label(
+        normalized,
+        (
+            "how it was checked:",
+            "how checked:",
+            "checked by:",
+            "verification:",
+            "verification",
+        ),
+    )
+    has_remaining = _work_result_contains_any_label(normalized, ("what remains:", "no required follow-up"))
     if not (has_result and has_change and has_check and has_remaining):
         return [
             Finding(
@@ -6393,7 +6992,8 @@ def _active_plan_work_result_capsule_findings(inventory: Inventory, plan: Surfac
                 "active-plan-work-result-capsule-thin",
                 (
                     "project-state MLH closeout writeback has work_result, but it does not read like a complete "
-                    "plain-language capsule; include Result, What changed or What was done, How it was checked, and What remains"
+                    "plain-language capsule; include Result, What changed or What was done, How it was checked "
+                    "(or How checked/Verification), and What remains"
                 ),
                 fact.source,
                 fact.line,
@@ -6411,6 +7011,10 @@ def _active_plan_work_result_capsule_findings(inventory: Inventory, plan: Surfac
     ]
 
 
+def _work_result_contains_any_label(normalized_text: str, labels: tuple[str, ...]) -> bool:
+    return any(label in normalized_text for label in labels)
+
+
 def _spec_findings(inventory: Inventory) -> list[Finding]:
     findings: list[Finding] = []
     existing = {surface.path.name for surface in inventory.surfaces if surface.role == "stable-spec" and surface.exists}
@@ -6418,6 +7022,276 @@ def _spec_findings(inventory: Inventory) -> list[Finding]:
         if name not in existing:
             findings.append(Finding("error", "missing-stable-spec", f"missing expected workflow spec: project/specs/workflow/{name}"))
     return findings
+
+
+def _spec_lifecycle_posture_findings(inventory: Inventory) -> list[Finding]:
+    if inventory.root_kind != "live_operating_root":
+        return []
+
+    plan_facing_specs = _plan_facing_spec_paths(inventory)
+    findings: list[Finding] = []
+    for surface in inventory.present_surfaces:
+        if not _is_spec_lifecycle_surface(surface):
+            continue
+        if surface.frontmatter.errors:
+            continue
+
+        has_lifecycle_fields = any(key in surface.frontmatter.data for key in SPEC_LIFECYCLE_FIELDS)
+        posture_required = surface.rel_path in plan_facing_specs or has_lifecycle_fields
+        if not posture_required:
+            continue
+
+        if not surface.frontmatter.has_frontmatter:
+            findings.append(_spec_posture_missing_finding(surface, "frontmatter", None))
+            continue
+
+        spec_status, status_findings = _spec_lifecycle_field_value(
+            surface,
+            "spec_status",
+            SPEC_STATUS_VALUES,
+            "spec-status-value",
+        )
+        implementation_posture, posture_findings = _spec_lifecycle_field_value(
+            surface,
+            "implementation_posture",
+            SPEC_IMPLEMENTATION_POSTURE_VALUES,
+            "spec-implementation-posture-value",
+        )
+        findings.extend(status_findings)
+        findings.extend(posture_findings)
+        if not spec_status or not implementation_posture:
+            continue
+
+        findings.append(
+            Finding(
+                "info",
+                "spec-posture-state",
+                (
+                    f"{surface.rel_path} spec_status='{spec_status}' and "
+                    f"implementation_posture='{implementation_posture}' are tracked separately; "
+                    "docs_decision remains closeout-local"
+                ),
+                surface.rel_path,
+            )
+        )
+
+        if implementation_posture == "synced" and not _spec_has_any_field_value(surface, SPEC_IMPLEMENTATION_EVIDENCE_FIELDS):
+            findings.append(
+                Finding(
+                    "warn",
+                    "spec-synced-without-verification",
+                    (
+                        f"{surface.rel_path} implementation_posture='synced' has no verification_refs, "
+                        "related_verification, implemented_by, closeout_evidence, or implementation_evidence; "
+                        "reconcile is read-only and cannot infer implementation approval"
+                    ),
+                    surface.rel_path,
+                    _frontmatter_key_line(surface, "implementation_posture"),
+                    route_id=surface.memory_route,
+                    requires_human_gate=True,
+                    gate_class="authority",
+                    human_gate_reason="sync claims require source-bound verification or closeout evidence",
+                    allowed_decisions=("add-verification", "mark-partial", "amend-spec"),
+                )
+            )
+
+        if implementation_posture == "target-only":
+            if _spec_has_any_field_value(surface, SPEC_IMPLEMENTATION_EVIDENCE_FIELDS):
+                findings.append(
+                    Finding(
+                        "warn",
+                        "spec-target-only-has-implementation-evidence",
+                        (
+                            f"{surface.rel_path} implementation_posture='target-only' but implementation evidence "
+                            "fields are present; reconcile should propose posture review without rewriting the spec"
+                        ),
+                        surface.rel_path,
+                        _frontmatter_key_line(surface, "implementation_posture"),
+                        route_id=surface.memory_route,
+                        requires_human_gate=True,
+                        gate_class="authority",
+                        human_gate_reason="target-only specs with evidence need explicit posture review",
+                        allowed_decisions=("keep-target-only", "mark-in-progress", "mark-partially-verified", "mark-synced"),
+                    )
+                )
+            elif spec_status == "accepted":
+                findings.append(
+                    Finding(
+                        "info",
+                        "spec-target-only-preserved",
+                        (
+                            f"{surface.rel_path} is accepted target-only spec authority; do not delete it solely "
+                            "because implementation evidence is absent"
+                        ),
+                        surface.rel_path,
+                        _frontmatter_key_line(surface, "implementation_posture"),
+                        route_id=surface.memory_route,
+                        requires_human_gate=True,
+                        gate_class="authority",
+                        human_gate_reason="spec deletion, supersession, or retirement requires explicit human-gated lifecycle action",
+                        allowed_decisions=("keep-target-only", "supersede", "archive", "implement"),
+                    )
+                )
+
+        if implementation_posture == "drift-detected" and not _spec_has_any_field_value(surface, SPEC_CARRY_FORWARD_FIELDS):
+            findings.append(
+                Finding(
+                    "warn",
+                    "spec-drift-detected-without-carry-forward",
+                    (
+                        f"{surface.rel_path} implementation_posture='drift-detected' has no carry_forward, "
+                        "related plan/roadmap/decision/ADR, amendment plan, replan route, drift record, or supersession target"
+                    ),
+                    surface.rel_path,
+                    _frontmatter_key_line(surface, "implementation_posture"),
+                    route_id=surface.memory_route,
+                    requires_human_gate=True,
+                    gate_class="authority",
+                    human_gate_reason="drift resolution requires explicit amendment, replan, or carry-forward evidence",
+                    allowed_decisions=("record-carry-forward", "amend-spec", "replan", "supersede"),
+                )
+            )
+
+        if (
+            spec_status == "superseded" or implementation_posture in {"deprecated-compat", "retired"}
+        ) and not _spec_has_any_field_value(surface, SPEC_SUPERSESSION_TARGET_FIELDS):
+            findings.append(
+                Finding(
+                    "warn",
+                    "spec-superseded-without-target",
+                    (
+                        f"{surface.rel_path} records spec_status='{spec_status}' and "
+                        f"implementation_posture='{implementation_posture}' without superseded_by, replacement, "
+                        "retirement_path, deprecation_path, or archived_to; supersession, deprecation, "
+                        "and retirement require a named replacement or retirement path"
+                    ),
+                    surface.rel_path,
+                    _frontmatter_key_line(surface, "spec_status") or _frontmatter_key_line(surface, "implementation_posture"),
+                    route_id=surface.memory_route,
+                    requires_human_gate=True,
+                    gate_class="authority",
+                    human_gate_reason="supersession, deprecation, and retirement require a named replacement or retirement path",
+                    allowed_decisions=("add-replacement", "add-retirement-path", "archive", "amend-spec"),
+                )
+            )
+
+    if findings:
+        findings.append(
+            Finding(
+                "info",
+                "spec-reconcile-authority",
+                (
+                    "spec lifecycle posture diagnostics are read-only reconcile cues; they cannot rewrite specs, "
+                    "delete target-only contracts, approve supersession, archive, closeout, staging, commit, or lifecycle movement"
+                ),
+            )
+        )
+    return findings
+
+
+def _is_spec_lifecycle_surface(surface: Surface) -> bool:
+    return surface.memory_route == "stable-specs" or (
+        surface.memory_route == "product-docs" and surface.rel_path.startswith("docs/specs/")
+    )
+
+
+def _plan_facing_spec_paths(inventory: Inventory) -> set[str]:
+    paths: set[str] = set()
+    plan = inventory.active_plan_surface
+    if plan and plan.exists and not plan.frontmatter.errors:
+        paths.update(_string_values(plan.frontmatter.data.get("related_specs")))
+
+    roadmap_items, parse_findings = roadmap_items_for_diagnostics(inventory)
+    if not parse_findings:
+        for item in roadmap_items.values():
+            status = str(item.fields.get("status") or "").strip().casefold()
+            if status in ROUTE_REFERENCE_ACCEPTED_STATUSES:
+                paths.update(_string_values(item.fields.get("related_specs")))
+    return {path.replace("\\", "/").strip().strip("/") for path in paths if _route_metadata_value_is_path_like(path)}
+
+
+def _spec_lifecycle_field_value(
+    surface: Surface,
+    key: str,
+    allowed_values: tuple[str, ...],
+    invalid_code: str,
+) -> tuple[str, list[Finding]]:
+    value = surface.frontmatter.data.get(key)
+    line = _frontmatter_key_line(surface, key)
+    if value in (None, ""):
+        return "", [_spec_posture_missing_finding(surface, key, line)]
+    if not isinstance(value, str) or not value.strip():
+        return "", [
+            Finding(
+                "warn",
+                "spec-posture-field",
+                f"{surface.rel_path} {key} must be a non-empty scalar string",
+                surface.rel_path,
+                line,
+            )
+        ]
+
+    normalized = _normalize_spec_lifecycle_value(value)
+    if normalized not in allowed_values:
+        return "", [
+            Finding(
+                "warn",
+                invalid_code,
+                (
+                    f"{surface.rel_path} {key} is {value!r}; allowed values: "
+                    f"{', '.join(allowed_values)}; advisory only, no lifecycle approval"
+                ),
+                surface.rel_path,
+                line,
+                route_id=surface.memory_route,
+                allowed_decisions=allowed_values,
+            )
+        ]
+    return normalized, []
+
+
+def _spec_posture_missing_finding(surface: Surface, field: str, line: int | None) -> Finding:
+    return Finding(
+        "warn",
+        "spec-posture-missing",
+        (
+            f"{surface.rel_path} is plan-facing or spec-posture opted-in but lacks explicit {field}; "
+            "expected separate spec_status and implementation_posture metadata"
+        ),
+        surface.rel_path,
+        line,
+        route_id=surface.memory_route,
+        requires_human_gate=True,
+        gate_class="authority",
+        human_gate_reason="spec posture metadata changes are human-reviewed spec amendments",
+        allowed_decisions=("add-spec-status", "add-implementation-posture", "record-target-only"),
+    )
+
+
+def _normalize_spec_lifecycle_value(value: str) -> str:
+    return value.strip().casefold().replace("_", "-")
+
+
+def _spec_has_any_field_value(surface: Surface, fields: tuple[str, ...]) -> bool:
+    return any(_frontmatter_value_present(surface.frontmatter.data.get(field)) for field in fields)
+
+
+def _frontmatter_value_present(value: object) -> bool:
+    if value in (None, ""):
+        return False
+    if isinstance(value, list):
+        return any(_frontmatter_value_present(item) for item in value)
+    if isinstance(value, str):
+        return bool(value.strip())
+    return True
+
+
+def _string_values(value: object) -> tuple[str, ...]:
+    if isinstance(value, str):
+        return (value,) if value.strip() else ()
+    if isinstance(value, list):
+        return tuple(item for item in value if isinstance(item, str) and item.strip())
+    return ()
 
 
 def _frontmatter_findings(inventory: Inventory) -> list[Finding]:
@@ -6429,6 +7303,1098 @@ def _frontmatter_findings(inventory: Inventory) -> list[Finding]:
         if surface.role == "research" and surface.path.name.lower() != "readme.md" and not surface.frontmatter.has_frontmatter:
             findings.append(Finding("warn", "research-frontmatter", "research artifact has no frontmatter", surface.rel_path))
     return findings
+
+
+def archive_context_findings(inventory: Inventory) -> list[Finding]:
+    if inventory.root_kind != "live_operating_root":
+        return [
+            Finding(
+                "info",
+                "archive-context-skipped-root-kind",
+                "archive context audit runs only for live operating roots and remains read-only",
+            )
+        ]
+
+    archive_dir = inventory.root / ARCHIVE_CONTEXT_ARCHIVE_DIR_REL
+    if archive_dir.exists() and not archive_dir.is_dir():
+        return [
+            Finding(
+                "warn",
+                "archive-context-archive-dir",
+                f"{ARCHIVE_CONTEXT_ARCHIVE_DIR_REL} exists but is not a directory; archive context coverage cannot be scanned",
+                ARCHIVE_CONTEXT_ARCHIVE_DIR_REL,
+            )
+        ]
+
+    roadmap_items, parse_findings = roadmap_items_for_diagnostics(inventory)
+    findings: list[Finding] = [*parse_findings]
+    roadmap_surface = inventory.surface_by_rel.get(ROADMAP_REL)
+    roadmap_text = roadmap_surface.content if roadmap_surface and roadmap_surface.exists else ""
+
+    archive_ref_records_by_route: dict[str, list[ArchiveContextRouteRef]] = {}
+    done_without_archive: list[str] = []
+    terminal_stub_without_archive: list[str] = []
+    terminal_stub_prose_refs: dict[str, tuple[str, ...]] = {}
+    for item_id, item in sorted(roadmap_items.items(), key=lambda row: (row[1].start, row[0])):
+        status = str(item.fields.get("status") or "").strip().casefold()
+        archived_plan = _archive_context_normalize_rel(item.fields.get("archived_plan"))
+        related_plan = _archive_context_normalize_rel(item.fields.get("related_plan"))
+        if archived_plan:
+            _archive_context_record_route_ref(archive_ref_records_by_route, archived_plan, item_id, "archived_plan", status, ROADMAP_REL, item.start + 1)
+        if related_plan.startswith(f"{ARCHIVE_CONTEXT_ARCHIVE_DIR_REL}/"):
+            _archive_context_record_route_ref(archive_ref_records_by_route, related_plan, item_id, "related_plan", status, ROADMAP_REL, item.start + 1)
+        if status == "done" and not archived_plan:
+            if _archive_context_is_terminal_history_stub_item(item):
+                terminal_stub_without_archive.append(item_id)
+            else:
+                done_without_archive.append(item_id)
+
+    for archive_ref in _archive_context_archive_refs_from_text(roadmap_text):
+        if archive_ref in archive_ref_records_by_route:
+            continue
+        lines = _archive_context_reference_lines(roadmap_text, archive_ref)
+        terminal_item_ids = _archive_context_terminal_stub_item_ids_for_lines(roadmap_items, lines)
+        if terminal_item_ids:
+            terminal_stub_prose_refs[archive_ref] = terminal_item_ids
+            continue
+        _archive_context_record_route_ref(
+            archive_ref_records_by_route,
+            archive_ref,
+            "roadmap-prose",
+            "prose",
+            "",
+            ROADMAP_REL,
+            lines[0] if lines else None,
+        )
+
+    present_archive_paths = _archive_context_present_archive_paths(archive_dir)
+    present_archives = {path.relative_to(inventory.root).as_posix(): path for path in present_archive_paths}
+    archive_refs_by_route = {rel: {record.owner for record in records} for rel, records in archive_ref_records_by_route.items()}
+    referenced_routes = set(archive_refs_by_route)
+    missing_routes = sorted(rel for rel in referenced_routes if rel not in present_archives and _archive_context_safe_rel(rel))
+    unreferenced_routes = sorted(rel for rel in present_archives if rel not in referenced_routes)
+
+    findings.append(
+        Finding(
+            "info",
+            "archive-context-summary",
+            (
+                f"archive context scan: {len(present_archives)} present archived plan file(s), "
+                f"{len(referenced_routes)} roadmap archived-plan route reference(s), "
+                f"{len(missing_routes)} missing referenced archive target(s), "
+                f"{len(unreferenced_routes)} present unreferenced archive file(s); diagnostic only"
+            ),
+            ARCHIVE_CONTEXT_ARCHIVE_DIR_REL,
+        )
+    )
+    if done_without_archive:
+        findings.append(
+            Finding(
+                "warn",
+                "archive-context-done-missing-archived-plan",
+                (
+                    f"{len(done_without_archive)} done roadmap item(s) lack archived_plan metadata: "
+                    f"{_archive_context_sample(done_without_archive)}; bounded recovery action: refresh the item through writeback/roadmap after review"
+                ),
+                ROADMAP_REL,
+            )
+        )
+    if terminal_stub_without_archive or terminal_stub_prose_refs:
+        details: list[str] = []
+        if terminal_stub_without_archive:
+            details.append(f"items_without_archived_plan={_archive_context_sample(terminal_stub_without_archive)}")
+        if terminal_stub_prose_refs:
+            route_details = [
+                f"{route} via {_archive_context_sample(item_ids)}"
+                for route, item_ids in sorted(terminal_stub_prose_refs.items())
+            ]
+            details.append(f"prose_archive_refs={_archive_context_sample(route_details)}")
+        findings.append(
+            Finding(
+                "info",
+                "archive-context-terminal-history-stub",
+                (
+                    "done roadmap item(s) declare terminal historical relationship stubs where original archive content is unrecoverable; "
+                    f"{'; '.join(details)}; bounded recovery action: keep as relationship evidence unless a current lifecycle decision needs a reviewed roadmap retarget or archive restoration"
+                ),
+                ROADMAP_REL,
+            )
+        )
+    if missing_routes:
+        findings.append(
+            Finding(
+                "warn",
+                "archive-context-missing-archive-targets",
+                (
+                    f"{len(missing_routes)} roadmap archived-plan reference(s) are missing on disk: "
+                    f"{_archive_context_sample(missing_routes)}; bounded recovery action: restore the archive file or retarget archived_plan after review"
+                ),
+                ROADMAP_REL,
+            )
+        )
+        findings.extend(_archive_context_missing_root_cause_findings(inventory, missing_routes, archive_ref_records_by_route, roadmap_items))
+    if unreferenced_routes:
+        findings.append(
+            Finding(
+                "info",
+                "archive-context-unreferenced-archive",
+                (
+                    f"{len(unreferenced_routes)} present archived plan file(s) are not referenced by roadmap route metadata or prose: "
+                    f"{_archive_context_sample(unreferenced_routes)}"
+                ),
+                ARCHIVE_CONTEXT_ARCHIVE_DIR_REL,
+            )
+        )
+
+    classification_counts: dict[str, int] = {}
+    for archive_rel, archive_path in sorted(present_archives.items()):
+        classification, source_refs, missing_sources = _archive_context_classification(
+            inventory,
+            archive_rel,
+            archive_path,
+            roadmap_items,
+            archive_refs_by_route.get(archive_rel, set()),
+        )
+        report_classification = classification
+        if classification == "stale-source-reference" and archive_rel not in referenced_routes:
+            report_classification = "stale-unreferenced-source-reference"
+        classification_counts[report_classification] = classification_counts.get(report_classification, 0) + 1
+        severity = "warn" if report_classification in {"stale-source-reference", "suspect-incomplete", "unreadable"} else "info"
+        detail = f"classification={report_classification}"
+        if source_refs:
+            detail += f"; source_refs={_archive_context_sample(source_refs)}"
+        if missing_sources:
+            detail += f"; missing_sources={_archive_context_sample(missing_sources)}"
+        detail += f"; recovery_action={_archive_context_recovery_action(report_classification)}"
+        findings.append(Finding(severity, f"archive-context-{report_classification}", detail, archive_rel))
+
+    if classification_counts:
+        summary = ", ".join(f"{key}={classification_counts[key]}" for key in sorted(classification_counts))
+        findings.append(Finding("info", "archive-context-classification-summary", f"present archived plan classifications: {summary}", ARCHIVE_CONTEXT_ARCHIVE_DIR_REL))
+    findings.append(
+        Finding(
+            "info",
+            "archive-context-boundary",
+            "archive context audit is read-only evidence; it cannot approve repair, lifecycle movement, closeout, archive, roadmap promotion, staging, commit, rollback, or next-plan opening",
+        )
+    )
+    return findings
+
+
+def _archive_context_present_archive_paths(archive_dir: Path) -> list[Path]:
+    if not archive_dir.is_dir():
+        return []
+    return sorted(path for path in archive_dir.glob("*.md") if path.is_file())
+
+
+def _archive_context_archive_refs_from_text(text: str) -> tuple[str, ...]:
+    refs = re.findall(r"project/archive/plans/[A-Za-z0-9_.\/-]+\.md", text)
+    return tuple(sorted(set(ref.replace("\\", "/") for ref in refs)))
+
+
+def _archive_context_reference_lines(text: str, rel_path: str) -> tuple[int, ...]:
+    lines: list[int] = []
+    for index, line in enumerate(text.splitlines(), start=1):
+        if rel_path in line.replace("\\", "/"):
+            lines.append(index)
+    return tuple(lines)
+
+
+def _archive_context_terminal_stub_item_ids_for_lines(
+    roadmap_items: dict[str, object],
+    lines: tuple[int, ...],
+) -> tuple[str, ...]:
+    if not lines:
+        return ()
+    item_ids: set[str] = set()
+    for line in lines:
+        matching = [
+            item_id
+            for item_id, item in roadmap_items.items()
+            if getattr(item, "start", -1) + 1 <= line <= getattr(item, "end", -1)
+        ]
+        if not matching:
+            return ()
+        terminal_matches = [
+            item_id
+            for item_id in matching
+            if _archive_context_is_terminal_history_stub_item(roadmap_items[item_id])
+        ]
+        if len(terminal_matches) != len(matching):
+            return ()
+        item_ids.update(terminal_matches)
+    return tuple(sorted(item_ids))
+
+
+def _archive_context_is_terminal_history_stub_item(item: object) -> bool:
+    return roadmap_item_is_terminal_history_stub(item)
+
+
+def _archive_context_record_route_ref(
+    records_by_route: dict[str, list[ArchiveContextRouteRef]],
+    rel_path: str,
+    owner: str,
+    field: str,
+    status: str,
+    source: str,
+    line: int | None,
+) -> None:
+    if not rel_path or not _archive_context_safe_rel(rel_path):
+        return
+    records_by_route.setdefault(rel_path, []).append(
+        ArchiveContextRouteRef(
+            owner=owner,
+            field=field,
+            status=status,
+            source=source,
+            line=line,
+        )
+    )
+
+
+def _archive_context_missing_root_cause_findings(
+    inventory: Inventory,
+    missing_routes: list[str],
+    records_by_route: dict[str, list[ArchiveContextRouteRef]],
+    roadmap_items: dict[str, object],
+) -> list[Finding]:
+    cause_routes: dict[str, list[str]] = {}
+    for route in missing_routes:
+        cause = _archive_context_missing_root_cause(records_by_route.get(route, ()))
+        cause_routes.setdefault(cause, []).append(route)
+    if not cause_routes:
+        return []
+
+    findings: list[Finding] = []
+    summary = ", ".join(f"{cause}={len(cause_routes[cause])}" for cause in sorted(cause_routes))
+    findings.append(
+        Finding(
+            "info",
+            "archive-context-missing-root-cause-summary",
+            f"missing archive target root-cause classes: {summary}; route traces point at the last known repo-visible references, not proof of deletion",
+            ROADMAP_REL,
+        )
+    )
+    for cause in sorted(cause_routes):
+        routes = cause_routes[cause]
+        severity = "info" if cause == "compacted-history-prose" else "warn"
+        samples = _archive_context_missing_cause_sample(inventory, routes, records_by_route, roadmap_items)
+        findings.append(
+            Finding(
+                severity,
+                f"archive-context-missing-cause-{cause}",
+                (
+                    f"{len(routes)} missing archive target(s) classified as {cause}: {samples}; "
+                    f"bounded recovery action: {_archive_context_missing_cause_recovery_action(cause)}"
+                ),
+                ROADMAP_REL,
+            )
+        )
+    return findings
+
+
+def _archive_context_missing_root_cause(records: tuple[ArchiveContextRouteRef, ...] | list[ArchiveContextRouteRef]) -> str:
+    fields = {record.field for record in records}
+    statuses = {record.status for record in records if record.status}
+    if "archived_plan" in fields:
+        if "done" in statuses:
+            return "metadata-archived-plan"
+        return "metadata-nonterminal-archived-plan"
+    if "related_plan" in fields:
+        return "metadata-related-plan"
+    if records and all(record.field == "prose" for record in records):
+        return "compacted-history-prose"
+    return "unknown"
+
+
+def _archive_context_missing_cause_sample(
+    inventory: Inventory,
+    routes: list[str],
+    records_by_route: dict[str, list[ArchiveContextRouteRef]],
+    roadmap_items: dict[str, object],
+) -> str:
+    samples = [
+        _archive_context_missing_route_detail(inventory, route, records_by_route.get(route, ()), roadmap_items)
+        for route in sorted(routes)[:ARCHIVE_CONTEXT_CAUSE_SAMPLE_LIMIT]
+    ]
+    if len(routes) > ARCHIVE_CONTEXT_CAUSE_SAMPLE_LIMIT:
+        samples.append(f"... +{len(routes) - ARCHIVE_CONTEXT_CAUSE_SAMPLE_LIMIT} more")
+    return "; ".join(samples) or "<none>"
+
+
+def _archive_context_missing_route_detail(
+    inventory: Inventory,
+    route: str,
+    records: tuple[ArchiveContextRouteRef, ...] | list[ArchiveContextRouteRef],
+    roadmap_items: dict[str, object],
+) -> str:
+    trace = _archive_context_route_trace(records)
+    source_refs = _archive_context_missing_route_source_refs(records, roadmap_items)
+    source_state = _archive_context_source_evidence_state(inventory, source_refs)
+    return f"{route} [reference_trace={trace}; source_evidence={source_state}]"
+
+
+def _archive_context_route_trace(records: tuple[ArchiveContextRouteRef, ...] | list[ArchiveContextRouteRef]) -> str:
+    if not records:
+        return "<none>"
+    trace_parts = []
+    for record in records[:ARCHIVE_CONTEXT_CAUSE_SAMPLE_LIMIT]:
+        location = record.source
+        if record.line:
+            location += f":{record.line}"
+        trace_parts.append(f"{record.owner}.{record.field}@{location}")
+    if len(records) > ARCHIVE_CONTEXT_CAUSE_SAMPLE_LIMIT:
+        trace_parts.append(f"... +{len(records) - ARCHIVE_CONTEXT_CAUSE_SAMPLE_LIMIT} more")
+    return ",".join(trace_parts)
+
+
+def _archive_context_missing_route_source_refs(
+    records: tuple[ArchiveContextRouteRef, ...] | list[ArchiveContextRouteRef],
+    roadmap_items: dict[str, object],
+) -> tuple[str, ...]:
+    source_refs: set[str] = set()
+    for record in records:
+        item = roadmap_items.get(record.owner)
+        fields = getattr(item, "fields", {}) if item else {}
+        source_refs.update(_archive_context_source_refs(fields))
+    return tuple(sorted(rel for rel in source_refs if _archive_context_safe_rel(rel)))
+
+
+def _archive_context_source_evidence_state(inventory: Inventory, source_refs: tuple[str, ...]) -> str:
+    if not source_refs:
+        return "none"
+    _expanded_refs, missing, archived_replacements = _archive_context_resolve_source_refs(inventory, source_refs)
+    if not missing:
+        if archived_replacements:
+            return f"archived-reference:{_archive_context_sample(archived_replacements)}"
+        return "present"
+    if len(missing) == len(source_refs):
+        return f"missing:{_archive_context_sample(missing)}"
+    return f"partial-missing:{_archive_context_sample(missing)}"
+
+
+def _archive_context_missing_cause_recovery_action(cause: str) -> str:
+    if cause == "metadata-archived-plan":
+        return "restore the physical archive file or retarget archived_plan/related_plan through roadmap or writeback after reviewing the traced item"
+    if cause == "metadata-nonterminal-archived-plan":
+        return "review why a nonterminal roadmap item points at archived evidence, then clear or retarget metadata through roadmap"
+    if cause == "metadata-related-plan":
+        return "retarget the archive-shaped related_plan to a present archived_plan or clear the stale terminal relationship after review"
+    if cause == "compacted-history-prose":
+        return "treat as historical compacted prose unless current closeout depends on the missing file; restore only after evidence review"
+    return "inspect the traced reference and choose restore, retarget, or provisional closeout wording manually"
+
+
+def _archive_context_classification(
+    inventory: Inventory,
+    archive_rel: str,
+    archive_path: Path,
+    roadmap_items: dict[str, object],
+    referencing_item_ids: set[str],
+) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
+    try:
+        archive_text = archive_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return "unreadable", (), ()
+
+    frontmatter = parse_frontmatter(archive_text)
+    source_refs = set(_archive_context_source_refs(frontmatter.data))
+    for item_id in referencing_item_ids:
+        item = roadmap_items.get(item_id)
+        fields = getattr(item, "fields", {}) if item else {}
+        source_refs.update(_archive_context_source_refs(fields))
+    source_refs = {rel for rel in source_refs if _archive_context_safe_rel(rel)}
+    expanded_source_refs, missing_sources, archived_replacements = _archive_context_resolve_source_refs(inventory, tuple(sorted(source_refs)))
+    existing_source_texts = []
+    for rel in sorted(expanded_source_refs):
+        path = inventory.root / rel
+        if not path.is_file():
+            continue
+        try:
+            existing_source_texts.append(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError):
+            continue
+    scan_text = "\n".join([archive_text, *existing_source_texts]).casefold()
+    diagnostic_about_suspect = _archive_context_has_marker(scan_text, ARCHIVE_CONTEXT_DIAGNOSTIC_MARKERS)
+    if diagnostic_about_suspect and _archive_context_has_marker(scan_text, ARCHIVE_CONTEXT_SUSPECT_MARKERS):
+        return "diagnostic-about-suspect", tuple(sorted(source_refs)), missing_sources
+    if _archive_context_has_marker(scan_text, ARCHIVE_CONTEXT_SUSPECT_MARKERS):
+        return "suspect-incomplete", expanded_source_refs, missing_sources
+    if missing_sources:
+        return "stale-source-reference", expanded_source_refs, missing_sources
+    if _archive_context_has_marker(scan_text, ARCHIVE_CONTEXT_RECONSTRUCTED_MARKERS):
+        return "reconstructed", expanded_source_refs, missing_sources
+    if archived_replacements:
+        return "archived-source-reference", expanded_source_refs, ()
+    if expanded_source_refs:
+        return "complete", expanded_source_refs, missing_sources
+    return "direct-task-no-source-contract", (), ()
+
+
+def _archive_context_source_refs(data: dict[str, object]) -> tuple[str, ...]:
+    values: list[str] = []
+    for field in ARCHIVE_CONTEXT_SOURCE_FIELDS:
+        values.extend(_archive_context_path_values(data.get(field)))
+    return tuple(_archive_context_normalize_rel(value) for value in values if _archive_context_normalize_rel(value))
+
+
+def _archive_context_path_values(value: object) -> tuple[str, ...]:
+    if isinstance(value, str):
+        normalized = _archive_context_normalize_rel(value)
+        return (normalized,) if normalized.startswith("project/") else ()
+    if isinstance(value, list):
+        values = []
+        for item in value:
+            normalized = _archive_context_normalize_rel(item)
+            if normalized.startswith("project/"):
+                values.append(normalized)
+        return tuple(values)
+    return ()
+
+
+def _archive_context_resolve_source_refs(
+    inventory: Inventory,
+    source_refs: tuple[str, ...],
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    expanded_refs = set(source_refs)
+    missing: list[str] = []
+    archived_replacements: list[str] = []
+    for rel in sorted(source_refs):
+        if (inventory.root / rel).is_file():
+            continue
+        replacements = _archive_context_archived_source_replacements(inventory, rel)
+        if replacements:
+            expanded_refs.update(replacements)
+            archived_replacements.extend(replacements)
+        else:
+            missing.append(rel)
+    return tuple(sorted(expanded_refs)), tuple(sorted(missing)), tuple(sorted(set(archived_replacements)))
+
+
+def _archive_context_archived_source_replacements(inventory: Inventory, rel_path: str) -> tuple[str, ...]:
+    for live_prefix, archive_prefix in ARCHIVE_CONTEXT_ARCHIVED_SOURCE_PREFIXES:
+        if not rel_path.startswith(live_prefix):
+            continue
+        source_name = Path(rel_path).name
+        archive_dir = inventory.root / archive_prefix
+        if not archive_dir.is_dir():
+            return ()
+        matches = []
+        for candidate in sorted(path for path in archive_dir.glob("*.md") if path.is_file()):
+            if candidate.name == source_name or candidate.name.endswith(f"-{source_name}"):
+                matches.append(candidate.relative_to(inventory.root).as_posix())
+        return tuple(matches)
+    return ()
+
+
+def _archive_context_normalize_rel(value: object) -> str:
+    if value in (None, ""):
+        return ""
+    normalized = str(value).strip().strip("`\"'").replace("\\", "/")
+    return normalized.strip()
+
+
+def _archive_context_safe_rel(rel_path: str) -> bool:
+    if not rel_path or rel_path.startswith(("/", "\\")):
+        return False
+    path = Path(rel_path)
+    return not path.is_absolute() and ".." not in path.parts
+
+
+def _archive_context_has_marker(text: str, markers: tuple[str, ...]) -> bool:
+    return any(marker in text for marker in markers)
+
+
+def _archive_context_sample(values: list[str] | tuple[str, ...] | set[str]) -> str:
+    ordered = sorted(values)
+    sample = ", ".join(ordered[:ARCHIVE_CONTEXT_SAMPLE_LIMIT])
+    if len(ordered) > ARCHIVE_CONTEXT_SAMPLE_LIMIT:
+        sample += f", ... +{len(ordered) - ARCHIVE_CONTEXT_SAMPLE_LIMIT} more"
+    return sample or "<none>"
+
+
+def _archive_context_recovery_action(classification: str) -> str:
+    if classification == "suspect-incomplete":
+        return "re-review implementation against recovered source context before relying on the archive"
+    if classification == "stale-source-reference":
+        return "restore or retarget the missing source route before treating the archive context as complete"
+    if classification == "stale-unreferenced-source-reference":
+        return "preserve as historical context; restore or retarget only if current roadmap or lifecycle authority depends on this archive"
+    if classification == "archived-source-reference":
+        return "use the archived source reference as context; retarget stale live-source metadata only through reviewed route rails"
+    if classification == "reconstructed":
+        return "treat as reviewable reconstructed context and re-review only when behavior seems narrower than source intent"
+    if classification == "diagnostic-about-suspect":
+        return "use as diagnostic evidence for prior archive-context gaps, not as a suspect implementation by itself"
+    if classification == "unreadable":
+        return "repair file readability before context audit can classify it"
+    return "no automatic action"
+
+
+def route_reference_inventory_findings(inventory: Inventory) -> list[Finding]:
+    if inventory.root_kind != "live_operating_root":
+        return [
+            Finding(
+                "info",
+                "route-reference-skipped-root-kind",
+                "route-reference inventory runs only for live operating roots and remains read-only",
+            )
+        ]
+
+    records = _route_reference_records(inventory)
+    counts = {
+        "present": 0,
+        "present_product_source": 0,
+        "external_non_file": 0,
+        "optional_pattern": 0,
+        "missing": 0,
+        "unsafe": 0,
+    }
+    missing_records: dict[str, list[RouteReferenceRecord]] = {}
+    unsafe_records: dict[str, list[RouteReferenceRecord]] = {}
+    for record in records:
+        target_state, normalized_target = _route_reference_target_state(inventory, record)
+        if target_state == "skip":
+            continue
+        if target_state in counts:
+            counts[target_state] += 1
+        if target_state == "missing":
+            missing_records.setdefault(normalized_target, []).append(record)
+        elif target_state == "unsafe":
+            unsafe_records.setdefault(normalized_target, []).append(record)
+
+    findings = [
+        Finding(
+            "info",
+            "route-reference-inventory-summary",
+            (
+                f"route-reference inventory: {len(records)} reference(s) scanned, "
+                f"present={counts['present']}, present_product_source={counts['present_product_source']}, "
+                f"missing={counts['missing']}, unsafe={counts['unsafe']}, "
+                f"external_non_file={counts['external_non_file']}, optional_pattern={counts['optional_pattern']}; diagnostic only"
+            ),
+        )
+    ]
+    for target, target_records in sorted(unsafe_records.items()):
+        unsafe_class = _route_reference_unsafe_class(target_records)
+        if unsafe_class == "unsafe-historical-context":
+            severity = "info"
+            message = (
+                f"{target} is an unsafe path-like reference in historical/generated context; "
+                f"references={_route_reference_record_sample(target_records)}; "
+                "bounded recovery action: leave it as historical evidence unless current authority depends on it; "
+                "current docs or metadata should use reviewed root-relative routes"
+            )
+        else:
+            severity = "warn"
+            message = (
+                f"{target} is not a safe root-relative route reference; "
+                f"references={_route_reference_record_sample(target_records)}; "
+                "bounded recovery action: replace with a reviewed root-relative route or leave it external by design"
+            )
+        findings.append(
+            Finding(
+                severity,
+                f"route-reference-{unsafe_class}",
+                message,
+                target_records[0].source,
+                target_records[0].line,
+            )
+        )
+
+    if missing_records:
+        class_counts: dict[str, int] = {}
+        classified_targets: list[tuple[str, str, list[RouteReferenceRecord]]] = []
+        for target, target_records in sorted(missing_records.items()):
+            classification = _route_reference_missing_class(inventory, target, target_records)
+            class_counts[classification] = class_counts.get(classification, 0) + 1
+            classified_targets.append((classification, target, target_records))
+        summary = ", ".join(f"{key}={class_counts[key]}" for key in sorted(class_counts))
+        severity = "warn" if any(key in ROUTE_REFERENCE_WARN_CLASSES for key in class_counts) else "info"
+        findings.append(
+            Finding(
+                severity,
+                "route-reference-missing-summary",
+                f"missing route-reference classes: {summary}; route traces identify references, not proof of deletion",
+            )
+        )
+        for classification, target, target_records in classified_targets:
+            severity = "warn" if classification in ROUTE_REFERENCE_WARN_CLASSES else "info"
+            findings.append(
+                Finding(
+                    severity,
+                    f"route-reference-missing-{classification}",
+                    (
+                        f"{target} is missing; class={classification}{_route_reference_classification_detail(inventory, classification, target)}; "
+                        f"references={_route_reference_record_sample(target_records)}; "
+                        f"bounded recovery action: {_route_reference_recovery_action(classification, target_records)}; "
+                        f"next safe command: `{_route_reference_next_safe_command(classification, target_records)}`; "
+                        f"boundary: {_route_reference_recovery_boundary(classification, target_records)}"
+                    ),
+                    target_records[0].source,
+                    target_records[0].line,
+                )
+            )
+    else:
+        findings.append(Finding("info", "route-reference-missing-summary", "no missing route references were found"))
+
+    findings.append(
+        Finding(
+            "info",
+            "route-reference-boundary",
+            (
+                "route-reference inventory is read-only evidence; it cannot approve repair, archive recreation, "
+                "deletion, lifecycle movement, plan opening, staging, commit, rollback, or repair apply"
+            ),
+        )
+    )
+    return findings
+
+
+def _route_reference_classification_detail(inventory: Inventory, classification: str, target: str) -> str:
+    if classification == "archived-source-reference":
+        replacements = _archive_context_archived_source_replacements(inventory, target)
+        if replacements:
+            return f"; archived_replacements={_archive_context_sample(replacements)}"
+    return ""
+
+
+def _route_reference_records(inventory: Inventory) -> list[RouteReferenceRecord]:
+    records: list[RouteReferenceRecord] = []
+    for surface in inventory.present_surfaces:
+        if surface.role == "package-mirror":
+            continue
+        records.extend(_route_reference_surface_records(surface.rel_path, surface.content, surface.memory_route, surface.links))
+
+    roadmap_items, _ = roadmap_items_for_diagnostics(inventory)
+    for item_id, item in sorted(roadmap_items.items(), key=lambda row: (row[1].start, row[0])):
+        fields = getattr(item, "fields", {})
+        status = str(fields.get("status") or "").strip().casefold()
+        for field in sorted(ROUTE_REFERENCE_METADATA_FIELDS):
+            for target in _route_reference_path_values(fields.get(field)):
+                records.append(
+                    RouteReferenceRecord(
+                        target=target,
+                        source=ROADMAP_REL,
+                        line=getattr(item, "start", 0) + 1,
+                        owner=item_id,
+                        field=field,
+                        owner_status=status,
+                        context="roadmap-item",
+                    )
+                )
+
+    known_sources = {surface.rel_path for surface in inventory.present_surfaces}
+    for rel_path, text, route_id in _route_reference_extra_route_texts(inventory, known_sources):
+        records.extend(_route_reference_surface_records(rel_path, text, route_id, extract_path_refs(text)))
+
+    return _route_reference_deduped(records)
+
+
+def _route_reference_surface_records(
+    rel_path: str,
+    text: str,
+    route_id: str,
+    links: list[LinkRef],
+) -> list[RouteReferenceRecord]:
+    frontmatter = parse_frontmatter(text) if rel_path.endswith(".md") else None
+    status = ""
+    records: list[RouteReferenceRecord] = []
+    if frontmatter and frontmatter.has_frontmatter:
+        status = str(frontmatter.data.get("status") or "").strip().casefold()
+        for field in sorted(ROUTE_REFERENCE_METADATA_FIELDS):
+            for target in _route_reference_path_values(frontmatter.data.get(field)):
+                records.append(
+                    RouteReferenceRecord(
+                        target=target,
+                        source=rel_path,
+                        line=_frontmatter_key_line_from_text(text, field),
+                        owner=rel_path,
+                        field=field,
+                        owner_status=status,
+                        context=route_id,
+                    )
+                )
+
+    for target, line, source_kind in _route_reference_text_refs(text, links):
+        context = route_id
+        field = source_kind
+        record_status = "" if rel_path == ROADMAP_REL else status
+        if rel_path == ROADMAP_REL and _route_reference_line_is_compacted_history(text, line):
+            context = "compacted-history"
+            field = "compacted-history-prose"
+        elif rel_path.startswith(".mylittleharness/generated/"):
+            context = "generated-cache"
+        records.append(
+            RouteReferenceRecord(
+                target=target,
+                source=rel_path,
+                line=line,
+                owner=rel_path,
+                field=field,
+                owner_status=record_status,
+                context=context,
+            )
+        )
+    return records
+
+
+def _route_reference_extra_route_texts(inventory: Inventory, known_sources: set[str]) -> list[tuple[str, str, str]]:
+    rows: list[tuple[str, str, str]] = []
+    for pattern in ROUTE_REFERENCE_SCAN_EXTRA_GLOBS:
+        for path in sorted(inventory.root.glob(pattern)):
+            if not path.is_file():
+                continue
+            rel_path = path.relative_to(inventory.root).as_posix()
+            if rel_path in known_sources:
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError):
+                continue
+            rows.append((rel_path, text, classify_memory_route(rel_path).route_id))
+    return rows
+
+
+def _route_reference_text_refs(text: str, links: list[LinkRef]) -> list[tuple[str, int, str]]:
+    refs: list[tuple[str, int, str]] = []
+    for link in links:
+        refs.append((link.target, link.line, link.source))
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        for match in ROUTE_REFERENCE_TEXT_REF_RE.finditer(line):
+            refs.append((match.group(1), line_number, "text-path"))
+
+    deduped: list[tuple[str, int, str]] = []
+    seen: set[tuple[str, int, str]] = set()
+    for target, line, source_kind in refs:
+        normalized = _route_reference_normalize_target(target)
+        if not normalized or not _route_reference_value_is_path_like(normalized):
+            continue
+        if _route_reference_text_ref_is_prose_label(normalized, source_kind):
+            continue
+        key = (normalized, line, source_kind)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append((normalized, line, source_kind))
+    return deduped
+
+
+def _route_reference_path_values(value: object) -> tuple[str, ...]:
+    values: list[str] = []
+    if isinstance(value, str):
+        values.append(value)
+    elif isinstance(value, list):
+        values.extend(str(item) for item in value if item not in (None, ""))
+    else:
+        return ()
+    return tuple(
+        normalized
+        for item in values
+        if (normalized := _route_reference_normalize_target(item)) and _route_reference_value_is_path_like(normalized)
+    )
+
+
+def _route_reference_is_text_only_label(value: str) -> bool:
+    normalized = value.casefold()
+    return any(normalized == label or normalized.startswith(f"{label}/") for label in ROUTE_REFERENCE_TEXT_ONLY_LABELS)
+
+
+def _route_reference_text_ref_is_prose_label(value: str, source_kind: str) -> bool:
+    if source_kind == "markdown-link":
+        return False
+    if _route_reference_is_text_only_label(value):
+        return True
+    return bool(re.search(r"\s", value)) and not _is_absolute_path(value)
+
+
+def _route_reference_value_is_path_like(value: str) -> bool:
+    return (
+        _route_metadata_value_is_path_like(value)
+        or value in ROOT_RELATIVE_LINK_NAMES
+        or any(value.startswith(prefix) for prefix in ROOT_RELATIVE_LINK_PREFIXES)
+    )
+
+
+def _route_reference_normalize_target(value: object) -> str:
+    if value in (None, ""):
+        return ""
+    normalized = str(value).strip().strip("`\"'").strip("<>").replace("\\", "/")
+    if normalized.startswith("[") and normalized.endswith("]"):
+        return ""
+    normalized = normalized.split("#", 1)[0]
+    return re.sub(r"/+", "/", normalized).strip().rstrip(".,;:)]")
+
+
+def _route_reference_deduped(records: list[RouteReferenceRecord]) -> list[RouteReferenceRecord]:
+    deduped: list[RouteReferenceRecord] = []
+    seen: set[tuple[str, str, int | None, str, str, str]] = set()
+    for record in records:
+        normalized = _route_reference_normalize_target(record.target)
+        key = (normalized, record.source, record.line, record.owner, record.field, record.context)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(
+            RouteReferenceRecord(
+                target=normalized,
+                source=record.source,
+                line=record.line,
+                owner=record.owner,
+                field=record.field,
+                owner_status=record.owner_status,
+                context=record.context,
+            )
+        )
+    return deduped
+
+
+def _route_reference_target_state(inventory: Inventory, record: RouteReferenceRecord) -> tuple[str, str]:
+    target = _route_reference_normalize_target(record.target)
+    if not target:
+        return "skip", ""
+    if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", target) or target.startswith("mailto:"):
+        return "external_non_file", target
+    rel_path = _route_reference_root_relative_target(inventory, target)
+    if rel_path is None:
+        return "external_non_file", target
+    if not rel_path:
+        return "skip", target
+    if _route_metadata_path_is_unsafe(rel_path):
+        return "unsafe", rel_path
+    if _route_reference_has_glob(rel_path):
+        return ("present", rel_path) if _route_reference_pattern_exists(inventory, rel_path) else ("optional_pattern", rel_path)
+    target_path = inventory.root / rel_path
+    if target_path.exists():
+        return "present", rel_path
+    product_root = _route_reference_product_source_root(inventory)
+    if product_root and _route_reference_is_product_target(record, rel_path) and (product_root / rel_path).exists():
+        return "present_product_source", rel_path
+    return "missing", rel_path
+
+
+def _route_reference_root_relative_target(inventory: Inventory, target: str) -> str | None:
+    if _is_absolute_path(target):
+        try:
+            rel_path = Path(_display_path_value(target)).expanduser().resolve().relative_to(inventory.root.resolve()).as_posix()
+            return "" if rel_path == "." else rel_path
+        except (OSError, RuntimeError, ValueError):
+            return None
+    return target[2:] if target.startswith("./") else target
+
+
+def _route_reference_product_source_root(inventory: Inventory) -> Path | None:
+    state = inventory.state
+    data = state.frontmatter.data if state and state.exists else {}
+    value = data.get("product_source_root")
+    if not value:
+        return None
+    try:
+        path = Path(_display_path_value(str(value))).expanduser()
+        if not path.is_absolute():
+            path = inventory.root / path
+        return path.resolve()
+    except (OSError, RuntimeError):
+        return None
+
+
+def _route_reference_is_product_target(record: RouteReferenceRecord, rel_path: str) -> bool:
+    if record.field == "target_artifacts":
+        return True
+    return rel_path == "pyproject.toml" or rel_path.startswith(("src/", "tests/"))
+
+
+def _route_reference_has_glob(rel_path: str) -> bool:
+    return "*" in rel_path or "{" in rel_path
+
+
+def _route_reference_pattern_exists(inventory: Inventory, rel_path: str) -> bool:
+    patterns = _expand_brace_pattern(rel_path)
+    for pattern in patterns:
+        if any(inventory.root.glob(pattern)):
+            return True
+        product_root = _route_reference_product_source_root(inventory)
+        if product_root and any(product_root.glob(pattern)):
+            return True
+    return False
+
+
+def _route_reference_missing_class(inventory: Inventory, target: str, records: list[RouteReferenceRecord]) -> str:
+    if target.startswith(".mylittleharness/generated/") or all(record.source.startswith(".mylittleharness/generated/") for record in records):
+        return "generated-disposable-cache"
+    if target == DEFAULT_PLAN_REL and not _route_reference_default_plan_is_required(inventory, records):
+        return "inactive-active-plan"
+    if target in ROUTE_REFERENCE_OPTIONAL_EVIDENCE_ROUTES and not _route_reference_has_live_work_reference(records):
+        return "optional-evidence-route"
+    if _archive_context_archived_source_replacements(inventory, target) and not _route_reference_has_live_work_reference(records):
+        return "archived-source-reference"
+    if any(record.context == "compacted-history" or record.field == "compacted-history-prose" for record in records):
+        return "compacted-history"
+    if any(_route_reference_is_required_lifecycle_reference(inventory, record) for record in records):
+        return "required-lifecycle-evidence"
+    if _route_reference_has_live_work_reference(records):
+        return "accepted-work-evidence"
+    if any(record.source.startswith("project/archive/") or record.owner_status in ROUTE_REFERENCE_TERMINAL_STATUSES for record in records):
+        return "optional-historical-context"
+    if any(record.field in ROUTE_REFERENCE_METADATA_FIELDS for record in records):
+        return "stale-metadata"
+    return "optional-historical-context"
+
+
+def _route_reference_default_plan_is_required(inventory: Inventory, records: list[RouteReferenceRecord]) -> bool:
+    return any(_route_reference_is_required_lifecycle_reference(inventory, record) for record in records)
+
+
+def _route_reference_unsafe_class(records: list[RouteReferenceRecord]) -> str:
+    if records and all(_route_reference_is_historical_or_generated_context(record) for record in records):
+        return "unsafe-historical-context"
+    return "unsafe-target"
+
+
+def _route_reference_is_historical_or_generated_context(record: RouteReferenceRecord) -> bool:
+    return record.source.startswith((".mylittleharness/generated/", "project/archive/", "project/verification/"))
+
+
+def _route_reference_has_live_work_reference(records: list[RouteReferenceRecord]) -> bool:
+    return any(
+        record.owner_status in ROUTE_REFERENCE_ACCEPTED_STATUSES
+        and not _route_reference_is_historical_or_generated_context(record)
+        for record in records
+    )
+
+
+def _route_reference_is_required_lifecycle_reference(inventory: Inventory, record: RouteReferenceRecord) -> bool:
+    state = inventory.state
+    state_data = state.frontmatter.data if state and state.exists else {}
+    if record.source == "project/project-state.md" and record.field == "active_plan":
+        return str(state_data.get("plan_status") or "").strip().casefold() == "active"
+    if record.source == "project/project-state.md" and record.field == "last_archived_plan":
+        return True
+    if record.field == "archived_plan" and record.owner_status in {"done", "complete"}:
+        return True
+    return False
+
+
+def _route_reference_record_sample(records: list[RouteReferenceRecord]) -> str:
+    parts = []
+    for record in records[:ROUTE_REFERENCE_SAMPLE_LIMIT]:
+        location = record.source
+        if record.line:
+            location += f":{record.line}"
+        owner = record.owner if record.owner != record.source else "surface"
+        field = record.field or "path"
+        status = f",status={record.owner_status}" if record.owner_status else ""
+        parts.append(f"{owner}.{field}@{location}{status}")
+    if len(records) > ROUTE_REFERENCE_SAMPLE_LIMIT:
+        parts.append(f"... +{len(records) - ROUTE_REFERENCE_SAMPLE_LIMIT} more")
+    return ",".join(parts) or "<none>"
+
+
+def _route_reference_recovery_guidance(
+    classification: str,
+    records: list[RouteReferenceRecord],
+) -> RouteReferenceRecoveryGuidance:
+    if classification == "required-lifecycle-evidence":
+        if any(record.field == "active_plan" for record in records):
+            return RouteReferenceRecoveryGuidance(
+                action="restore the active plan route or retarget lifecycle state through writeback after review",
+                next_safe_command='mylittleharness --root <root> suggest --intent "phase closeout handoff"',
+                boundary="escalate when lifecycle authority is unclear; do not clear active_plan, archive, or repair automatically",
+            )
+        return RouteReferenceRecoveryGuidance(
+            action="restore the required archive/evidence route or retarget lifecycle metadata through writeback/roadmap after review",
+            next_safe_command="mylittleharness --root <root> check --focus archive-context",
+            boundary="keep docs_decision provisional when required archive evidence is incomplete; no automatic archive recreation",
+        )
+    if classification == "accepted-work-evidence":
+        if any(record.field == "source_incubation" for record in records):
+            next_safe_command = 'mylittleharness --root <root> suggest --intent "roadmap source incubation missing"'
+        else:
+            next_safe_command = "mylittleharness --root <root> roadmap --dry-run --action update --item-id <id> [reviewed fields]"
+        return RouteReferenceRecoveryGuidance(
+            action="restore source/evidence or keep accepted work and docs_decision provisional before plan opening or closeout",
+            next_safe_command=next_safe_command,
+            boundary="no automatic target creation, roadmap mutation, plan opening, closeout, or archive movement",
+        )
+    if classification == "stale-metadata":
+        if any(record.source == ROADMAP_REL or record.context == "roadmap-item" for record in records):
+            next_safe_command = "mylittleharness --root <root> roadmap --dry-run --action update --item-id <id> [reviewed fields]"
+        elif any(record.source == "project/project-state.md" for record in records):
+            next_safe_command = "mylittleharness --root <root> writeback --dry-run [reviewed lifecycle fields]"
+        else:
+            next_safe_command = "mylittleharness --root <root> memory-hygiene --dry-run --scan"
+        return RouteReferenceRecoveryGuidance(
+            action="retarget or clear stale route metadata through the owning route command after review",
+            next_safe_command=next_safe_command,
+            boundary="metadata cleanup only after dry-run review; no semantic promotion or lifecycle approval",
+        )
+    if classification == "compacted-history":
+        return RouteReferenceRecoveryGuidance(
+            action="treat as compacted historical prose unless current closeout depends on the missing target",
+            next_safe_command="mylittleharness --root <root> check --focus archive-context",
+            boundary="historical prose cannot prove deletion or approve archive reconstruction",
+        )
+    if classification == "inactive-active-plan":
+        return RouteReferenceRecoveryGuidance(
+            action="treat the default active-plan route as lazy until project-state opens or names an active plan",
+            next_safe_command="mylittleharness --root <root> check --focus agents",
+            boundary="inactive plan-file mentions do not create an active-plan requirement or approve plan opening",
+        )
+    if classification == "archived-source-reference":
+        return RouteReferenceRecoveryGuidance(
+            action="use the matching archived source reference as context and retarget stale live-source metadata only after review",
+            next_safe_command="mylittleharness --root <root> check --focus archive-context",
+            boundary="archived source context is evidence only; no automatic source restoration, archive movement, or lifecycle approval",
+        )
+    if classification == "optional-evidence-route":
+        return RouteReferenceRecoveryGuidance(
+            action="treat the optional evidence directory as absent until an owning evidence rail writes records",
+            next_safe_command="mylittleharness --root <root> check --focus agents",
+            boundary="optional evidence routes do not require empty directory creation or approve worker fanout",
+        )
+    if classification == "generated-disposable-cache":
+        return RouteReferenceRecoveryGuidance(
+            action="ignore for lifecycle authority, or inspect/rebuild the disposable projection cache only through generated-cache rails",
+            next_safe_command="mylittleharness --root <root> projection --inspect --target all",
+            boundary="generated cache refs are disposable navigation output, not source truth or recovery authority",
+        )
+    return RouteReferenceRecoveryGuidance(
+        action="inspect only when this historical or optional context is needed for a current decision",
+        next_safe_command="mylittleharness --root <root> check --focus archive-context",
+        boundary="optional historical context stays advisory; no repair, archive, or lifecycle movement is implied",
+    )
+
+
+def _route_reference_recovery_action(classification: str, records: list[RouteReferenceRecord]) -> str:
+    return _route_reference_recovery_guidance(classification, records).action
+
+
+def _route_reference_next_safe_command(classification: str, records: list[RouteReferenceRecord]) -> str:
+    return _route_reference_recovery_guidance(classification, records).next_safe_command
+
+
+def _route_reference_recovery_boundary(classification: str, records: list[RouteReferenceRecord]) -> str:
+    return _route_reference_recovery_guidance(classification, records).boundary
+
+
+def _frontmatter_key_line_from_text(text: str, key: str) -> int | None:
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return None
+    for index, line in enumerate(lines[1:], start=2):
+        if line.strip() == "---":
+            return None
+        if line.split(":", 1)[0].strip() == key:
+            return index
+    return None
+
+
+def _route_reference_line_is_compacted_history(text: str, line_number: int) -> bool:
+    current_heading = ""
+    for line in text.splitlines()[:line_number]:
+        if line.startswith("## "):
+            current_heading = line.strip("# ").strip().casefold()
+    return current_heading == "archived completed history"
 
 
 def _route_metadata_findings(inventory: Inventory) -> list[Finding]:
@@ -6489,16 +8455,58 @@ def _route_metadata_status_findings(surface: Surface) -> list[Finding]:
         ]
     normalized = value.strip().casefold()
     if normalized not in ROUTE_METADATA_STATUS_VALUES:
+        allowed_values = _route_metadata_allowed_status_values(surface)
+        allowed_hint = ", ".join(allowed_values)
         return [
             Finding(
                 "warn",
                 "route-metadata-status",
-                f"{surface.rel_path} status is {value!r}; expected a known lifecycle status",
+                (
+                    f"{surface.rel_path} status is {value!r}; expected a known status for route "
+                    f"{surface.memory_route!r}; route-specific allowed statuses: {allowed_hint}; "
+                    "next_safe_command=mylittleharness --root <root> suggest --intent \"metadata status\"; "
+                    "advisory only, no lifecycle approval"
+                ),
                 surface.rel_path,
                 _frontmatter_key_line(surface, "status"),
+                route_id=surface.memory_route,
+                allowed_decisions=allowed_values,
             )
         ]
-    return []
+    lifecycle_state = _route_metadata_lifecycle_state(normalized)
+    if not lifecycle_state:
+        return []
+    posture, next_safe_command = ROUTE_METADATA_LIFECYCLE_STATES[lifecycle_state]
+    return [
+        Finding(
+            "info",
+            "route-metadata-lifecycle-state",
+            (
+                f"{surface.rel_path} status={value!r}; lifecycle_state={lifecycle_state!r}; "
+                f"posture={posture}; next_safe_command={next_safe_command}; "
+                "operator_hint=mylittleharness --root <root> suggest --intent \"metadata status\"; "
+                "human_gate=explicit amendment required for status changes; no inferred approval"
+            ),
+            surface.rel_path,
+            _frontmatter_key_line(surface, "status"),
+            route_id=surface.memory_route,
+            requires_human_gate=True,
+            gate_class="lifecycle",
+            human_gate_reason="route status changes require an explicit reviewed command or human-authored metadata update",
+            allowed_decisions=tuple(ROUTE_METADATA_LIFECYCLE_STATES),
+        )
+    ]
+
+
+def _route_metadata_allowed_status_values(surface: Surface) -> tuple[str, ...]:
+    return ROUTE_METADATA_STATUS_HINTS_BY_ROUTE.get(surface.memory_route, tuple(sorted(ROUTE_METADATA_STATUS_VALUES)))
+
+
+def _route_metadata_lifecycle_state(status: str) -> str:
+    canonical = status.replace("-", "_").casefold()
+    if canonical in ROUTE_METADATA_LIFECYCLE_STATES:
+        return canonical
+    return ""
 
 
 def _is_route_metadata_path_field(key: str) -> bool:
@@ -6948,6 +8956,8 @@ def _intake_request_errors(inventory: Inventory, request: IntakeRequest, apply: 
         errors.append(Finding("error", "intake-refused", "intake text is required"))
 
     advice = classify_intake_text(request.text)
+    if not apply and request.target and not advice.apply_allowed:
+        errors.append(Finding("error", "intake-refused", f"input is ambiguous: {advice.reason}", request.target))
     if apply:
         if inventory.root_kind == "product_source_fixture":
             errors.append(Finding("error", "intake-refused", "target is a product-source compatibility fixture; intake --apply is refused", request.target or None))
@@ -6962,6 +8972,8 @@ def _intake_request_errors(inventory: Inventory, request: IntakeRequest, apply: 
 
     if request.target:
         errors.extend(_intake_target_errors(inventory, request.target, advice, apply))
+    if apply and errors:
+        errors.extend(_intake_incubation_fallback_findings(request, advice))
     return errors
 
 
@@ -7030,6 +9042,48 @@ def _intake_target_preview_findings(request: IntakeRequest, advice: IntakeRouteA
             request.target,
         )
     ]
+
+
+def _intake_incubation_fallback_findings(request: IntakeRequest, advice: IntakeRouteAdvice) -> list[Finding]:
+    if not _intake_future_incubation_signal(request):
+        return []
+    compatible = bool(request.target) and advice.apply_allowed and intake_target_matches_route(advice.route_id, request.target)
+    if advice.route_id == "incubation" and compatible:
+        return []
+    target_note = ""
+    if request.target and classify_memory_route(request.target).route_id == "archive":
+        target_note = " Archive/reference incubation paths are historical references, not the live incubation write target."
+    return [
+        Finding(
+            "info",
+            "intake-incubation-fallback",
+            (
+                "future feature or Deep Research prompt-composition ideas should land in live project/plan-incubation/*.md; "
+                "safest fallback command: `mylittleharness --root <root> incubate --dry-run --topic \"<topic>\" --note \"<note>\"` "
+                f"before the matching apply.{target_note}"
+            ),
+            request.target or None,
+        )
+    ]
+
+
+def _intake_future_incubation_signal(request: IntakeRequest) -> bool:
+    normalized = re.sub(r"\s+", " ", request.text.casefold().replace("_", " ").replace("-", " ")).strip()
+    future_signal = any(
+        cue in normalized
+        for cue in (
+            "feature idea",
+            "future feature",
+            "future idea",
+            "future product idea",
+            "product idea",
+            "not yet accepted",
+        )
+    )
+    prompt_signal = any(cue in normalized for cue in ("deep research prompt", "research prompt", "prompt composition"))
+    target = request.target.casefold().replace("\\", "/")
+    target_signal = "project/plan-incubation/" in target or "project/archive/reference/incubation/" in target
+    return bool((future_signal and (prompt_signal or target_signal)) or (prompt_signal and target_signal))
 
 
 def _intake_boundary_findings() -> list[Finding]:
@@ -7142,60 +9196,6 @@ def _is_mylittleharness_product_context(inventory: Inventory) -> bool:
     )
 
 
-def _iter_hygiene_paths(root: Path) -> list[tuple[Path, str]]:
-    paths: list[tuple[Path, str]] = []
-    _collect_hygiene_paths(root, root, paths)
-    return paths
-
-
-def _collect_hygiene_paths(root: Path, current: Path, paths: list[tuple[Path, str]]) -> None:
-    try:
-        children = sorted(current.iterdir(), key=lambda item: item.name.lower())
-    except OSError:
-        return
-    for child in children:
-        rel_path = child.relative_to(root).as_posix()
-        if rel_path == ".git" or rel_path.startswith(".git/"):
-            continue
-        paths.append((child, rel_path))
-        if child.is_dir() and not child.is_symlink() and _should_descend_for_hygiene(child, rel_path):
-            _collect_hygiene_paths(root, child, paths)
-
-
-def _should_descend_for_hygiene(path: Path, rel_path: str) -> bool:
-    return _classify_product_hygiene_path(path, rel_path) is None
-
-
-def _classify_product_hygiene_path(path: Path, rel_path: str) -> tuple[str, str] | None:
-    normalized = rel_path.replace("\\", "/").lower()
-    if normalized in {".mylittleharness", ".mylittleharness/generated"} or normalized.startswith(".mylittleharness/generated/projection"):
-        return None
-    if normalized.startswith(".mylittleharness/"):
-        return ("product-debris", "generated MyLittleHarness output is allowed only under .mylittleharness/generated/projection")
-    for prefix, reason in PRODUCT_HYGIENE_OPERATIONAL_PREFIXES.items():
-        prefix_lower = prefix.lower()
-        if normalized == prefix_lower or normalized.startswith(prefix_lower.rstrip("/") + "/"):
-            return ("forbidden-product-surface", reason)
-    for prefix, reason in PRODUCT_HYGIENE_PACKAGE_PREFIXES.items():
-        prefix_lower = prefix.lower()
-        if normalized == prefix_lower or normalized.startswith(prefix_lower.rstrip("/") + "/"):
-            return ("forbidden-product-surface", reason)
-
-    name = path.name.lower()
-    if path.is_dir() and (name in PRODUCT_HYGIENE_DEBRIS_DIR_NAMES or name.endswith(".egg-info")):
-        return ("product-debris", "generated/cache/build/runtime directory is excluded from product source")
-    if path.is_file():
-        if name in PRODUCT_HYGIENE_DEBRIS_FILE_NAMES:
-            return ("product-debris", "generated validation, coverage, or runtime file is excluded from product source")
-        if name.startswith("validation-report") and name.endswith(".md"):
-            return ("product-debris", "generated validation report is excluded from product source")
-        if any(name.endswith(suffix) for suffix in PRODUCT_HYGIENE_DEBRIS_FILE_SUFFIXES):
-            return ("product-debris", "log, local database, package archive, or temporary file is excluded from product source")
-        if any(name.endswith(suffix) for suffix in PRODUCT_HYGIENE_ARCHIVE_SUFFIXES):
-            return ("product-debris", "package archive is excluded from product source")
-    return None
-
-
 def _string_contains(inventory: Inventory, needle: str) -> bool:
     return any(surface.exists and needle in surface.content for surface in inventory.surfaces)
 
@@ -7265,6 +9265,8 @@ def _optional_missing_link_reason(inventory: Inventory, target: str) -> str | No
             return "root README.md is optional for live operating roots"
         if rel == "project/roadmap.md":
             return "project/roadmap.md is an optional live-root roadmap route"
+        if rel.startswith(("docs/", "architecture/", "specs/")) and _configured_product_root_contains_link(inventory, rel):
+            return "configured product source root contains this product documentation link; product docs are not required inside the live operating root"
 
     state = inventory.state
     state_data = state.frontmatter.data if state and state.exists else {}
@@ -7285,9 +9287,19 @@ def _optional_missing_link_reason(inventory: Inventory, target: str) -> str | No
         return "the implementation plan is a lazy surface when plan_status is not active"
 
     if rel == DETACH_MARKER_REL_PATH:
-        return "detach marker is created only in eligible live operating roots and is absent from the product source fixture"
+        return "detach marker is created only when detach is active and may be absent"
     if rel == ".mylittleharness/generated/projection" or rel.startswith(".mylittleharness/generated/projection/"):
         return "generated projection artifacts are disposable navigation output and may be rebuilt when needed"
+    if rel in {"project/verification/agent-runs", "project/verification/approval-packets", "project/verification/work-claims"}:
+        return "optional evidence directories are created only when those records exist"
+    if rel.startswith(("project/verification/agent-runs/", "project/verification/approval-packets/", "project/verification/work-claims/")):
+        return "optional evidence records are created only when an agent run, approval packet, or work claim exists"
+    if rel in {"project/archive/reference/research", "project/archive/reference/research/"}:
+        return "archived research reference directory is optional until research is archived"
+    if rel.startswith("project/archive/reference/project-state-history-") and rel.endswith(".md"):
+        return "project-state history archive names in docs are examples until compaction creates a concrete file"
+    if rel.startswith(".harness/"):
+        return "legacy harness sketch paths in research are historical context, not required MLH scaffold"
     if rel == "project/plan-incubation" or rel.startswith("project/plan-incubation/"):
         return "plan incubation surfaces are optional and only exist when a lane is open"
     if rel in {DOCMAP_REPAIR_COPY_REL, STATE_FRONTMATTER_COPY_REL}:
@@ -7316,6 +9328,19 @@ def _optional_missing_link_reason(inventory: Inventory, target: str) -> str | No
         if rel == "specs/workflow" or rel.startswith("specs/workflow/"):
             return "root package-source spec mirrors are intentionally excluded from this product source tree"
     return None
+
+
+def _configured_product_root_contains_link(inventory: Inventory, rel: str) -> bool:
+    state = inventory.state
+    state_data = state.frontmatter.data if state and state.exists else {}
+    product_root = str(state_data.get("product_source_root") or state_data.get("projection_root") or "").strip()
+    if not product_root:
+        return False
+    base = Path(product_root)
+    candidates = [base / rel]
+    if rel.startswith(("architecture/", "specs/")):
+        candidates.append(base / "docs" / rel)
+    return any(candidate.exists() for candidate in candidates)
 
 
 def _normalized_link_path(target: str) -> str:

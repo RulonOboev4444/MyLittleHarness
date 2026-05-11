@@ -3,14 +3,15 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 
+from .command_discovery import rails_not_cognition_boundary_finding
 from .inventory import Inventory, Surface
 from .models import Finding
-from .evidence import durable_proof_record_findings
+from .evidence import durable_proof_record_findings, git_context_trailer_values
 from .evidence_cues import CLOSEOUT_FIELD_NAMES, closeout_field_cues, cue_findings, find_cues
 from .projection_artifacts import inspect_projection_artifacts
 from .projection_index import inspect_projection_index
-from .vcs import VcsPosture, probe_vcs
-from .writeback import WritebackFact, state_writeback_facts
+from .vcs import VcsPosture, parse_head_commit_trailers, probe_vcs
+from .writeback import WritebackFact, state_writeback_facts, state_writeback_identity_matches_current_plan
 
 
 RESIDUAL_RISK_PATTERNS = (r"\bresidual risks?\b", r"\brisk remains\b", r"\bremaining risk\b")
@@ -36,6 +37,18 @@ GIT_EVIDENCE_OPTIONAL_TRAILERS = (
     ("residual_risk", "MLH-Residual-Risk", ("residual risk", "residual risks")),
     ("carry_forward", "MLH-Carry-Forward", ("carry-forward", "carry forward")),
 )
+GIT_EXISTING_TRAILER_KEYS = frozenset(
+    (
+        "MLH-Plan",
+        "MLH-Phase",
+        "MLH-Slice",
+        "MLH-Roadmap-Item",
+        "MLH-Archived-Plan",
+        "MLH-Product-Source-Root",
+        *(trailer_name for _field, trailer_name in GIT_EVIDENCE_REQUIRED_TRAILERS),
+        *(trailer_name for _field, trailer_name, _labels in GIT_EVIDENCE_OPTIONAL_TRAILERS),
+    )
+)
 
 
 def closeout_sections(inventory: Inventory) -> list[tuple[str, list[Finding]]]:
@@ -58,7 +71,7 @@ def _summary_findings(inventory: Inventory) -> list[Finding]:
         Finding(
             "info",
             "closeout-boundary",
-            "terminal-only read-only report; persistent evidence manifest remains deferred; may run target-bound Git rev-parse/status probes but writes no files, report artifacts, caches, databases, hooks, commits, archives, repairs, or lifecycle mutations",
+            "terminal-only read-only report; persistent evidence manifest remains deferred; may run target-bound Git rev-parse/status probes plus read-only HEAD trailer parsing but writes no files, report artifacts, caches, databases, hooks, commits, archives, repairs, or lifecycle mutations",
         ),
         Finding("info", "closeout-root-kind", f"root kind: {inventory.root_kind}"),
     ]
@@ -116,7 +129,7 @@ def _worktree_findings(posture: VcsPosture) -> list[Finding]:
         Finding(
             "info",
             "closeout-vcs-probe",
-            "read-only VCS probe uses target-bound Git discovery and porcelain status only",
+            "read-only VCS probe uses target-bound Git discovery and porcelain status only; Git trailer parsing is a separate read-only evidence hint",
         )
     ]
     if posture.top_level:
@@ -176,7 +189,8 @@ def _changed_samples(posture: VcsPosture) -> str:
 def _closeout_field_findings(inventory: Inventory, posture: VcsPosture) -> list[Finding]:
     findings: list[Finding] = []
     active_plan = inventory.active_plan_surface if inventory.active_plan_surface and inventory.active_plan_surface.exists else None
-    facts = state_writeback_facts(inventory.state)
+    findings.extend(_stale_state_writeback_identity_findings(inventory))
+    facts = _trusted_state_writeback_facts(inventory)
     if not active_plan and not facts:
         findings.append(Finding("info", "closeout-field-scan", "closeout field scan skipped because no active plan is present"))
     else:
@@ -265,8 +279,10 @@ def _git_evidence_findings(inventory: Inventory, posture: VcsPosture) -> list[Fi
         )
         return findings
 
+    findings.extend(_existing_git_trailer_findings(inventory))
+
     active_plan = inventory.active_plan_surface if inventory.active_plan_surface and inventory.active_plan_surface.exists else None
-    facts = state_writeback_facts(inventory.state)
+    facts = _trusted_state_writeback_facts(inventory)
     if not active_plan and not facts:
         findings.append(
             Finding(
@@ -292,6 +308,15 @@ def _git_evidence_findings(inventory: Inventory, posture: VcsPosture) -> list[Fi
 
     posture_note = "dirty worktree; suggestions remain advisory and require explicit task_scope" if posture.state == "dirty" else "clean worktree; suggestions remain advisory"
     findings.append(Finding("info", "closeout-git-evidence-posture", posture_note))
+    for trailer_name, value in git_context_trailer_values(inventory, active_plan, facts):
+        findings.append(
+            Finding(
+                "info",
+                "closeout-git-evidence-trailer",
+                f"suggestion: {trailer_name}: {value}",
+                trailer_source,
+            )
+        )
     for trailer_name, value in values:
         findings.append(
             Finding(
@@ -314,10 +339,66 @@ def _git_evidence_findings(inventory: Inventory, posture: VcsPosture) -> list[Fi
     return findings
 
 
+def _existing_git_trailer_findings(inventory: Inventory) -> list[Finding]:
+    source = inventory.state.rel_path if inventory.state and inventory.state.exists else None
+    result = parse_head_commit_trailers(inventory.root)
+    if not result.parsed:
+        detail = f": {result.detail}" if result.detail else ""
+        return [
+            Finding(
+                "info",
+                "closeout-git-existing-trailer-fallback",
+                f"existing HEAD trailer parse unavailable{detail}; current closeout facts remain repo-visible Markdown/writeback authority",
+                source,
+            )
+        ]
+
+    if not result.trailers:
+        return [
+            Finding(
+                "info",
+                "closeout-git-existing-trailer-parse",
+                "read-only git interpret-trailers parse found no existing HEAD trailers",
+                source,
+            )
+        ]
+
+    recognized = [trailer for trailer in result.trailers if trailer.key in GIT_EXISTING_TRAILER_KEYS]
+    findings = [
+        Finding(
+            "info",
+            "closeout-git-existing-trailer-parse",
+            "read-only git interpret-trailers parse treats existing HEAD trailers as historical context only; current lifecycle identity and closeout facts remain authoritative",
+            source,
+        )
+    ]
+    if not recognized:
+        findings.append(
+            Finding(
+                "info",
+                "closeout-git-existing-trailer-parse",
+                f"parsed {len(result.trailers)} existing HEAD trailer(s), with no recognized MLH evidence keys",
+                source,
+            )
+        )
+        return findings
+
+    for trailer in recognized:
+        findings.append(
+            Finding(
+                "info",
+                "closeout-git-existing-trailer",
+                f"existing HEAD trailer: {trailer.key}: {trailer.value}",
+                source,
+            )
+        )
+    return findings
+
+
 def _required_trailer_values(inventory: Inventory, active_plan: Surface | None) -> tuple[list[tuple[str, str]], list[str]]:
     values: list[tuple[str, str]] = []
     missing: list[str] = []
-    facts = state_writeback_facts(inventory.state)
+    facts = _trusted_state_writeback_facts(inventory)
     for field, trailer_name in GIT_EVIDENCE_REQUIRED_TRAILERS:
         value = _state_fact_value(facts, field)
         if not value and active_plan and field in {"worktree_start_state", "task_scope"}:
@@ -344,7 +425,7 @@ def _closeout_field_trailer_value(active_plan: Surface, field: str) -> str:
 
 def _optional_trailer_values(inventory: Inventory, active_plan: Surface | None) -> list[tuple[str, str]]:
     values: list[tuple[str, str]] = []
-    facts = state_writeback_facts(inventory.state)
+    facts = _trusted_state_writeback_facts(inventory)
     for _key, trailer_name, labels in GIT_EVIDENCE_OPTIONAL_TRAILERS:
         value = _state_fact_value(facts, _key) or (_explicit_line_value(active_plan, labels) if active_plan else "")
         if value:
@@ -382,7 +463,7 @@ def _normalize_trailer_value(value: str) -> str:
 def _evidence_cue_findings(inventory: Inventory) -> list[Finding]:
     active_plan = inventory.active_plan_surface if inventory.active_plan_surface and inventory.active_plan_surface.exists else None
     findings: list[Finding] = []
-    facts = state_writeback_facts(inventory.state)
+    facts = _trusted_state_writeback_facts(inventory)
     findings.extend(_line_group_findings(active_plan, "closeout-residual-risk", "residual risk", RESIDUAL_RISK_PATTERNS, facts.get("residual_risk")))
     findings.extend(_line_group_findings(active_plan, "closeout-skip-rationale", "skip rationale", SKIP_RATIONALE_PATTERNS))
     findings.extend(_line_group_findings(active_plan, "closeout-carry-forward", "carry-forward", CARRY_FORWARD_PATTERNS, facts.get("carry_forward")))
@@ -402,7 +483,7 @@ def _line_group_findings(active_plan: Surface | None, code: str, label: str, pat
 
 def _quality_gate_findings(inventory: Inventory, posture: VcsPosture) -> list[Finding]:
     active_plan = inventory.active_plan_surface if inventory.active_plan_surface and inventory.active_plan_surface.exists else None
-    facts = state_writeback_facts(inventory.state)
+    facts = _trusted_state_writeback_facts(inventory)
     findings = [
         Finding(
             "info",
@@ -448,6 +529,34 @@ def _quality_gate_findings(inventory: Inventory, posture: VcsPosture) -> list[Fi
     return findings
 
 
+def _trusted_state_writeback_facts(inventory: Inventory) -> dict[str, WritebackFact]:
+    facts = state_writeback_facts(inventory.state)
+    if not facts:
+        return {}
+    if state_writeback_identity_matches_current_plan(inventory):
+        return facts
+    return {}
+
+
+def _stale_state_writeback_identity_findings(inventory: Inventory) -> list[Finding]:
+    facts = state_writeback_facts(inventory.state)
+    if not facts or state_writeback_identity_matches_current_plan(inventory):
+        return []
+    source = inventory.state.rel_path if inventory.state and inventory.state.exists else None
+    return [
+        Finding(
+            "warn",
+            "closeout-state-writeback-stale",
+            (
+                "ignored project-state closeout writeback candidates because their recorded plan identity does not "
+                "match the current active or archived plan; active-plan closeout fields or same-request transition "
+                "fields remain the current closeout inputs"
+            ),
+            source,
+        )
+    ]
+
+
 def _projection_findings(inventory: Inventory) -> list[Finding]:
     artifact_findings = inspect_projection_artifacts(inventory)
     index_findings = inspect_projection_index(inventory)
@@ -467,6 +576,7 @@ def _projection_findings(inventory: Inventory) -> list[Finding]:
 
 def _boundary_findings(inventory: Inventory) -> list[Finding]:
     return [
+        rails_not_cognition_boundary_finding("project/implementation-plan.md"),
         Finding(
             "info",
             "closeout-non-authority",

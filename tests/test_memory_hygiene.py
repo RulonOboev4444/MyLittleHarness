@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import io
+import re
 import sys
 import tempfile
 import unittest
@@ -126,6 +128,154 @@ class MemoryHygieneTests(unittest.TestCase):
             self.assertIn("memory-hygiene-refused", output.getvalue())
             self.assertIn("product-source compatibility fixture", output.getvalue())
 
+    def test_rotate_ledger_dry_run_and_apply_seed_fresh_continuity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            for spec_name in (
+                "workflow-artifact-model-spec.md",
+                "workflow-capability-roadmap-spec.md",
+                "workflow-plan-synthesis-spec.md",
+                "workflow-rollout-slices-spec.md",
+                "workflow-verification-and-closeout-spec.md",
+            ):
+                (root / f"project/specs/workflow/{spec_name}").write_text(f"# {spec_name}\n", encoding="utf-8")
+            ledger_rel = "project/verification/autonomous-mlh-swim-ledger.md"
+            source_text = "# Autonomous MLH Swim Ledger\n\nOld verification history.\n"
+            ledger = root / ledger_rel
+            ledger.parent.mkdir(parents=True, exist_ok=True)
+            ledger.write_text(source_text, encoding="utf-8")
+            source_hash = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
+            archive_rel = f"project/archive/reference/verification/{date.today().isoformat()}-autonomous-mlh-swim-ledger.md"
+            before = snapshot_tree(root)
+
+            dry_output = io.StringIO()
+            with redirect_stdout(dry_output):
+                dry_code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "memory-hygiene",
+                        "--dry-run",
+                        "--rotate-ledger",
+                        "--source",
+                        ledger_rel,
+                        "--reason",
+                        "test rotation",
+                    ]
+                )
+
+            rendered = dry_output.getvalue()
+            self.assertEqual(dry_code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("verification-ledger-rotate-dry-run", rendered)
+            self.assertIn(source_hash, rendered)
+            self.assertIn(archive_rel, rendered)
+            self.assertIn(f"--source-hash {source_hash}", rendered)
+
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                apply_code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "memory-hygiene",
+                        "--apply",
+                        "--rotate-ledger",
+                        "--source",
+                        ledger_rel,
+                        "--source-hash",
+                        source_hash,
+                        "--reason",
+                        "test rotation",
+                    ]
+                )
+
+            self.assertEqual(apply_code, 0)
+            self.assertEqual((root / archive_rel).read_text(encoding="utf-8"), source_text)
+            fresh_text = ledger.read_text(encoding="utf-8")
+            self.assertIn("mylittleharness-verification-ledger-continuity", fresh_text)
+            self.assertIn(f"Previous ledger archive: `{archive_rel}`", fresh_text)
+            self.assertIn(f"Previous ledger sha256: `{source_hash}`", fresh_text)
+            self.assertIn("Reason: test rotation", fresh_text)
+            self.assertIn("verification-ledger-archived", apply_output.getvalue())
+            self.assertIn("verification-ledger-seeded", apply_output.getvalue())
+
+            check_output = io.StringIO()
+            with redirect_stdout(check_output):
+                check_code = main(["--root", str(root), "check"])
+            self.assertEqual(check_code, 0)
+            check_rendered = check_output.getvalue()
+            self.assertIn("check-verification-ledger-active", check_rendered)
+            self.assertIn("fresh active verification ledger with continuity pointer", check_rendered)
+            self.assertIn("check-verification-ledger-archive", check_rendered)
+            self.assertIn("historical, not active continuation state", check_rendered)
+
+    def test_rotate_ledger_apply_refuses_stale_source_hash_before_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            ledger_rel = "project/verification/autonomous-mlh-swim-ledger.md"
+            original_text = "# Ledger\n\nOriginal history.\n"
+            ledger = root / ledger_rel
+            ledger.parent.mkdir(parents=True, exist_ok=True)
+            ledger.write_text(original_text, encoding="utf-8")
+            stale_hash = hashlib.sha256(original_text.encode("utf-8")).hexdigest()
+            changed_text = "# Ledger\n\nChanged after review.\n"
+            ledger.write_text(changed_text, encoding="utf-8")
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "memory-hygiene",
+                        "--apply",
+                        "--rotate-ledger",
+                        "--source",
+                        ledger_rel,
+                        "--source-hash",
+                        stale_hash,
+                    ]
+                )
+
+            self.assertEqual(code, 2)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertFalse((root / f"project/archive/reference/verification/{date.today().isoformat()}-autonomous-mlh-swim-ledger.md").exists())
+            self.assertIn("source hash changed after review", output.getvalue())
+
+    def test_rotate_ledger_apply_refuses_product_fixture_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_product_fixture_root(Path(tmp))
+            ledger_rel = "project/verification/autonomous-mlh-swim-ledger.md"
+            source_text = "# Ledger\n\nFixture history.\n"
+            ledger = root / ledger_rel
+            ledger.parent.mkdir(parents=True, exist_ok=True)
+            ledger.write_text(source_text, encoding="utf-8")
+            source_hash = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "memory-hygiene",
+                        "--apply",
+                        "--rotate-ledger",
+                        "--source",
+                        ledger_rel,
+                        "--source-hash",
+                        source_hash,
+                    ]
+                )
+
+            self.assertEqual(code, 2)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("verification-ledger-rotate-refused", output.getvalue())
+            self.assertIn("product-source compatibility fixture", output.getvalue())
+
     def test_apply_refuses_archive_conflict_before_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp))
@@ -224,6 +374,174 @@ class MemoryHygieneTests(unittest.TestCase):
             self.assertIn("relationship-scan-read-only", rendered)
             self.assertIn("cli-text-audit-summary", rendered)
 
+    def test_scan_proposal_token_applies_current_cleanup_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            archive_plan_dir = root / "project/archive/plans"
+            archive_plan_dir.mkdir(parents=True, exist_ok=True)
+            item_blocks = []
+            source_rels = []
+            archive_rels = []
+            for index in range(2):
+                item_id = f"covered-{index}"
+                source_rel = f"project/plan-incubation/covered-{index}.md"
+                archive_rel = f"project/archive/reference/incubation/{date.today().isoformat()}-covered-{index}.md"
+                archive_plan_rel = f"project/archive/plans/covered-{index}.md"
+                source_rels.append(source_rel)
+                archive_rels.append(archive_rel)
+                (root / source_rel).write_text(
+                    "---\n"
+                    f'topic: "Covered {index}"\n'
+                    'status: "incubating"\n'
+                    'related_roadmap: "project/roadmap.md"\n'
+                    f'related_roadmap_item: "{item_id}"\n'
+                    "---\n"
+                    f"# Covered {index}\n\n"
+                    "## Entries\n\n"
+                    "### 2026-05-01\n\n"
+                    "Covered work.\n",
+                    encoding="utf-8",
+                )
+                (root / archive_plan_rel).write_text(f"# Covered {index}\n", encoding="utf-8")
+                item_blocks.append(
+                    f"### Covered {index}\n\n"
+                    f"- `id`: `{item_id}`\n"
+                    "- `status`: `done`\n"
+                    f"- `source_incubation`: `{source_rel}`\n"
+                    f"- `archived_plan`: `{archive_plan_rel}`\n"
+                    "- `verification_summary`: `covered`\n"
+                    "- `docs_decision`: `not-needed`\n"
+                )
+            (root / "project/roadmap.md").write_text(
+                "---\n"
+                'id: "memory-routing-roadmap"\n'
+                "---\n"
+                "# Roadmap\n\n"
+                "## Items\n\n"
+                + "\n".join(item_blocks),
+                encoding="utf-8",
+            )
+            verification = root / "project/verification/cleanup-links.md"
+            verification.parent.mkdir(parents=True, exist_ok=True)
+            verification.write_text(
+                f"Covered source refs: `{source_rels[0]}` and `{source_rels[1]}`.\n",
+                encoding="utf-8",
+            )
+
+            dry_output = io.StringIO()
+            before = snapshot_tree(root)
+            with redirect_stdout(dry_output):
+                dry_code = main(["--root", str(root), "memory-hygiene", "--dry-run", "--scan"])
+            dry_rendered = dry_output.getvalue()
+            self.assertEqual(dry_code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            token_match = re.search(r"batch_review_token=(mhb-[a-f0-9]{16})", dry_rendered)
+            self.assertIsNotNone(token_match)
+            token = token_match.group(1)
+
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                apply_code = main(["--root", str(root), "memory-hygiene", "--apply", "--scan", "--proposal-token", token])
+
+            rendered = apply_output.getvalue()
+            self.assertEqual(apply_code, 0)
+            for source_rel, archive_rel in zip(source_rels, archive_rels):
+                self.assertFalse((root / source_rel).exists())
+                archived_text = (root / archive_rel).read_text(encoding="utf-8")
+                self.assertIn('status: "implemented"', archived_text)
+                self.assertIn(f'archived_to: "{archive_rel}"', archived_text)
+            verification_text = verification.read_text(encoding="utf-8")
+            roadmap_text = (root / "project/roadmap.md").read_text(encoding="utf-8")
+            for source_rel, archive_rel in zip(source_rels, archive_rels):
+                self.assertNotIn(source_rel, verification_text)
+                self.assertNotIn(source_rel, roadmap_text)
+                self.assertIn(archive_rel, verification_text)
+                self.assertIn(archive_rel, roadmap_text)
+            self.assertIn("memory-hygiene-batch-token-accepted", rendered)
+            self.assertIn("memory-hygiene-batch-candidate-applied", rendered)
+            self.assertIn("memory-hygiene-link-repaired", rendered)
+
+    def test_scan_proposal_token_refuses_stale_link_hash_before_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            source = make_incubation_source(root)
+            source_rel = source.relative_to(root).as_posix()
+            archive_plan = "project/archive/plans/covered.md"
+            (root / archive_plan).parent.mkdir(parents=True, exist_ok=True)
+            (root / archive_plan).write_text("# Covered\n", encoding="utf-8")
+            write_relationship_roadmap(
+                root,
+                source_rel,
+                status="done",
+                archived_plan=archive_plan,
+                verification_summary="covered",
+                docs_decision="updated",
+            )
+            link_file = root / "project/verification/cleanup-links.md"
+            link_file.parent.mkdir(parents=True, exist_ok=True)
+            link_file.write_text(f"Covered source ref: `{source_rel}`.\n", encoding="utf-8")
+
+            dry_output = io.StringIO()
+            with redirect_stdout(dry_output):
+                dry_code = main(["--root", str(root), "memory-hygiene", "--dry-run", "--scan"])
+            self.assertEqual(dry_code, 0)
+            token_match = re.search(r"batch_review_token=(mhb-[a-f0-9]{16})", dry_output.getvalue())
+            self.assertIsNotNone(token_match)
+            token = token_match.group(1)
+
+            link_file.write_text(f"Covered source ref changed after review: `{source_rel}`.\n", encoding="utf-8")
+            before = snapshot_tree(root)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "memory-hygiene", "--apply", "--scan", "--proposal-token", token])
+
+            self.assertEqual(code, 2)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertTrue(source.exists())
+            self.assertFalse((root / f"project/archive/reference/incubation/{date.today().isoformat()}-idea.md").exists())
+            self.assertIn("proposal token mismatch or stale scan", output.getvalue())
+
+    def test_scan_treats_reconstructed_archive_uncertain_docs_as_historical_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            source = make_incubation_source(root)
+            archived_plan = "project/archive/plans/2026-05-01-relation-test.md"
+            archive_path = root / archived_plan
+            archive_path.parent.mkdir(parents=True)
+            archive_path.write_text(
+                "---\n"
+                'plan_id: "relation-test"\n'
+                'status: "complete"\n'
+                'docs_decision: "uncertain"\n'
+                'reconstruction_status: "reconstructed"\n'
+                'authority: "reconstructed historical dependency evidence only"\n'
+                "---\n"
+                "# Relation Test\n\n"
+                "This file is a reconstructed historical pointer. "
+                "It is not the original implementation plan.\n",
+                encoding="utf-8",
+            )
+            write_relationship_roadmap(
+                root,
+                source.relative_to(root).as_posix(),
+                status="done",
+                archived_plan=archived_plan,
+                verification_summary="historical verification was reconstructed from roadmap evidence",
+                docs_decision="uncertain",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "memory-hygiene", "--dry-run", "--scan"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("relationship-roadmap-done-reconstructed-docs", rendered)
+            self.assertIn("reconstructed historical evidence", rendered)
+            self.assertNotIn("relationship-roadmap-done-missing-docs", rendered)
+
     def test_scan_reports_entry_coverage_and_split_suggestions_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp))
@@ -283,6 +601,49 @@ class MemoryHygieneTests(unittest.TestCase):
             self.assertIn("unchecked task list item", rendered)
             self.assertIn("incubation-cleanup-ambiguous", rendered)
             self.assertIn("2 active incubation note(s)", rendered)
+
+    def test_scan_keeps_meta_feedback_candidates_roadmap_detached_without_orphan_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            (root / "project/plan-incubation/meta-feedback-note.md").write_text(
+                "---\n"
+                'topic: "meta feedback note"\n'
+                'status: "incubating"\n'
+                'source: "incubate cli"\n'
+                "---\n"
+                "# meta feedback note\n\n"
+                "## Meta-feedback Cluster\n\n"
+                "<!-- BEGIN mylittleharness-meta-feedback-cluster v1 -->\n"
+                "- `canonical_id`: `meta-feedback-note`\n"
+                "- `signal_type`: `operator-friction`\n"
+                "<!-- END mylittleharness-meta-feedback-cluster v1 -->\n"
+                "\n"
+                "## Entries\n\n"
+                "### 2026-05-01\n\n"
+                "[MLH-Fix-Candidate]\n\n"
+                "manual_step: keep this roadmap-detached until explicit promotion.\n\n"
+                "### 2026-05-02\n\n"
+                "[MLH-Fix-Candidate]\n\n"
+                "manual_step: append another observation without forcing archive cleanup ceremony yet.\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "memory-hygiene", "--dry-run", "--scan"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("relationship-meta-feedback-candidate", rendered)
+            self.assertIn("meta-feedback candidate is roadmap-detached operating memory", rendered)
+            self.assertIn("incubation-cleanup-keep-active", rendered)
+            self.assertIn("1 keep-active", rendered)
+            self.assertNotIn("relationship-orphan-incubation", rendered)
+            self.assertNotIn("relationship-entry-coverage-needed", rendered)
+            self.assertNotIn("relationship-semantic-split-suggestion", rendered)
+            self.assertNotIn("incubation-cleanup-ambiguous", rendered)
 
     def test_scan_warns_and_keeps_active_incubation_with_stale_implementation_tail(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -465,6 +826,36 @@ class MemoryHygieneTests(unittest.TestCase):
             self.assertIn("- `2026-05-01`: `implemented` via project/archive/plans/first.md", archived_text)
             self.assertIn("- `2026-05-02`: `rejected` out of scope", archived_text)
             self.assertIn("memory-hygiene-archived", apply_output.getvalue())
+
+    def test_archive_covered_invalid_entry_coverage_id_reports_valid_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            make_mixed_incubation_source(root)
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "memory-hygiene",
+                        "--dry-run",
+                        "--source",
+                        "project/plan-incubation/mixed-idea.md",
+                        "--archive-covered",
+                        "--entry-coverage",
+                        "2026-05-03: implemented via project/archive/plans/missing.md",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("memory-hygiene-refused", rendered)
+            self.assertIn("entry coverage references unknown entry '2026-05-03'", rendered)
+            self.assertIn("valid entry ids: `2026-05-01`, `2026-05-02`", rendered)
+            self.assertIn('--entry-coverage "<entry-id>: implemented via <destination>"', rendered)
 
     def test_writeback_archives_multi_entry_incubation_when_entry_coverage_is_terminal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -790,11 +1181,11 @@ def make_live_root(root: Path) -> Path:
         encoding="utf-8",
     )
     (root / "project/project-state.md").write_text(
-        '---\nproject: "Demo"\nworkflow: "workflow-core"\noperating_mode: "ad_hoc"\nplan_status: "none"\nactive_plan: ""\n---\n# Demo Project State\n',
+        '---\nproject: "Sample"\nworkflow: "workflow-core"\noperating_mode: "ad_hoc"\nplan_status: "none"\nactive_plan: ""\n---\n# Sample Project State\n',
         encoding="utf-8",
     )
     (root / "AGENTS.md").write_text("# Agents\n", encoding="utf-8")
-    (root / "README.md").write_text("# Demo\n", encoding="utf-8")
+    (root / "README.md").write_text("# Sample\n", encoding="utf-8")
     (root / "project/specs/workflow/workflow-memory-routing-spec.md").write_text("# Routing Spec\n", encoding="utf-8")
     return root
 

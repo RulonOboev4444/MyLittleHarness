@@ -13,6 +13,7 @@ from .routes import classify_memory_route
 
 
 ROOT_RELATIVE_LINK_PREFIXES = (
+    ".mylittleharness/",
     ".agents/",
     ".codex/",
     "docs/",
@@ -29,6 +30,11 @@ PRODUCT_TARGET_ARTIFACT_PREFIXES = (
     "tests/",
 )
 PRODUCT_TARGET_ARTIFACT_NAMES = {"AGENTS.md", "README.md", "pyproject.toml"}
+HISTORICAL_LINK_CONTEXT_PREFIXES = (
+    ".mylittleharness/generated/",
+    "project/archive/",
+    "project/verification/",
+)
 FRONTMATTER_RELATIONSHIP_FIELDS = {
     "archived_plan",
     "archived_to",
@@ -289,7 +295,7 @@ def resolve_link(root: Path, target: str, source_rel: str | None = None) -> Link
     if not path_part:
         return LinkResolution("anchor", True)
     base = _link_base(root, path_part, source_rel)
-    if any(char in path_part for char in "*?[]{}"):
+    if any(char in path_part for char in "*?[]{}<>"):
         patterns = _expand_brace_pattern(path_part)
         exists = False
         for pattern in patterns:
@@ -331,6 +337,10 @@ def optional_missing_link_reason(inventory: Inventory, target: str) -> str | Non
             return "docmap is lazy for this live operating root"
         if rel == "README.md":
             return "root README.md is optional for live operating roots"
+        if rel == "project/roadmap.md":
+            return "project/roadmap.md is an optional live-root roadmap route"
+        if rel.startswith(("docs/", "architecture/", "specs/")) and _configured_product_root_contains(inventory, rel):
+            return "configured product source root contains this product documentation link; product docs are not required inside the live operating root"
 
     state = inventory.state
     state_data = state.frontmatter.data if state and state.exists else {}
@@ -350,6 +360,22 @@ def optional_missing_link_reason(inventory: Inventory, target: str) -> str | Non
     if rel == str(manifest_plan).replace("\\", "/") and plan_status != "active":
         return "the implementation plan is a lazy surface when plan_status is not active"
 
+    if rel == ".mylittleharness/detach/disabled.json":
+        return "detach marker is created only when detach is active and may be absent"
+    if rel == ".mylittleharness/generated/projection" or rel.startswith(".mylittleharness/generated/projection/"):
+        return "generated projection artifacts are disposable navigation output and may be rebuilt when needed"
+    if rel in {"project/verification/agent-runs", "project/verification/approval-packets", "project/verification/work-claims"}:
+        return "optional evidence directories are created only when those records exist"
+    if rel.startswith(("project/verification/agent-runs/", "project/verification/approval-packets/", "project/verification/work-claims/")):
+        return "optional evidence records are created only when an agent run, approval packet, or work claim exists"
+    if rel in {"project/archive/reference/research", "project/archive/reference/research/"}:
+        return "archived research reference directory is optional until research is archived"
+    if rel.startswith("project/archive/reference/project-state-history-") and rel.endswith(".md"):
+        return "project-state history archive names in docs are examples until compaction creates a concrete file"
+    if rel.startswith(".harness/"):
+        return "legacy harness sketch paths in research are historical context, not required MLH scaffold"
+    if rel in {"files/.agents/docmap.yaml", "files/project/project-state.md"}:
+        return "snapshot copied-file paths are relative to a repair snapshot directory, not the repo root"
     if rel == "project/plan-incubation" or rel.startswith("project/plan-incubation/"):
         return "plan incubation surfaces are optional and only exist when a lane is open"
 
@@ -368,6 +394,17 @@ def optional_missing_link_reason(inventory: Inventory, target: str) -> str | Non
         if rel == "specs/workflow" or rel.startswith("specs/workflow/"):
             return "root package-source spec mirrors are intentionally excluded from this product source tree"
     return None
+
+
+def _configured_product_root_contains(inventory: Inventory, rel: str) -> bool:
+    product_root = _configured_product_root(inventory)
+    if not product_root:
+        return False
+    base = Path(product_root)
+    candidates = [base / rel]
+    if rel.startswith(("architecture/", "specs/")):
+        candidates.append(base / "docs" / rel)
+    return any(candidate.exists() for candidate in candidates)
 
 
 def _source_record(surface: Surface) -> ProjectionSourceRecord:
@@ -407,6 +444,7 @@ def _local_link_records(inventory: Inventory, surfaces: tuple[Surface, ...]) -> 
                 continue
             target = normalized_link_path(link.target)
             product_target_reason = product_target_artifact_reason(inventory, surface, link.target, link.line)
+            historical_context_reason = historical_link_context_reason(surface, link.target, link.line)
             if resolution.kind == "unresolved":
                 status = "unresolved"
             elif resolution.kind == "pattern":
@@ -414,6 +452,8 @@ def _local_link_records(inventory: Inventory, surfaces: tuple[Surface, ...]) -> 
                     status = "pattern-present"
                 elif product_target_reason:
                     status = "product-target"
+                elif historical_context_reason:
+                    status = "historical-context"
                 else:
                     status = "pattern-missing"
             elif product_target_reason:
@@ -422,6 +462,8 @@ def _local_link_records(inventory: Inventory, surfaces: tuple[Surface, ...]) -> 
                 status = "present"
             elif optional_missing_link_reason(inventory, link.target):
                 status = "missing-optional"
+            elif historical_context_reason:
+                status = "historical-context"
             else:
                 status = "missing"
             records.append(ProjectionLinkRecord(surface.rel_path, link.line, target or link.target, status, resolution.kind))
@@ -442,6 +484,8 @@ def _fan_in_records(surface_by_rel: dict[str, Surface], records: tuple[Projectio
             status = "missing-optional"
         elif "product-target" in statuses:
             status = "product-target"
+        elif "historical-context" in statuses:
+            status = "historical-context"
         else:
             status = "present"
         fan_in.append(
@@ -613,16 +657,88 @@ def product_target_artifact_reason(inventory: Inventory, surface: Surface, targe
 
     if inventory.root_kind != "live_operating_root" or not _is_product_target_artifact_rel(rel):
         return None
-    if not _line_has_product_target_context(surface, line):
+    product_root = _configured_product_root(inventory)
+    if not (
+        _line_has_product_target_context(surface, line)
+        or (
+            product_root
+            and _configured_product_root_contains(inventory, rel)
+            and _line_has_product_source_prose_context(surface, line)
+        )
+    ):
         return None
 
-    product_root = _configured_product_root(inventory)
     if product_root:
         return (
-            f"{rel} is product-source target metadata; product files are not required inside this live operating root; "
+            f"{rel} is product-source target metadata or product-source evidence; "
+            f"product files are not required inside this live operating root; "
             f"configured product source root: {product_root}"
         )
-    return f"{rel} is product-source target metadata; product files are not required inside this live operating root"
+    return f"{rel} is product-source target metadata or product-source evidence; product files are not required inside this live operating root"
+
+
+def historical_link_context_reason(surface: Surface, target: str, line: int | None) -> str | None:
+    rel = normalized_link_path(target)
+    if not rel:
+        return None
+    if surface.rel_path.startswith(HISTORICAL_LINK_CONTEXT_PREFIXES):
+        return "reference appears in verification, archive, or generated navigation history; it is not a current link repair target unless current authority depends on it"
+    if _is_retired_research_prompt_packet_context(surface, rel, line):
+        return "reference appears in retired research-prompt packet/rubric context; treat as historical route evidence unless current product source restores the command/spec"
+    if _is_research_archive_inventory_context(surface, rel, line):
+        return "reference appears in a research audit inventory of missing roadmap-referenced archive files; review archive-context or roadmap diagnostics before any restore or retarget action"
+    if _is_research_claim_example_context(surface, rel, line):
+        return "reference appears in an illustrative research claim payload, not as current repo link repair evidence"
+    if _is_research_non_gate_partial_input_context(surface, rel, line):
+        return "reference is described as older partial research input, not the gate-closing source for the current distillate"
+    return None
+
+
+def _is_retired_research_prompt_packet_context(surface: Surface, rel: str, line: int | None) -> bool:
+    if line is None or line < 1:
+        return False
+    if rel != "docs/specs/research-prompt-packets.md":
+        return False
+    if not surface.rel_path.startswith("project/research/"):
+        return False
+    lines = surface.content.splitlines()
+    start = max(0, line - 4)
+    end = min(len(lines), line + 2)
+    window = "\n".join(lines[start:end]).casefold()
+    return any(marker in window for marker in ("research-prompt", "prompt packet", "prompt packets", "default packets"))
+
+
+def _is_research_archive_inventory_context(surface: Surface, rel: str, line: int | None) -> bool:
+    if line is None or line < 1:
+        return False
+    if not surface.rel_path.startswith("project/research/"):
+        return False
+    if not rel.startswith("project/archive/plans/"):
+        return False
+    heading = _nearest_heading_title(surface, line).casefold()
+    return "missing roadmap-referenced archive files" in heading
+
+
+def _is_research_claim_example_context(surface: Surface, rel: str, line: int | None) -> bool:
+    if line is None or line < 1:
+        return False
+    if not surface.rel_path.startswith("project/research/"):
+        return False
+    if not rel.startswith(("src/", "tests/", "docs/", "build_backend/")):
+        return False
+    text = _line_text(surface, line).casefold()
+    return ("'agent'" in text or '"agent"' in text) and ("'claim'" in text or '"claim"' in text)
+
+
+def _is_research_non_gate_partial_input_context(surface: Surface, rel: str, line: int | None) -> bool:
+    if line is None or line < 1:
+        return False
+    if not surface.rel_path.startswith("project/research/"):
+        return False
+    if not rel.startswith("project/research/"):
+        return False
+    text = _line_text(surface, line).casefold()
+    return "older" in text and "partial input only" in text and "not the gate-closing source" in text
 
 
 def _is_product_target_artifact_rel(rel: str) -> bool:
@@ -639,9 +755,47 @@ def _line_has_product_target_context(surface: Surface, line: int | None) -> bool
     if line > len(lines):
         return False
     current = lines[line - 1].casefold()
-    if any(marker in current for marker in ("target_artifacts", "target artifact", "target-artifact", "product source", "product-source", "product root", "product-root")):
+    if any(marker in current for marker in ("target_artifacts", "target artifact", "target-artifact")):
         return True
     return _frontmatter_key_for_line(lines, line) == "target_artifacts"
+
+
+def _line_has_product_source_prose_context(surface: Surface, line: int | None) -> bool:
+    text = _line_text(surface, line).casefold()
+    if not text:
+        return False
+    return any(
+        marker in text
+        for marker in (
+            "product source",
+            "product-source",
+            "product root",
+            "product-root",
+            "product-only",
+            "product full suite",
+            "clean product",
+            "product tests",
+            "product focused",
+        )
+    )
+
+
+def _line_text(surface: Surface, line: int | None) -> str:
+    if line is None or line < 1:
+        return ""
+    lines = surface.content.splitlines()
+    if line > len(lines):
+        return ""
+    return lines[line - 1]
+
+
+def _nearest_heading_title(surface: Surface, line: int) -> str:
+    title = ""
+    for heading in surface.headings:
+        if heading.line > line:
+            break
+        title = heading.title
+    return title
 
 
 def _frontmatter_key_for_line(lines: list[str], line: int) -> str:

@@ -141,6 +141,48 @@ class ProjectionTests(unittest.TestCase):
             self.assertTrue(target_edges)
             self.assertEqual({"product-target"}, {edge.status for edge in target_edges})
 
+    def test_projection_classifies_research_diagnostic_links_as_historical_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            (root / "project/research/archive-audit.md").write_text(
+                "# Archive Audit\n\n"
+                "## Missing Roadmap-Referenced Archive Files\n\n"
+                "- `project/archive/plans/old-missing-plan.md`\n",
+                encoding="utf-8",
+            )
+            (root / "project/research/parallel-claims.md").write_text(
+                "# Parallel Claims\n\n"
+                "Example payload: {'agent': 'worker-2', 'claim': 'src/auth/login.ts', 'expires': 'timestamp'}.\n",
+                encoding="utf-8",
+            )
+            (root / "project/research/context-tiers.md").write_text(
+                "# Context Tiers\n\n"
+                "The older `project/research/older-partial-input.md` remains partial input only; "
+                "it is not the gate-closing source for this slice.\n",
+                encoding="utf-8",
+            )
+
+            projection = build_projection(load_inventory(root))
+            link_statuses = {
+                record.target: record.status
+                for record in projection.links
+                if record.target
+                in {
+                    "project/archive/plans/old-missing-plan.md",
+                    "src/auth/login.ts",
+                    "project/research/older-partial-input.md",
+                }
+            }
+
+            self.assertEqual(
+                {
+                    "project/archive/plans/old-missing-plan.md": "historical-context",
+                    "src/auth/login.ts": "historical-context",
+                    "project/research/older-partial-input.md": "historical-context",
+                },
+                link_statuses,
+            )
+
     def test_projection_includes_cold_memory_routes_without_start_inventory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_operating_root(Path(tmp))

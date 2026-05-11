@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .atomic_files import AtomicFileWrite, FileTransactionError, apply_file_transaction
-from .inventory import Inventory
+from .inventory import Inventory, target_artifact_ownerships
 from .memory_hygiene import (
     ROADMAP_CURRENT_POSTURE_FIELD,
     RelationshipUpdatePlan,
@@ -16,6 +16,8 @@ from .memory_hygiene import (
 )
 from .models import Finding
 from .reporting import RouteWriteEvidence, route_write_findings
+from .research_distill import research_distill_quality_problem
+from .route_reference_guards import route_reference_transaction_guard_findings
 
 
 ROADMAP_REL = "project/roadmap.md"
@@ -25,21 +27,61 @@ DOCS_DECISION_VALUES = {"updated", "not-needed", "uncertain"}
 TERMINAL_QUEUE_STATUSES = {"done", "rejected", "superseded"}
 TERMINAL_RELATED_PLAN_STATUSES = {"blocked", "done", "rejected", "superseded"}
 ORDER_NAMESPACE_STATUSES = ("accepted", "proposed")
+SOURCE_INCUBATION_EVIDENCE_STATUSES = {"accepted", "active"}
 FUTURE_QUEUE_FIELD = "future_execution_slice_queue"
 FUTURE_QUEUE_TITLE = "Future Execution Slice Queue"
 ARCHIVED_HISTORY_FIELD = "archived_completed_history"
 ARCHIVED_HISTORY_TITLE = "Archived Completed History"
 TERMINAL_RELATED_PLAN_RETARGET_FIELD = "terminal_related_plan_retarget"
+ROADMAP_PHYSICAL_ORDER_FIELD = "roadmap_physical_order"
 DETAILED_DONE_TAIL_LIMIT = 4
 ACCEPTED_ITEM_ORDER_FIELD = "accepted_item_order"
+SOURCE_MEMBERS_FIELD = "source_members"
+ACCEPTED_BOUNDARY_NORMALIZATION_PREFIX = (
+    "accepted roadmap item is eligible for a bounded active plan through explicit plan/transition/writeback review"
+)
+ROADMAP_PHYSICAL_ORDER_BUCKETS = {
+    "active": 0,
+    "accepted": 1,
+    "proposed": 2,
+    "blocked": 3,
+    "deferred": 4,
+    "done": 5,
+    "superseded": 6,
+    "rejected": 7,
+}
 ITEM_ID_LIST_FIELDS = ("dependencies", "slice_members", "slice_dependencies", "supersedes", "superseded_by")
-PATH_LIST_FIELDS = ("related_specs",)
+PATH_LIST_FIELDS = (SOURCE_MEMBERS_FIELD, "related_specs")
 ARTIFACT_LIST_FIELDS = ("target_artifacts",)
 LIST_FIELDS = (*ITEM_ID_LIST_FIELDS, *PATH_LIST_FIELDS, *ARTIFACT_LIST_FIELDS)
 RELATED_INCUBATION_FIELD = "related_incubation"
+OPTIONAL_SCALAR_ITEM_FIELDS = {"stage"}
+CLEARABLE_FIELDS = (
+    "stage",
+    "execution_slice",
+    "slice_goal",
+    "slice_members",
+    "slice_dependencies",
+    "slice_closeout_boundary",
+    "dependencies",
+    "source_incubation",
+    RELATED_INCUBATION_FIELD,
+    "source_research",
+    SOURCE_MEMBERS_FIELD,
+    "related_specs",
+    "related_plan",
+    "archived_plan",
+    "target_artifacts",
+    "verification_summary",
+    "docs_decision",
+    "carry_forward",
+    "supersedes",
+    "superseded_by",
+)
 STANDARD_FIELDS = (
     "id",
     "status",
+    "stage",
     "order",
     "execution_slice",
     "slice_goal",
@@ -50,6 +92,7 @@ STANDARD_FIELDS = (
     "source_incubation",
     RELATED_INCUBATION_FIELD,
     "source_research",
+    SOURCE_MEMBERS_FIELD,
     "related_specs",
     "related_plan",
     "archived_plan",
@@ -61,7 +104,7 @@ STANDARD_FIELDS = (
     "superseded_by",
 )
 PATH_FIELDS = {"source_incubation", RELATED_INCUBATION_FIELD, "source_research", "related_plan", "archived_plan"}
-EMPTY_STRICT_ITEM_FIELDS = PATH_FIELDS
+EMPTY_STRICT_ITEM_FIELDS = {*PATH_FIELDS, SOURCE_MEMBERS_FIELD}
 SOURCE_INCUBATION_OWNERSHIP_FIELDS = (
     "related_roadmap_item",
     "related_roadmap",
@@ -71,6 +114,22 @@ SOURCE_INCUBATION_OWNERSHIP_FIELDS = (
     "archived_plan",
     "archived_to",
 )
+HUMAN_REVIEW_GATE_FIELDS = (
+    "needs_deep_research",
+    "requires_deep_research",
+    "requires_reflection",
+    "needs_reflection",
+    "needs_human_review",
+    "human_gate_required",
+    "research_gate",
+)
+HUMAN_REVIEW_GATE_TRUTHY = {"1", "true", "yes", "required", "needs-human-review", "human-review", "deep-research", "reflection"}
+HUMAN_REVIEW_GATE_FALSEY = {"", "0", "false", "no", "none", "not-needed", "not needed", "resolved"}
+IMPLEMENTATION_STAGE_VALUES = {"implementation", "implement", "fix", "bugfix", "feature", "product-implementation"}
+IMPLEMENTATION_SCOPE_NEXT_SAFE_TEMPLATE = (
+    "mylittleharness --root <root> roadmap --dry-run --action update "
+    "--item-id {item_id} --target-artifact <rel-path>"
+)
 
 
 @dataclass(frozen=True)
@@ -79,6 +138,7 @@ class RoadmapRequest:
     item_id: str
     title: str
     status: str
+    stage: str
     order: int | None
     execution_slice: str
     slice_goal: str
@@ -97,6 +157,9 @@ class RoadmapRequest:
     target_artifacts: tuple[str, ...]
     supersedes: tuple[str, ...]
     superseded_by: tuple[str, ...]
+    source_members: tuple[str, ...]
+    clear_fields: tuple[str, ...]
+    custom_fields: tuple[tuple[str, str], ...]
 
 
 @dataclass(frozen=True)
@@ -164,6 +227,7 @@ def make_roadmap_request(
     item_id: str | None,
     title: str | None = None,
     status: str | None = None,
+    stage: str | None = None,
     order: int | None = None,
     execution_slice: str | None = None,
     slice_goal: str | None = None,
@@ -182,12 +246,16 @@ def make_roadmap_request(
     target_artifacts: list[str] | None = None,
     supersedes: list[str] | None = None,
     superseded_by: list[str] | None = None,
+    source_members: list[str] | None = None,
+    clear_fields: list[str] | None = None,
+    custom_fields: list[str] | None = None,
 ) -> RoadmapRequest:
     return RoadmapRequest(
         action=str(action or "").strip().casefold().replace("_", "-"),
         item_id=_normalized_item_id(item_id),
         title=_normalized_text(title),
         status=_normalized_status(status),
+        stage=_normalized_scalar(stage),
         order=order,
         execution_slice=_normalized_item_id(execution_slice),
         slice_goal=_normalized_scalar(slice_goal),
@@ -206,6 +274,9 @@ def make_roadmap_request(
         target_artifacts=tuple(_normalize_rel(value) for value in target_artifacts or ()),
         supersedes=tuple(_normalized_item_id(value) for value in supersedes or ()),
         superseded_by=tuple(_normalized_item_id(value) for value in superseded_by or ()),
+        source_members=tuple(_normalize_rel(value) for value in source_members or ()),
+        clear_fields=tuple(_normalized_field_name(value) for value in clear_fields or ()),
+        custom_fields=_parse_custom_field_args(custom_fields),
     )
 
 
@@ -290,6 +361,62 @@ def roadmap_item_title(inventory: Inventory, item_id: str) -> str:
     return str(item.title).strip() if item else ""
 
 
+def roadmap_plan_scope_blockers(
+    inventory: Inventory,
+    item_id: str,
+    fields: dict[str, object] | None = None,
+) -> tuple[str, ...]:
+    normalized_item_id = _normalized_item_id(item_id)
+    if not normalized_item_id:
+        return ()
+    item_fields = fields if fields is not None else roadmap_item_fields(inventory, normalized_item_id)
+    if not item_fields:
+        return ()
+    status = _normalized_status(item_fields.get("status"))
+    if status not in {"accepted", "active"}:
+        return ()
+    if _field_list(item_fields, "target_artifacts"):
+        return ()
+    primary_source_rels = (
+        _field_scalar(item_fields, "source_incubation"),
+        _field_scalar(item_fields, "source_research"),
+        *_field_list(item_fields, SOURCE_MEMBERS_FIELD),
+    )
+    if _field_scalar(item_fields, RELATED_INCUBATION_FIELD) and not any(_normalize_rel(rel) for rel in primary_source_rels):
+        return ()
+    source_text = _roadmap_scope_source_text(inventory, item_fields)
+    if _source_scope_is_recovery_only(source_text):
+        return ()
+    if _target_artifact_routes_from_scope_text(source_text):
+        return ()
+    reason = _implementation_scope_reason(item_fields, source_text)
+    if not reason:
+        return ()
+    return (
+        f"{reason} has no concrete target_artifacts; update the roadmap item with "
+        "--target-artifact <rel-path> before plan opening",
+    )
+
+
+def roadmap_plan_scope_next_safe_command(item_id: str) -> str:
+    return IMPLEMENTATION_SCOPE_NEXT_SAFE_TEMPLATE.format(item_id=_normalized_item_id(item_id) or "<item-id>")
+
+
+def roadmap_items_for_diagnostics(inventory: Inventory) -> tuple[dict[str, RoadmapItem], list[Finding]]:
+    target_path = inventory.root / ROADMAP_REL
+    if not target_path.is_file():
+        return {}, []
+    try:
+        text = target_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return {}, [Finding("warn", "roadmap-diagnostics-read", f"project/roadmap.md could not be read: {exc}", ROADMAP_REL)]
+    parse_result = _parse_roadmap_items_for_sync(text)
+    if parse_result[1]:
+        return {}, parse_result[1]
+    _items_start, _items_end, items = parse_result[0]
+    return dict(items), []
+
+
 def roadmap_source_incubation_consumers(
     inventory: Inventory,
     source_rel: str,
@@ -319,6 +446,366 @@ def roadmap_source_incubation_consumers(
             continue
         consumers.append(item_id)
     return tuple(consumers)
+
+
+def roadmap_source_incubation_evidence_findings(
+    inventory: Inventory,
+    item_ids: tuple[str, ...] = (),
+) -> list[Finding]:
+    if inventory.root_kind != "live_operating_root":
+        return []
+
+    target_path = inventory.root / ROADMAP_REL
+    if not target_path.is_file():
+        return []
+    try:
+        text = target_path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+
+    parse_result = _parse_roadmap_items_for_sync(text)
+    if parse_result[1]:
+        return []
+    _items_start, _items_end, items = parse_result[0]
+
+    requested_ids = {_normalized_item_id(item_id) for item_id in item_ids if _normalized_item_id(item_id)}
+    findings: list[Finding] = []
+    for item_id, item in sorted(items.items(), key=lambda row: (row[1].start, row[0])):
+        status = _normalized_status(item.fields.get("status"))
+        if requested_ids:
+            if item_id not in requested_ids:
+                continue
+        elif status not in SOURCE_INCUBATION_EVIDENCE_STATUSES:
+            continue
+
+        source_incubation = _normalize_rel(_field_scalar(item.fields, "source_incubation"))
+        if not source_incubation:
+            continue
+        source_path = inventory.root / source_incubation
+        if (
+            _rel_has_absolute_or_parent_parts(source_incubation)
+            or _path_escapes_root(inventory.root, source_path)
+            or not source_path.is_file()
+            or source_path.is_symlink()
+        ):
+            findings.append(
+                Finding(
+                    "warn",
+                    "roadmap-source-incubation-missing",
+                    (
+                        f"roadmap item {item_id!r} source_incubation evidence target is missing: {source_incubation}; "
+                        "recover or recreate the incubation note, retarget the item to an existing incubation/archive note, "
+                        "or run `mylittleharness --root <root> memory-hygiene --dry-run --scan` before relying on roadmap-derived plan input"
+                    ),
+                    ROADMAP_REL,
+                    item.start + 1,
+                )
+            )
+    if findings:
+        findings.append(
+            Finding(
+                "info",
+                "roadmap-source-incubation-boundary",
+                "roadmap source-incubation evidence diagnostics are read-only and cannot create notes, repair relationships, open plans, archive, stage, commit, or approve lifecycle movement",
+                ROADMAP_REL,
+            )
+        )
+    return findings
+
+
+def roadmap_related_specs_evidence_findings(
+    inventory: Inventory,
+    item_ids: tuple[str, ...] = (),
+) -> list[Finding]:
+    if inventory.root_kind != "live_operating_root":
+        return []
+
+    target_path = inventory.root / ROADMAP_REL
+    if not target_path.is_file():
+        return []
+    try:
+        text = target_path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+
+    parse_result = _parse_roadmap_items_for_sync(text)
+    if parse_result[1]:
+        return []
+    _items_start, _items_end, items = parse_result[0]
+
+    requested_ids = {_normalized_item_id(item_id) for item_id in item_ids if _normalized_item_id(item_id)}
+    findings: list[Finding] = []
+    for item_id, item in sorted(items.items(), key=lambda row: (row[1].start, row[0])):
+        status = _normalized_status(item.fields.get("status"))
+        if requested_ids:
+            if item_id not in requested_ids:
+                continue
+        elif status not in SOURCE_INCUBATION_EVIDENCE_STATUSES:
+            continue
+
+        for related_spec in _field_list(item.fields, "related_specs"):
+            related_spec = _normalize_rel(related_spec)
+            if not related_spec:
+                continue
+            spec_path = inventory.root / related_spec
+            if (
+                _rel_has_absolute_or_parent_parts(related_spec)
+                or _path_escapes_root(inventory.root, spec_path)
+                or not spec_path.is_file()
+                or spec_path.is_symlink()
+            ):
+                findings.append(
+                    Finding(
+                        "warn",
+                        "roadmap-related-spec-missing",
+                        (
+                            f"roadmap item {item_id!r} related_specs target is missing: {related_spec}; "
+                            "retarget the item to an existing stable spec, remove the stale related_specs entry, "
+                            "or keep docs_decision='uncertain' before relying on roadmap-derived plan docs/write scope"
+                        ),
+                        ROADMAP_REL,
+                        item.start + 1,
+                    )
+                )
+    if findings:
+        findings.append(
+            Finding(
+                "info",
+                "roadmap-related-spec-boundary",
+                "roadmap related-spec diagnostics are read-only and cannot create specs, retarget roadmap items, change docs_decision, open plans, archive, stage, commit, or approve lifecycle movement",
+                ROADMAP_REL,
+            )
+        )
+    return findings
+
+
+def roadmap_human_review_gate_findings(
+    inventory: Inventory,
+    item_ids: tuple[str, ...] = (),
+) -> list[Finding]:
+    if inventory.root_kind != "live_operating_root":
+        return []
+
+    target_path = inventory.root / ROADMAP_REL
+    if not target_path.is_file():
+        return []
+    try:
+        text = target_path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+
+    parse_result = _parse_roadmap_items_for_sync(text)
+    if parse_result[1]:
+        return []
+    _items_start, _items_end, items = parse_result[0]
+
+    requested_ids = {_normalized_item_id(item_id) for item_id in item_ids if _normalized_item_id(item_id)}
+    findings: list[Finding] = []
+    for item_id, item in sorted(items.items(), key=lambda row: (row[1].start, row[0])):
+        status = _normalized_status(item.fields.get("status"))
+        if requested_ids:
+            if item_id not in requested_ids:
+                continue
+        elif status not in SOURCE_INCUBATION_EVIDENCE_STATUSES:
+            continue
+
+        markers = tuple(field for field in HUMAN_REVIEW_GATE_FIELDS if _human_review_gate_enabled(item.fields.get(field)))
+        if not markers:
+            continue
+        findings.append(
+            Finding(
+                "warn",
+                "roadmap-research-human-gate",
+                (
+                    f"roadmap item {item_id!r} declares needs-human-review research marker(s): {', '.join(markers)}; "
+                    "pause autonomous implementation, draft the external research request manually outside MyLittleHarness, "
+                    "then `research-import`/`research-distill` or an explicit roadmap update before opening or continuing implementation"
+                ),
+                ROADMAP_REL,
+                item.start + 1,
+            )
+        )
+    if findings:
+        findings.append(
+            Finding(
+                "info",
+                "roadmap-research-human-gate-boundary",
+                "research human-gate diagnostics are read-only and cannot call a model, import research, block via hidden state, move lifecycle, archive, stage, commit, or mutate roadmap status",
+                ROADMAP_REL,
+            )
+        )
+    return findings
+
+
+def roadmap_compacted_dependency_archive_evidence_findings(
+    inventory: Inventory,
+    item_ids: tuple[str, ...] = (),
+) -> list[Finding]:
+    if inventory.root_kind != "live_operating_root":
+        return []
+
+    target_path = inventory.root / ROADMAP_REL
+    if not target_path.is_file():
+        return []
+    try:
+        text = target_path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+
+    parse_result = _parse_roadmap_items_for_sync(text)
+    if parse_result[1]:
+        return []
+    _items_start, _items_end, items = parse_result[0]
+    archived_history = _archived_history_item_plan_map(text)
+
+    requested_ids = {_normalized_item_id(item_id) for item_id in item_ids if _normalized_item_id(item_id)}
+    findings: list[Finding] = []
+    for item_id, item in sorted(items.items(), key=lambda row: (row[1].start, row[0])):
+        status = _normalized_status(item.fields.get("status"))
+        if requested_ids:
+            if item_id not in requested_ids:
+                continue
+        elif status not in SOURCE_INCUBATION_EVIDENCE_STATUSES:
+            continue
+
+        dependencies = tuple(
+            _dedupe_nonempty(
+                (
+                    *(_normalized_item_id(value) for value in _field_list(item.fields, "dependencies")),
+                    *(_normalized_item_id(value) for value in _field_list(item.fields, "slice_dependencies")),
+                )
+            )
+        )
+        for dependency in dependencies:
+            if not dependency or dependency in items:
+                continue
+            archived_plan = archived_history.get(dependency)
+            if not archived_plan:
+                findings.append(
+                    Finding(
+                        "warn",
+                        "roadmap-compacted-dependency-evidence-missing",
+                        (
+                            f"roadmap item {item_id!r} depends on {dependency!r}, but no live item or "
+                            "Archived Completed History archived-plan evidence was found; recover the source/archive "
+                            "evidence or retarget the dependency before relying on roadmap-derived plan input"
+                        ),
+                        ROADMAP_REL,
+                        item.start + 1,
+                    )
+                )
+                continue
+            problem = _archived_plan_evidence_problem(inventory, archived_plan)
+            if problem:
+                findings.append(
+                    Finding(
+                        "warn",
+                        "roadmap-compacted-dependency-archive-missing",
+                        (
+                            f"roadmap item {item_id!r} depends on compacted done item {dependency!r}, but archived-plan "
+                            f"evidence target is {problem}: {archived_plan}; recover the archived plan evidence, retarget "
+                            "Archived Completed History, or run `mylittleharness --root <root> memory-hygiene --dry-run --scan` "
+                            "before relying on roadmap-derived plan input"
+                        ),
+                        ROADMAP_REL,
+                        item.start + 1,
+                    )
+                )
+    if findings:
+        findings.append(
+            Finding(
+                "info",
+                "roadmap-compacted-dependency-boundary",
+                "roadmap compacted-dependency evidence diagnostics are read-only and cannot create archive files, repair relationships, open plans, archive, stage, commit, or approve lifecycle movement",
+                ROADMAP_REL,
+            )
+        )
+    return findings
+
+
+def roadmap_done_docs_archive_evidence_findings(
+    inventory: Inventory,
+    item_ids: tuple[str, ...] = (),
+) -> list[Finding]:
+    if inventory.root_kind != "live_operating_root":
+        return []
+
+    target_path = inventory.root / ROADMAP_REL
+    if not target_path.is_file():
+        return []
+    try:
+        text = target_path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+
+    parse_result = _parse_roadmap_items_for_sync(text)
+    if parse_result[1]:
+        return []
+    _items_start, _items_end, items = parse_result[0]
+
+    requested_ids = {_normalized_item_id(item_id) for item_id in item_ids if _normalized_item_id(item_id)}
+    findings: list[Finding] = []
+    for item_id, item in sorted(items.items(), key=lambda row: (row[1].start, row[0])):
+        status = _normalized_status(item.fields.get("status"))
+        if requested_ids:
+            if item_id not in requested_ids:
+                continue
+        elif status != "done":
+            continue
+        if status != "done":
+            continue
+
+        docs_decision = _normalized_status(item.fields.get("docs_decision"))
+        if docs_decision != "uncertain":
+            continue
+
+        evidence_gaps = _done_item_archive_evidence_gaps(inventory, item.fields)
+        if not evidence_gaps:
+            continue
+        findings.append(
+            Finding(
+                "warn",
+                "roadmap-done-docs-archive-evidence-gap",
+                (
+                    f"done roadmap item {item_id!r} has docs_decision='uncertain' while archive closeout evidence is "
+                    f"incomplete: {'; '.join(evidence_gaps)}; run `mylittleharness --root <root> check --focus archive-context`, "
+                    "then restore the archive file, retarget archived_plan/related_plan through roadmap or writeback after review, "
+                    "or keep closeout language provisional"
+                ),
+                ROADMAP_REL,
+                item.start + 1,
+            )
+        )
+    if findings:
+        findings.append(
+            Finding(
+                "info",
+                "roadmap-done-docs-archive-evidence-boundary",
+                (
+                    "roadmap done docs/archive evidence diagnostics are read-only; they cannot infer a final docs_decision, "
+                    "recreate archives, retarget roadmap items, close out, archive, stage, commit, or approve lifecycle movement"
+                ),
+                ROADMAP_REL,
+            )
+        )
+    return findings
+
+
+def roadmap_acceptance_readiness_findings(
+    inventory: Inventory,
+    item_ids: tuple[str, ...] = (),
+) -> list[Finding]:
+    if inventory.root_kind != "live_operating_root":
+        return []
+
+    target_path = inventory.root / ROADMAP_REL
+    if not target_path.is_file():
+        return []
+    try:
+        text = target_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return [Finding("warn", "roadmap-readiness-read", f"project/roadmap.md could not be read for readiness diagnostics: {exc}", ROADMAP_REL)]
+    return _roadmap_acceptance_readiness_findings_from_text(inventory, text, item_ids=item_ids)
 
 
 def active_plan_roadmap_item_ids(inventory: Inventory) -> tuple[str, ...]:
@@ -453,7 +940,10 @@ def roadmap_slice_contract_for_item(inventory: Inventory, item_id: str) -> Roadm
     covered = _covered_item_ids(items, normalized_item_id, primary)
     covered_items = [items[item] for item in covered if item in items]
     slice_goal = _field_scalar(primary_fields, "slice_goal")
-    closeout_boundary = _field_scalar(primary_fields, "slice_closeout_boundary") or "explicit-closeout-required"
+    closeout_boundary = _accepted_slice_closeout_boundary(
+        primary_fields,
+        _field_scalar(primary_fields, "slice_closeout_boundary") or "explicit-closeout-required",
+    )
     domain_context = slice_goal or execution_slice or primary.title or normalized_item_id
     return RoadmapSliceContract(
         primary_roadmap_item=normalized_item_id,
@@ -468,6 +958,29 @@ def roadmap_slice_contract_for_item(inventory: Inventory, item_id: str) -> Roadm
         source_research=_first_value_from_items(covered_items or [primary], "source_research"),
         related_specs=tuple(_dedupe_nonempty(_values_from_items(covered_items or [primary], "related_specs"))),
         related_incubation=_first_value_from_items([primary], RELATED_INCUBATION_FIELD),
+    )
+
+
+def _accepted_slice_closeout_boundary(fields: dict[str, object], closeout_boundary: str) -> str:
+    boundary = closeout_boundary.strip()
+    if _normalized_status(fields.get("status")) not in {"accepted", "active"}:
+        return boundary
+    normalized = re.sub(r"\s+", " ", boundary.casefold())
+    stale_markers = (
+        "no implementation plan",
+        "no active implementation plan",
+        "no plan opening",
+        "no archive",
+        "no lifecycle movement",
+        "must attach member links",
+        "before implementation",
+        "provisional cluster placeholder",
+    )
+    if not any(marker in normalized for marker in stale_markers):
+        return boundary
+    return (
+        f"{ACCEPTED_BOUNDARY_NORMALIZATION_PREFIX}; original non-authority safety note: "
+        f"{boundary}"
     )
 
 
@@ -499,6 +1012,7 @@ def roadmap_synthesis_report_for_item(inventory: Inventory, item_id: str) -> Roa
                 *_values_from_items([item for _, item in covered_items], "source_incubation"),
                 *_values_from_items([item for _, item in covered_items], RELATED_INCUBATION_FIELD),
                 *_values_from_items([item for _, item in covered_items], "source_research"),
+                *_values_from_items([item for _, item in covered_items], SOURCE_MEMBERS_FIELD),
             ]
         )
     )
@@ -506,15 +1020,20 @@ def roadmap_synthesis_report_for_item(inventory: Inventory, item_id: str) -> Roa
     shared_specs = _shared_values([item for _, item in covered_items], "related_specs")
     shared_targets = _shared_values([item for _, item in covered_items], "target_artifacts")
     shared_research = _shared_values([item for _, item in covered_items], "source_research")
+    shared_source_members = _shared_values([item for _, item in covered_items], SOURCE_MEMBERS_FIELD)
     shared_incubation = _shared_values([item for _, item in covered_items], "source_incubation")
     shared_related_incubation = _shared_values([item for _, item in covered_items], RELATED_INCUBATION_FIELD)
     shared_sources = shared_research + tuple(
         value
-        for value in (*shared_incubation, *shared_related_incubation)
+        for value in (*shared_incubation, *shared_related_incubation, *shared_source_members)
         if value not in shared_research
     )
     in_slice_dependencies = _in_slice_dependencies(covered_items, set(covered))
     external_dependencies = _external_dependencies(covered_items, set(covered))
+    compacted_dependency_evidence = _compacted_dependency_evidence(
+        external_dependencies,
+        _archived_history_item_plan_map(text),
+    )
 
     bundle_signals: list[str] = []
     if execution_slice and len(covered) > 1:
@@ -537,6 +1056,8 @@ def roadmap_synthesis_report_for_item(inventory: Inventory, item_id: str) -> Roa
         split_signals.append("no execution_slice is recorded; synthesis is scoped to the requested roadmap item")
     if external_dependencies:
         split_signals.append(f"external dependencies remain outside the slice: {_summarize_values(external_dependencies)}")
+    if compacted_dependency_evidence:
+        split_signals.append(f"compacted dependency evidence: {_summarize_values(compacted_dependency_evidence)}")
     split_signals.append("bundle/split output is advisory and cannot approve lifecycle movement")
 
     verification_summary_count = sum(1 for _, item in covered_items if _field_scalar(item.fields, "verification_summary"))
@@ -588,8 +1109,9 @@ def roadmap_dry_run_findings(inventory: Inventory, request: RoadmapRequest) -> l
     findings.append(Finding("info", "roadmap-target", f"would target roadmap: {ROADMAP_REL}", ROADMAP_REL))
     findings.append(Finding("info", "roadmap-action", f"requested action: {request.action or '<empty>'}; item_id: {request.item_id or '<empty>'}", ROADMAP_REL))
     if plan:
-        findings.extend(_plan_findings(plan, apply=False))
-        findings.extend(_route_write_findings(plan, apply=False))
+        findings.extend(_plan_findings(inventory, plan, apply=False))
+        findings.extend(_roadmap_acceptance_readiness_findings_from_text(inventory, plan.updated_text, item_ids=(request.item_id,)))
+        findings.extend(_route_write_findings(inventory, plan, apply=False))
     if errors:
         findings.extend(_with_severity(errors, "warn"))
         findings.append(
@@ -613,8 +1135,13 @@ def roadmap_dry_run_findings(inventory: Inventory, request: RoadmapRequest) -> l
     return findings
 
 
-def roadmap_apply_findings(inventory: Inventory, request: RoadmapRequest) -> list[Finding]:
-    plan, errors = _roadmap_plan(inventory, request)
+def roadmap_apply_findings(
+    inventory: Inventory,
+    request: RoadmapRequest,
+    *,
+    allowed_missing_paths: set[str] | None = None,
+) -> list[Finding]:
+    plan, errors = _roadmap_plan(inventory, request, allowed_missing_paths=allowed_missing_paths)
     if errors:
         return errors
     assert plan is not None
@@ -624,8 +1151,9 @@ def roadmap_apply_findings(inventory: Inventory, request: RoadmapRequest) -> lis
             Finding("info", "roadmap-apply", "roadmap apply started"),
             _root_posture_finding(inventory),
             Finding("info", "roadmap-noop", "roadmap item already matches requested fields; no file was rewritten", plan.target_rel),
-            *_plan_findings(plan, apply=True),
-            *_route_write_findings(plan, apply=True),
+            *_plan_findings(inventory, plan, apply=True),
+            *_roadmap_acceptance_readiness_findings_from_text(inventory, plan.updated_text, item_ids=(request.item_id,)),
+            *_route_write_findings(inventory, plan, apply=True),
             *_boundary_findings(),
         ]
 
@@ -647,6 +1175,18 @@ def roadmap_apply_findings(inventory: Inventory, request: RoadmapRequest) -> lis
         operations.append(AtomicFileWrite(plan.target_path, tmp_path, plan.updated_text, backup_path))
     if relationship_tmp and relationship_backup and plan.relationship_plan:
         operations.append(AtomicFileWrite(plan.relationship_plan.target_path, relationship_tmp, plan.relationship_plan.updated_text, relationship_backup))
+    route_writes = _route_write_evidence(plan)
+    guard_findings = route_reference_transaction_guard_findings(inventory, route_writes, apply=True)
+    if any(finding.severity == "error" for finding in guard_findings):
+        return [
+            *guard_findings,
+            Finding(
+                "info",
+                "roadmap-validation-posture",
+                "roadmap apply refused before writing files; review unresolved required route references, then rerun dry-run",
+                plan.target_rel,
+            ),
+        ]
     try:
         cleanup_warnings = apply_file_transaction(operations)
     except FileTransactionError as exc:
@@ -656,14 +1196,177 @@ def roadmap_apply_findings(inventory: Inventory, request: RoadmapRequest) -> lis
         Finding("info", "roadmap-apply", "roadmap apply started"),
         _root_posture_finding(inventory),
         Finding("info", "roadmap-written", f"updated roadmap item {plan.item_id!r} with action {plan.action!r}", plan.target_rel),
-        *_plan_findings(plan, apply=True),
-        *_route_write_findings(plan, apply=True),
+        *_plan_findings(inventory, plan, apply=True),
+        *_roadmap_acceptance_readiness_findings_from_text(inventory, plan.updated_text, item_ids=(request.item_id,)),
+        *route_write_findings("roadmap-route-write", route_writes, apply=True),
+        *guard_findings,
         *_boundary_findings(),
         Finding("info", "roadmap-validation-posture", "run check after apply to verify the live operating root remains healthy; roadmap output is not lifecycle approval", plan.target_rel),
     ]
     for warning in cleanup_warnings:
         findings.append(Finding("warn", "roadmap-backup-cleanup", warning, plan.target_rel))
     return findings
+
+
+def roadmap_normalize_dry_run_findings(inventory: Inventory) -> list[Finding]:
+    findings = [
+        Finding("info", "roadmap-normalize-dry-run", "roadmap normalize proposal only; no files were written"),
+        _root_posture_finding(inventory),
+        Finding("info", "roadmap-target", f"would target roadmap: {ROADMAP_REL}", ROADMAP_REL),
+        Finding("info", "roadmap-action", "requested operation: normalize", ROADMAP_REL),
+    ]
+    plan, errors = _roadmap_normalize_plan(inventory)
+    if plan:
+        findings.extend(_plan_findings(inventory, plan, apply=False))
+        findings.extend(_route_write_findings(inventory, plan, apply=False))
+    if errors:
+        findings.extend(_with_severity(errors, "warn"))
+        findings.append(
+            Finding(
+                "info",
+                "roadmap-validation-posture",
+                "normalize dry-run refused before apply; fix refusal reasons, then rerun dry-run before writing roadmap order changes",
+                ROADMAP_REL,
+            )
+        )
+        return findings
+    findings.extend(_boundary_findings())
+    findings.append(
+        Finding(
+            "info",
+            "roadmap-validation-posture",
+            "apply would write only project/roadmap.md in an eligible live operating root; dry-run writes no files",
+            ROADMAP_REL,
+        )
+    )
+    return findings
+
+
+def roadmap_normalize_apply_findings(inventory: Inventory) -> list[Finding]:
+    plan, errors = _roadmap_normalize_plan(inventory)
+    if errors:
+        return errors
+    assert plan is not None
+
+    if not _plan_has_changes(plan):
+        return [
+            Finding("info", "roadmap-normalize-apply", "roadmap normalize apply started"),
+            _root_posture_finding(inventory),
+            Finding("info", "roadmap-noop", "roadmap item blocks already match normalized physical order; no file was rewritten", plan.target_rel),
+            *_plan_findings(inventory, plan, apply=True),
+            *_route_write_findings(inventory, plan, apply=True),
+            *_boundary_findings(),
+        ]
+
+    tmp_path = plan.target_path.with_name(f".{plan.target_path.name}.roadmap-normalize.tmp")
+    backup_path = plan.target_path.with_name(f".{plan.target_path.name}.roadmap-normalize.backup")
+    for candidate, label in (
+        (tmp_path, "temporary roadmap normalize write path"),
+        (backup_path, "temporary roadmap normalize backup path"),
+    ):
+        if candidate.exists():
+            return [Finding("error", "roadmap-refused", f"{label} already exists: {candidate.relative_to(inventory.root).as_posix()}")]
+
+    try:
+        route_writes = _route_write_evidence(plan)
+        guard_findings = route_reference_transaction_guard_findings(inventory, route_writes, apply=True)
+        if any(finding.severity == "error" for finding in guard_findings):
+            return [
+                *guard_findings,
+                Finding(
+                    "info",
+                    "roadmap-validation-posture",
+                    "roadmap normalize apply refused before writing files; review unresolved required route references, then rerun dry-run",
+                    plan.target_rel,
+                ),
+            ]
+        cleanup_warnings = apply_file_transaction([AtomicFileWrite(plan.target_path, tmp_path, plan.updated_text, backup_path)])
+    except FileTransactionError as exc:
+        return [Finding("error", "roadmap-refused", f"roadmap normalize apply failed before target write completed: {exc}", plan.target_rel)]
+
+    findings = [
+        Finding("info", "roadmap-normalize-apply", "roadmap normalize apply started"),
+        _root_posture_finding(inventory),
+        Finding("info", "roadmap-normalize-written", "normalized roadmap physical item block order", plan.target_rel),
+        *_plan_findings(inventory, plan, apply=True),
+        *route_write_findings("roadmap-route-write", route_writes, apply=True),
+        *guard_findings,
+        *_boundary_findings(),
+        Finding("info", "roadmap-validation-posture", "run check after apply to verify the live operating root remains healthy; roadmap output is not lifecycle approval", plan.target_rel),
+    ]
+    for warning in cleanup_warnings:
+        findings.append(Finding("warn", "roadmap-backup-cleanup", warning, plan.target_rel))
+    return findings
+
+
+def _roadmap_normalize_plan(inventory: Inventory) -> tuple[RoadmapPlan | None, list[Finding]]:
+    errors: list[Finding] = []
+    errors.extend(_roadmap_context_errors(inventory))
+    target_path = inventory.root / ROADMAP_REL
+    errors.extend(_roadmap_target_errors(inventory, target_path))
+    if errors:
+        return None, errors
+
+    try:
+        text = target_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return None, [Finding("error", "roadmap-refused", f"roadmap could not be read: {exc}", ROADMAP_REL)]
+
+    return _roadmap_normalize_plan_from_text(inventory, target_path, text)
+
+
+def _roadmap_normalize_plan_from_text(
+    inventory: Inventory,
+    target_path: Path,
+    text: str,
+) -> tuple[RoadmapPlan | None, list[Finding]]:
+    parse_result = _parse_roadmap_items(text)
+    if parse_result[1]:
+        return None, parse_result[1]
+
+    changed_fields: tuple[str, ...] = ()
+    updated_text, reordered_item_ids = _normalize_physical_item_block_order(text)
+    if reordered_item_ids:
+        changed_fields = (*changed_fields, ROADMAP_PHYSICAL_ORDER_FIELD)
+
+    refreshed_text = _refresh_future_execution_slice_queue(updated_text)
+    if refreshed_text != updated_text:
+        changed_fields = (*changed_fields, FUTURE_QUEUE_FIELD)
+        updated_text = refreshed_text
+
+    refreshed_text, compacted_item_ids = _refresh_archived_completed_history(updated_text)
+    if refreshed_text != updated_text:
+        changed_fields = (*changed_fields, ARCHIVED_HISTORY_FIELD)
+        updated_text = refreshed_text
+
+    refreshed_text, retargeted_terminal_item_ids = roadmap_text_with_terminal_related_plan_retargets(
+        updated_text,
+        active_item_ids=active_plan_roadmap_item_ids(inventory),
+    )
+    if refreshed_text != updated_text:
+        changed_fields = (*changed_fields, TERMINAL_RELATED_PLAN_RETARGET_FIELD)
+        updated_text = refreshed_text
+
+    refreshed_text = sync_roadmap_current_posture_section(updated_text)
+    if refreshed_text != updated_text:
+        changed_fields = (*changed_fields, ROADMAP_CURRENT_POSTURE_FIELD)
+        updated_text = refreshed_text
+
+    return (
+        RoadmapPlan(
+            action="normalize",
+            item_id="<all>",
+            target_rel=ROADMAP_REL,
+            target_path=target_path,
+            changed_fields=tuple(_dedupe_nonempty(changed_fields)),
+            reordered_item_ids=reordered_item_ids,
+            compacted_item_ids=compacted_item_ids,
+            retargeted_terminal_item_ids=retargeted_terminal_item_ids,
+            current_text=text,
+            updated_text=updated_text,
+        ),
+        [],
+    )
 
 
 def _roadmap_plan(
@@ -721,11 +1424,17 @@ def _roadmap_plan_from_text(
     source_incubation_field: str | None = request.source_incubation if request.source_incubation else None
     related_incubation_field: str | None = "" if request.source_incubation else None
     if request.source_incubation:
+        source_missing_but_allowed = (
+            _normalize_rel(request.source_incubation) in allowed_missing_paths
+            and not (inventory.root / request.source_incubation).exists()
+        )
         related_incubation_reason = _reused_source_incubation_reason(inventory, request.source_incubation, request.item_id)
         if related_incubation_reason:
             related_incubation_source = request.source_incubation
             related_incubation_field = related_incubation_source
             source_incubation_field = ""
+        elif source_missing_but_allowed:
+            relationship_plan = None
         else:
             relationship_plan, relationship_errors = relationship_update_plan(
                 inventory,
@@ -761,11 +1470,7 @@ def _roadmap_plan_from_text(
         if insert_at > 0 and lines[insert_at - 1].strip():
             block = "\n" + block
         updated_lines = [*lines[:insert_at], block, *lines[insert_at:]]
-        changed_fields = tuple(
-            field
-            for field in STANDARD_FIELDS
-            if field in fields and _should_render_item_field(field, fields.get(field, _empty_field_value(field)))
-        )
+        changed_fields = tuple(_rendered_item_field_keys(fields))
         updated_text = "".join(updated_lines)
     else:
         assert existing is not None
@@ -775,7 +1480,11 @@ def _roadmap_plan_from_text(
             source_incubation=source_incubation_field,
             related_incubation=related_incubation_field,
         )
-        changed_fields = tuple(field for field in STANDARD_FIELDS if existing.fields.get(field, _empty_field_value(field)) != fields.get(field, _empty_field_value(field)))
+        changed_fields = tuple(
+            field
+            for field in _item_field_keys_for_comparison(existing.fields, fields)
+            if existing.fields.get(field, _empty_field_value(field)) != fields.get(field, _empty_field_value(field))
+        )
         if changed_fields:
             changed_fields = tuple(_dedupe_nonempty((*changed_fields, *_empty_strict_fields_present(existing.fields))))
         if changed_fields:
@@ -837,13 +1546,7 @@ def _roadmap_plan_from_text(
 
 def _request_errors(inventory: Inventory, request: RoadmapRequest) -> list[Finding]:
     errors: list[Finding] = []
-    if inventory.root_kind == "product_source_fixture":
-        errors.append(Finding("error", "roadmap-refused", "target is a product-source compatibility fixture; roadmap --apply is refused", ROADMAP_REL))
-    elif inventory.root_kind == "fallback_or_archive":
-        errors.append(Finding("error", "roadmap-refused", "target is fallback/archive or generated-output evidence; roadmap --apply is refused", ROADMAP_REL))
-    elif inventory.root_kind != "live_operating_root":
-        errors.append(Finding("error", "roadmap-refused", f"target root kind is {inventory.root_kind}; roadmap requires a live operating root", ROADMAP_REL))
-
+    errors.extend(_roadmap_context_errors(inventory))
     if request.action not in {"add", "update"}:
         errors.append(Finding("error", "roadmap-refused", "--action must be one of: add, update"))
     if not request.item_id or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", request.item_id):
@@ -866,6 +1569,8 @@ def _request_errors(inventory: Inventory, request: RoadmapRequest) -> list[Findi
     for field, value in _scalar_request_fields(request).items():
         if "\n" in value or "\r" in value or "`" in value:
             errors.append(Finding("error", "roadmap-refused", f"--{field.replace('_', '-')} must be a single line without backticks", ROADMAP_REL))
+    errors.extend(_clear_field_errors(request))
+    errors.extend(_custom_field_errors(request.custom_fields))
     for field, values in _item_id_list_request_fields(request).items():
         if len(values) != len(set(values)):
             errors.append(Finding("error", "roadmap-refused", f"--{field.replace('_', '-')} contains duplicate item ids", ROADMAP_REL))
@@ -888,6 +1593,17 @@ def _request_errors(inventory: Inventory, request: RoadmapRequest) -> list[Findi
                 errors.append(Finding("error", "roadmap-refused", f"--{field.replace('_', '-')} values must be single-line paths without backticks", ROADMAP_REL))
             if _rel_has_absolute_or_parent_parts(value):
                 errors.append(Finding("error", "roadmap-refused", f"--{field.replace('_', '-')} values must be root-relative paths without parent segments", ROADMAP_REL))
+    return errors
+
+
+def _roadmap_context_errors(inventory: Inventory) -> list[Finding]:
+    errors: list[Finding] = []
+    if inventory.root_kind == "product_source_fixture":
+        errors.append(Finding("error", "roadmap-refused", "target is a product-source compatibility fixture; roadmap --apply is refused", ROADMAP_REL))
+    elif inventory.root_kind == "fallback_or_archive":
+        errors.append(Finding("error", "roadmap-refused", "target is fallback/archive or generated-output evidence; roadmap --apply is refused", ROADMAP_REL))
+    elif inventory.root_kind != "live_operating_root":
+        errors.append(Finding("error", "roadmap-refused", f"target root kind is {inventory.root_kind}; roadmap requires a live operating root", ROADMAP_REL))
 
     state = inventory.state
     if state is None or not state.exists:
@@ -1027,7 +1743,7 @@ def _parse_legacy_roadmap_items(text: str) -> tuple[tuple[int, int, dict[str, Ro
 
 
 def _legacy_item_heading_match(line: str) -> re.Match[str] | None:
-    return re.match(r"^##\s+(?P<id>RM-[0-9]+)\b.*$", line.strip(), re.IGNORECASE)
+    return re.match(r"^##\s+(?P<id>RM-[A-Za-z0-9][A-Za-z0-9-]*)\b.*$", line.strip(), re.IGNORECASE)
 
 
 def _refresh_future_execution_slice_queue(text: str) -> str:
@@ -1079,7 +1795,7 @@ def _refresh_archived_completed_history(text: str) -> tuple[str, tuple[str, ...]
     compacted_ids = tuple(item_id for item_id, _item in to_compact)
     remove_ranges = tuple((item.start, item.end) for _item_id, item in to_compact)
     kept_lines = [line for index, line in enumerate(lines) if not any(start <= index < end for start, end in remove_ranges)]
-    history_entries = _compacted_history_entries(lines, to_compact)
+    kept_lines, history_entries = _sync_compacted_history_entries(kept_lines, to_compact)
     if history_entries:
         kept_lines = _with_archived_history_entries(kept_lines, history_entries, fallback_insert_at=items_start)
     return "".join(kept_lines), compacted_ids
@@ -1095,16 +1811,98 @@ def _roadmap_item_has_compaction_evidence(item: RoadmapItem) -> bool:
     )
 
 
-def _compacted_history_entries(lines: list[str], items: list[tuple[str, RoadmapItem]]) -> list[str]:
+def _sync_compacted_history_entries(lines: list[str], items: list[tuple[str, RoadmapItem]]) -> tuple[list[str], list[str]]:
+    lines = list(lines)
     bounds = _h2_section_bounds(lines, ARCHIVED_HISTORY_TITLE)
+    expected = {
+        item_id: _field_scalar(item.fields, "archived_plan")
+        for item_id, item in items
+        if _field_scalar(item.fields, "archived_plan")
+    }
+    if bounds:
+        start, end = bounds
+        for index in range(start + 1, end):
+            match = _compacted_history_entry_match(lines[index])
+            if not match:
+                continue
+            item_id = _normalized_item_id(match.group(1))
+            archived_plan = expected.get(item_id)
+            if not archived_plan or _normalize_rel(match.group(2)) == archived_plan:
+                continue
+            lines[index] = _compacted_history_entry_line(item_id, archived_plan, _line_newline(lines[index]))
     existing_history = "".join(lines[bounds[0] + 1 : bounds[1]]) if bounds else ""
     entries: list[str] = []
     for item_id, item in items:
         if f"`{item_id}`" in existing_history:
             continue
         archived_plan = _field_scalar(item.fields, "archived_plan")
-        entries.append(f"- Compacted done roadmap item `{item_id}`: archived plan `{archived_plan}`.\n")
+        entries.append(_compacted_history_entry_line(item_id, archived_plan))
+    return lines, entries
+
+
+def _compacted_history_entry_match(line: str) -> re.Match[str] | None:
+    return re.match(r"-\s+Compacted done roadmap item `([^`]+)`:\s+archived plan `([^`]+)`\.", line.strip())
+
+
+def _compacted_history_entry_line(item_id: str, archived_plan: str, newline: str = "\n") -> str:
+    return f"- Compacted done roadmap item `{item_id}`: archived plan `{archived_plan}`.{newline}"
+
+
+def _line_newline(line: str) -> str:
+    return "\r\n" if line.endswith("\r\n") else "\n"
+
+
+def _archived_history_item_plan_map(text: str) -> dict[str, str]:
+    entries: dict[str, str] = {}
+    for match in re.finditer(r"-\s+Compacted done roadmap item `([^`]+)`:\s+archived plan `([^`]+)`\.", text):
+        item_id = _normalized_item_id(match.group(1))
+        archived_plan = _normalize_rel(match.group(2))
+        if item_id and archived_plan:
+            entries[item_id] = archived_plan
     return entries
+
+
+def _archived_plan_evidence_problem(inventory: Inventory, archived_plan: str) -> str:
+    if _rel_has_absolute_or_parent_parts(archived_plan):
+        return "not a safe root-relative path"
+    path = inventory.root / archived_plan
+    if _path_escapes_root(inventory.root, path):
+        return "outside the target root"
+    if not path.exists():
+        return "missing"
+    if path.is_symlink():
+        return "a symlink"
+    if not path.is_file():
+        return "not a regular file"
+    return ""
+
+
+def _done_item_archive_evidence_gaps(inventory: Inventory, fields: dict[str, object]) -> tuple[str, ...]:
+    gaps: list[str] = []
+    archived_plan = _normalize_rel(_field_scalar(fields, "archived_plan"))
+    related_plan = _normalize_rel(_field_scalar(fields, "related_plan"))
+
+    if not archived_plan:
+        gaps.append("archived_plan metadata is empty")
+    else:
+        problem = _archived_plan_evidence_problem(inventory, archived_plan)
+        if problem:
+            gaps.append(f"archived_plan target is {problem}: {archived_plan}")
+
+    if related_plan.startswith("project/archive/plans/") and related_plan != archived_plan:
+        problem = _archived_plan_evidence_problem(inventory, related_plan)
+        if problem:
+            gaps.append(f"related_plan archive target is {problem}: {related_plan}")
+
+    return tuple(_dedupe_nonempty(gaps))
+
+
+def _compacted_dependency_evidence(dependencies: list[str], archived_history: dict[str, str]) -> list[str]:
+    return _dedupe_nonempty(
+        f"{dependency} -> {archived_history[dependency]}"
+        for dependency in dependencies
+        if dependency in archived_history
+    )
 
 
 def _with_archived_history_entries(lines: list[str], entries: list[str], *, fallback_insert_at: int) -> list[str]:
@@ -1213,12 +2011,42 @@ def _future_queue_span_sentence(label: str, rows: tuple[tuple[str, RoadmapItem],
 
 def _future_queue_item_lines(rows: tuple[tuple[str, RoadmapItem], ...], newline: str) -> list[str]:
     rendered: list[str] = []
-    for item_id, item in rows:
+    for execution_slice, slice_rows in _future_queue_slice_groups(rows):
+        if len(slice_rows) > 1:
+            order_range = _future_queue_order_range_text(slice_rows)
+            detail = _future_queue_slice_detail(slice_rows)
+            item_refs = ", ".join(f"`{item_id}`" for item_id, _item in slice_rows)
+            suffix_parts = [part for part in (detail, f"Items: {item_refs}") if part]
+            suffix = f" - {'; '.join(suffix_parts)}" if suffix_parts else ""
+            rendered.append(f"- orders `{order_range}`: `{execution_slice}` ({len(slice_rows)} items){suffix}{newline}")
+            continue
+        item_id, item = slice_rows[0]
         execution_slice = _normalized_item_id(item.fields.get("execution_slice")) or item_id
         detail = _future_queue_detail(item)
         suffix = f" - {detail}" if detail else ""
         rendered.append(f"- order `{_future_queue_order_text(item)}`: `{item_id}` (`{execution_slice}`){suffix}{newline}")
     return rendered
+
+
+def _future_queue_slice_groups(rows: tuple[tuple[str, RoadmapItem], ...]) -> tuple[tuple[str, tuple[tuple[str, RoadmapItem], ...]], ...]:
+    grouped: dict[str, list[tuple[str, RoadmapItem]]] = {}
+    for item_id, item in rows:
+        execution_slice = _normalized_item_id(item.fields.get("execution_slice")) or item_id
+        grouped.setdefault(execution_slice, []).append((item_id, item))
+    return tuple((execution_slice, tuple(slice_rows)) for execution_slice, slice_rows in grouped.items())
+
+
+def _future_queue_order_range_text(rows: tuple[tuple[str, RoadmapItem], ...]) -> str:
+    first_order = _future_queue_order_text(rows[0][1])
+    last_order = _future_queue_order_text(rows[-1][1])
+    return first_order if first_order == last_order else f"{first_order}-{last_order}"
+
+
+def _future_queue_slice_detail(rows: tuple[tuple[str, RoadmapItem], ...]) -> str:
+    details = _dedupe_nonempty(_future_queue_detail(item) for _item_id, item in rows)
+    if not details:
+        return ""
+    return details[0] if len(details) == 1 else f"{len(details)} distinct slice notes"
 
 
 def _future_queue_order_text(item: RoadmapItem) -> str:
@@ -1269,6 +2097,43 @@ def _order_accepted_item_blocks(text: str) -> tuple[str, tuple[str, ...]]:
     rebuilt.extend(lines[cursor:])
     moved_ids = tuple(item_id for index, item_id in enumerate(ordered_ids) if original_ids[index] != item_id)
     return "".join(rebuilt), moved_ids
+
+
+def _normalize_physical_item_block_order(text: str) -> tuple[str, tuple[str, ...]]:
+    parse_result = _parse_roadmap_items(text)
+    if parse_result[1]:
+        return text, ()
+    _items_start, _items_end, items = parse_result[0]
+    item_entries = sorted(items.items(), key=lambda row: (row[1].start, row[0]))
+    if len(item_entries) < 2:
+        return text, ()
+
+    ordered_entries = sorted(item_entries, key=_physical_order_sort_key)
+    original_ids = tuple(item_id for item_id, _item in item_entries)
+    ordered_ids = tuple(item_id for item_id, _item in ordered_entries)
+    if original_ids == ordered_ids:
+        return text, ()
+
+    lines = text.splitlines(keepends=True)
+    rebuilt: list[str] = []
+    cursor = 0
+    for _item_id, item in ordered_entries:
+        if cursor == 0:
+            rebuilt.extend(lines[: item_entries[0][1].start])
+        rebuilt.extend(lines[item.start : item.end])
+        cursor = item.end
+    rebuilt.extend(lines[item_entries[-1][1].end :])
+    moved_ids = tuple(item_id for index, item_id in enumerate(ordered_ids) if original_ids[index] != item_id)
+    return "".join(rebuilt), moved_ids
+
+
+def _physical_order_sort_key(row: tuple[str, RoadmapItem]) -> tuple[int, tuple[int, int | str], int, str]:
+    item_id, item = row
+    status = _normalized_status(item.fields.get("status"))
+    bucket = ROADMAP_PHYSICAL_ORDER_BUCKETS.get(status, 8)
+    sortable_by_order = status in {"active", "accepted", "proposed", "blocked", "deferred"}
+    order_key = _order_sort_key(item) if sortable_by_order else (0, item.start)
+    return (bucket, order_key, item.start, item_id)
 
 
 def _order_sort_key(item: RoadmapItem) -> tuple[int, int | str]:
@@ -1383,6 +2248,7 @@ def _new_item_fields(
     return {
         "id": request.item_id,
         "status": request.status,
+        "stage": request.stage,
         "order": request.order if request.order is not None else 0,
         "execution_slice": request.execution_slice,
         "slice_goal": request.slice_goal,
@@ -1393,6 +2259,7 @@ def _new_item_fields(
         "source_incubation": request.source_incubation if source_incubation is None else source_incubation,
         RELATED_INCUBATION_FIELD: related_incubation,
         "source_research": request.source_research,
+        SOURCE_MEMBERS_FIELD: list(request.source_members),
         "related_specs": list(request.related_specs),
         "related_plan": request.related_plan,
         "archived_plan": request.archived_plan,
@@ -1402,6 +2269,7 @@ def _new_item_fields(
         "carry_forward": request.carry_forward,
         "supersedes": list(request.supersedes),
         "superseded_by": list(request.superseded_by),
+        **dict(request.custom_fields),
     }
 
 
@@ -1418,6 +2286,8 @@ def _updated_item_fields(
     fields["id"] = request.item_id
     if request.status:
         fields["status"] = request.status
+    if request.stage:
+        fields["stage"] = request.stage
     if request.order is not None:
         fields["order"] = request.order
     for key, value in _scalar_request_fields(request).items():
@@ -1433,12 +2303,16 @@ def _updated_item_fields(
     for key, values in _list_request_fields(request).items():
         if values:
             fields[key] = list(values)
+    for key in request.clear_fields:
+        fields[key] = _empty_field_value(key)
+    for key, value in request.custom_fields:
+        fields[key] = value
     return fields
 
 
 def _render_item_block(title: str, fields: dict[str, object]) -> str:
     lines = [f"### {title}\n", "\n"]
-    for key in STANDARD_FIELDS:
+    for key in _rendered_item_field_keys(fields):
         value = fields.get(key, _empty_field_value(key))
         if not _should_render_item_field(key, value):
             continue
@@ -1454,9 +2328,33 @@ def _render_item_block(title: str, fields: dict[str, object]) -> str:
 
 
 def _should_render_item_field(field: str, value: object) -> bool:
-    if field in EMPTY_STRICT_ITEM_FIELDS and not _field_value_present(value):
+    if (
+        field in EMPTY_STRICT_ITEM_FIELDS
+        or field in OPTIONAL_SCALAR_ITEM_FIELDS
+        or field not in STANDARD_FIELDS
+    ) and not _field_value_present(value):
         return False
     return True
+
+
+def _rendered_item_field_keys(fields: dict[str, object]) -> tuple[str, ...]:
+    return tuple(
+        key
+        for key in _item_field_keys_for_render(fields)
+        if _should_render_item_field(key, fields.get(key, _empty_field_value(key)))
+    )
+
+
+def _item_field_keys_for_render(fields: dict[str, object]) -> tuple[str, ...]:
+    return tuple(_dedupe_nonempty((*STANDARD_FIELDS, *_custom_item_field_keys(fields))))
+
+
+def _item_field_keys_for_comparison(current: dict[str, object], updated: dict[str, object]) -> tuple[str, ...]:
+    return tuple(_dedupe_nonempty((*STANDARD_FIELDS, *_custom_item_field_keys(current), *_custom_item_field_keys(updated))))
+
+
+def _custom_item_field_keys(fields: dict[str, object]) -> tuple[str, ...]:
+    return tuple(key for key in fields if key not in STANDARD_FIELDS)
 
 
 def _empty_strict_fields_present(fields: dict[str, object]) -> tuple[str, ...]:
@@ -1630,6 +2528,16 @@ def _route_destination_allowed(field: str, rel_path: str) -> bool:
         return rel_path.startswith("project/plan-incubation/") or rel_path.startswith("project/archive/reference/incubation/")
     if field == "source_research":
         return rel_path.startswith("project/research/") or rel_path.startswith("project/archive/reference/research/")
+    if field == SOURCE_MEMBERS_FIELD:
+        return rel_path.startswith(
+            (
+                "project/plan-incubation/",
+                "project/archive/reference/incubation/",
+                "project/research/",
+                "project/archive/reference/research/",
+                "project/verification/",
+            )
+        )
     if field == "related_specs":
         return rel_path.startswith("project/specs/") or rel_path.startswith("docs/specs/")
     if field in {"related_plan", "archived_plan"}:
@@ -1637,10 +2545,15 @@ def _route_destination_allowed(field: str, rel_path: str) -> bool:
     return True
 
 
-def _plan_findings(plan: RoadmapPlan, apply: bool) -> list[Finding]:
+def _plan_findings(inventory: Inventory, plan: RoadmapPlan, apply: bool) -> list[Finding]:
     prefix = "" if apply else "would "
+    plan_message = (
+        f"{prefix}normalize roadmap item block order"
+        if plan.action == "normalize"
+        else f"{prefix}{plan.action} roadmap item: {plan.item_id}"
+    )
     findings = [
-        Finding("info", "roadmap-plan", f"{prefix}{plan.action} roadmap item: {plan.item_id}", plan.target_rel),
+        Finding("info", "roadmap-plan", plan_message, plan.target_rel),
         Finding("info", "roadmap-target-file", f"{prefix}write boundary: {plan.target_rel}", plan.target_rel),
     ]
     if plan.changed_fields:
@@ -1669,15 +2582,27 @@ def _plan_findings(plan: RoadmapPlan, apply: bool) -> list[Finding]:
                 plan.target_rel,
             )
         )
+    target_artifacts = _roadmap_item_target_artifacts(plan.updated_text, plan.item_id)
+    findings.extend(_target_artifact_ownership_findings(inventory, target_artifacts, prefix, "roadmap-target-artifact-ownership", plan.target_rel))
     if plan.reordered_item_ids:
-        findings.append(
-            Finding(
-                "info",
-                "roadmap-order-aware-insertion",
-                f"{prefix}order accepted roadmap item block(s): {', '.join(plan.reordered_item_ids)}",
-                plan.target_rel,
+        if plan.action == "normalize":
+            findings.append(
+                Finding(
+                    "info",
+                    "roadmap-physical-order-normalization",
+                    f"{prefix}normalize roadmap item block order: {', '.join(plan.reordered_item_ids)}",
+                    plan.target_rel,
+                )
             )
-        )
+        else:
+            findings.append(
+                Finding(
+                    "info",
+                    "roadmap-order-aware-insertion",
+                    f"{prefix}order accepted roadmap item block(s): {', '.join(plan.reordered_item_ids)}",
+                    plan.target_rel,
+                )
+            )
     findings.extend(_roadmap_order_namespace_findings_from_text(plan.updated_text))
     if plan.related_incubation_source:
         findings.append(
@@ -1697,11 +2622,47 @@ def _plan_findings(plan: RoadmapPlan, apply: bool) -> list[Finding]:
     return findings
 
 
-def _route_write_findings(plan: RoadmapPlan, apply: bool) -> list[Finding]:
+def _roadmap_item_target_artifacts(text: str, item_id: str) -> tuple[str, ...]:
+    if item_id == "<all>":
+        return ()
+    parse_result = _parse_roadmap_items_for_sync(text)
+    if parse_result[1]:
+        return ()
+    _items_start, _items_end, items = parse_result[0]
+    item = items.get(_normalized_item_id(item_id))
+    if item is None:
+        return ()
+    return tuple(_field_list(item.fields, "target_artifacts"))
+
+
+def _target_artifact_ownership_findings(
+    inventory: Inventory,
+    artifacts: tuple[str, ...],
+    prefix: str,
+    code: str,
+    source: str,
+) -> list[Finding]:
+    records = target_artifact_ownerships(inventory, artifacts)
+    if not records:
+        return []
+    summary = "; ".join(f"{record.artifact}->{record.ownership} ({record.intended_root})" for record in records)
+    guidance = "; ".join(sorted({record.guidance for record in records}))
+    return [Finding("info", code, f"{prefix}classify target artifact ownership: {summary}; guidance: {guidance}", source)]
+
+
+def _route_write_evidence(plan: RoadmapPlan) -> tuple[RouteWriteEvidence, ...]:
     writes = [RouteWriteEvidence(plan.target_rel, plan.current_text, plan.updated_text)]
     if plan.relationship_plan:
         writes.append(RouteWriteEvidence(plan.relationship_plan.target_rel, plan.relationship_plan.current_text, plan.relationship_plan.updated_text))
-    return route_write_findings("roadmap-route-write", tuple(writes), apply=apply)
+    return tuple(writes)
+
+
+def _route_write_findings(inventory: Inventory, plan: RoadmapPlan, apply: bool) -> list[Finding]:
+    writes = _route_write_evidence(plan)
+    return [
+        *route_write_findings("roadmap-route-write", writes, apply=apply),
+        *route_reference_transaction_guard_findings(inventory, writes, apply=apply),
+    ]
 
 
 def _relationship_plan_findings(plan: RelationshipUpdatePlan, apply: bool) -> list[Finding]:
@@ -1765,6 +2726,183 @@ def _roadmap_order_namespace_findings_from_text(text: str) -> list[Finding]:
                 )
             )
     return findings
+
+
+def _roadmap_acceptance_readiness_findings_from_text(
+    inventory: Inventory,
+    text: str,
+    *,
+    item_ids: tuple[str, ...] = (),
+) -> list[Finding]:
+    parse_result = _parse_roadmap_items_for_sync(text)
+    if parse_result[1]:
+        return []
+    _items_start, _items_end, items = parse_result[0]
+    requested_ids = {_normalized_item_id(item_id) for item_id in item_ids if _normalized_item_id(item_id)}
+    archived_history = _archived_history_item_plan_map(text)
+    active_ids = set(active_plan_roadmap_item_ids(inventory))
+    findings: list[Finding] = []
+    for item_id, item in sorted(items.items(), key=lambda row: (_order_sort_key(row[1]), row[1].start, row[0])):
+        status = _normalized_status(item.fields.get("status"))
+        if requested_ids:
+            if item_id not in requested_ids:
+                continue
+        elif status not in {"accepted", "active", "proposed", "blocked"}:
+            continue
+        blockers = _roadmap_readiness_blockers(inventory, item_id, item, items, archived_history, active_ids)
+        readiness, next_safe_command = _roadmap_readiness_state(status, item_id, blockers, active_ids)
+        execution_slice = _normalized_item_id(item.fields.get("execution_slice")) or item_id
+        blocker_text = "; ".join(blockers) if blockers else "none"
+        findings.append(
+            Finding(
+                "info",
+                "roadmap-acceptance-readiness",
+                (
+                    f"item={item_id!r}; slice={execution_slice!r}; status={status or 'unspecified'!r}; "
+                    f"readiness={readiness!r}; blockers={blocker_text}; next_safe_command={next_safe_command}"
+                ),
+                ROADMAP_REL,
+                item.start + 1,
+            )
+        )
+    if findings:
+        findings.append(
+            Finding(
+                "info",
+                "roadmap-acceptance-readiness-boundary",
+                "roadmap acceptance readiness is a read-only matrix of blockers, stale evidence, and next safe commands; it cannot promote roadmap items, open plans, approve lifecycle movement, archive, stage, commit, or repair",
+                ROADMAP_REL,
+            )
+        )
+    return findings
+
+
+def _roadmap_readiness_blockers(
+    inventory: Inventory,
+    item_id: str,
+    item: RoadmapItem,
+    items: dict[str, RoadmapItem],
+    archived_history: dict[str, str],
+    active_ids: set[str],
+) -> tuple[str, ...]:
+    fields = item.fields
+    status = _normalized_status(fields.get("status"))
+    blockers: list[str] = []
+    if status == "proposed":
+        blockers.append("status is proposed; accept explicitly before plan opening")
+    elif status == "blocked":
+        blockers.append("status is blocked; resolve carry_forward or blocker evidence before plan opening")
+    elif status and status not in {"accepted", "active"}:
+        blockers.append(f"status is {status}; not queued for acceptance")
+
+    if status == "active" and active_ids and item_id not in active_ids:
+        blockers.append("roadmap item is active but the current active plan does not cover it")
+    blockers.extend(roadmap_plan_scope_blockers(inventory, item_id, fields))
+
+    source_fields = ("source_incubation", RELATED_INCUBATION_FIELD, "source_research")
+    source_member_rels = tuple(_normalize_rel(value) for value in _field_list(fields, SOURCE_MEMBERS_FIELD))
+    if status in {"accepted", "active"} and not any(_field_scalar(fields, field) for field in source_fields) and not source_member_rels:
+        blockers.append("missing source_incubation, related_incubation, source_research, or source_members evidence")
+    for field in source_fields:
+        source_rel = _normalize_rel(_field_scalar(fields, field))
+        if not source_rel:
+            continue
+        problem = _roadmap_readiness_path_problem(inventory, source_rel)
+        if problem:
+            blockers.append(f"{field} evidence is {problem}: {source_rel}")
+            continue
+        quality_problem = _roadmap_readiness_research_quality_problem(inventory, source_rel)
+        if quality_problem:
+            blockers.append(f"{field} research quality gate blocks planning: {quality_problem}: {source_rel}")
+    for source_rel in source_member_rels:
+        if not source_rel:
+            continue
+        problem = _roadmap_readiness_path_problem(inventory, source_rel)
+        if problem:
+            blockers.append(f"{SOURCE_MEMBERS_FIELD} evidence is {problem}: {source_rel}")
+            continue
+        quality_problem = _roadmap_readiness_research_quality_problem(inventory, source_rel)
+        if quality_problem:
+            blockers.append(f"{SOURCE_MEMBERS_FIELD} research quality gate blocks planning: {quality_problem}: {source_rel}")
+
+    markers = tuple(field for field in HUMAN_REVIEW_GATE_FIELDS if _human_review_gate_enabled(fields.get(field)))
+    if markers:
+        blockers.append(f"human review marker(s): {', '.join(markers)}")
+
+    dependencies = tuple(
+        _dedupe_nonempty(
+            (
+                *(_normalized_item_id(value) for value in _field_list(fields, "dependencies")),
+                *(_normalized_item_id(value) for value in _field_list(fields, "slice_dependencies")),
+            )
+        )
+    )
+    for dependency in dependencies:
+        if not dependency or dependency in items:
+            continue
+        archived_plan = archived_history.get(dependency)
+        if not archived_plan:
+            blockers.append(f"missing live or archived dependency evidence: {dependency}")
+            continue
+        problem = _archived_plan_evidence_problem(inventory, archived_plan)
+        if problem:
+            blockers.append(f"dependency evidence for {dependency} is {problem}: {archived_plan}")
+
+    related_plan = _normalize_rel(_field_scalar(fields, "related_plan"))
+    if status in {"accepted", "active"} and related_plan == DEFAULT_PLAN_REL and item_id not in active_ids:
+        blockers.append(f"related_plan points at {DEFAULT_PLAN_REL} but the active plan does not cover this item")
+
+    return tuple(_dedupe_nonempty(blockers))
+
+
+def _roadmap_readiness_path_problem(inventory: Inventory, rel_path: str) -> str:
+    if _rel_has_absolute_or_parent_parts(rel_path):
+        return "not a safe root-relative path"
+    path = inventory.root / rel_path
+    if _path_escapes_root(inventory.root, path):
+        return "outside the target root"
+    if not path.exists():
+        return "missing"
+    if path.is_symlink():
+        return "a symlink"
+    if not path.is_file():
+        return "not a regular file"
+    return ""
+
+
+def _roadmap_readiness_research_quality_problem(inventory: Inventory, rel_path: str) -> str:
+    normalized = _normalize_rel(rel_path)
+    if not normalized.startswith("project/research/") or not normalized.endswith(".md"):
+        return ""
+    path = inventory.root / normalized
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        return f"unreadable research artifact: {exc}"
+    return research_distill_quality_problem(normalized, text)
+
+
+def _roadmap_readiness_state(
+    status: str,
+    item_id: str,
+    blockers: tuple[str, ...],
+    active_ids: set[str],
+) -> tuple[str, str]:
+    if status == "active":
+        if item_id in active_ids:
+            return "active-plan-open", "mylittleharness --root <root> check"
+        return "active-roadmap-drift", "mylittleharness --root <root> check"
+    if status == "accepted":
+        if blockers:
+            if any("target_artifacts" in blocker for blocker in blockers):
+                return "blocked-before-plan", roadmap_plan_scope_next_safe_command(item_id)
+            return "blocked-before-plan", "mylittleharness --root <root> check"
+        return "ready-to-plan", f"mylittleharness --root <root> plan --dry-run --roadmap-item {item_id}"
+    if status == "proposed":
+        return "proposal-only", f"mylittleharness --root <root> roadmap --dry-run --action update --item-id {item_id} --status accepted"
+    if status == "blocked":
+        return "blocked", f"mylittleharness --root <root> roadmap --dry-run --action update --item-id {item_id} [fields]"
+    return "not-queued", "mylittleharness --root <root> check"
 
 
 def _order_namespace_span_text(rows: tuple[tuple[str, RoadmapItem], ...]) -> str:
@@ -1920,6 +3058,7 @@ def _root_posture_finding(inventory: Inventory) -> Finding:
 def _scalar_request_fields(request: RoadmapRequest) -> dict[str, str]:
     return {
         "status": request.status,
+        "stage": request.stage,
         "execution_slice": request.execution_slice,
         "slice_goal": request.slice_goal,
         "slice_closeout_boundary": request.slice_closeout_boundary,
@@ -1931,6 +3070,89 @@ def _scalar_request_fields(request: RoadmapRequest) -> dict[str, str]:
         "docs_decision": request.docs_decision,
         "carry_forward": request.carry_forward,
     }
+
+
+def _parse_custom_field_args(values: list[str] | None) -> tuple[tuple[str, str], ...]:
+    fields: list[tuple[str, str]] = []
+    for raw_value in values or ():
+        raw = str(raw_value or "")
+        if "=" not in raw:
+            fields.append(("", raw.strip()))
+            continue
+        key, value = raw.split("=", 1)
+        fields.append((_normalized_custom_field_key(key), _normalized_scalar(value)))
+    return tuple(fields)
+
+
+def _custom_field_errors(fields: tuple[tuple[str, str], ...]) -> list[Finding]:
+    errors: list[Finding] = []
+    seen: set[str] = set()
+    for key, value in fields:
+        if not key:
+            errors.append(Finding("error", "roadmap-refused", "--field must use key=value with a non-empty field name", ROADMAP_REL))
+            continue
+        if key in seen:
+            errors.append(Finding("error", "roadmap-refused", f"--field repeats custom field: {key}", ROADMAP_REL))
+        seen.add(key)
+        if key in STANDARD_FIELDS:
+            errors.append(Finding("error", "roadmap-refused", f"--field cannot target first-class roadmap field {key!r}; use the dedicated flag", ROADMAP_REL))
+        if not re.fullmatch(r"[a-z][a-z0-9_-]*", key):
+            errors.append(Finding("error", "roadmap-refused", "--field names must be lowercase ASCII names using letters, numbers, hyphens, or underscores", ROADMAP_REL))
+        if "\n" in value or "\r" in value or "`" in value:
+            errors.append(Finding("error", "roadmap-refused", f"--field {key!r} value must be a single line without backticks", ROADMAP_REL))
+    return errors
+
+
+def _clear_field_errors(request: RoadmapRequest) -> list[Finding]:
+    errors: list[Finding] = []
+    seen: set[str] = set()
+    for field in request.clear_fields:
+        if field in seen:
+            errors.append(Finding("error", "roadmap-refused", f"--clear-field repeats field: {field}", ROADMAP_REL))
+            continue
+        seen.add(field)
+        if field not in CLEARABLE_FIELDS:
+            errors.append(
+                Finding(
+                    "error",
+                    "roadmap-refused",
+                    f"--clear-field must name one of: {', '.join(CLEARABLE_FIELDS)}",
+                    ROADMAP_REL,
+                )
+            )
+            continue
+        if request.action == "add":
+            errors.append(Finding("error", "roadmap-refused", "--clear-field is only valid with --action update", ROADMAP_REL))
+        if _request_field_present(request, field):
+            errors.append(
+                Finding(
+                    "error",
+                    "roadmap-refused",
+                    f"--clear-field {field} cannot be combined with a new value for the same field",
+                    ROADMAP_REL,
+                )
+            )
+    return errors
+
+
+def _request_field_present(request: RoadmapRequest, field: str) -> bool:
+    if field == "order":
+        return request.order is not None
+    scalar_fields = _scalar_request_fields(request)
+    if field in scalar_fields:
+        return bool(scalar_fields[field])
+    list_fields = _list_request_fields(request)
+    if field in list_fields:
+        return bool(list_fields[field])
+    return False
+
+
+def _normalized_custom_field_key(value: object) -> str:
+    return str(value or "").strip().casefold().replace(" ", "-")
+
+
+def _normalized_field_name(value: object) -> str:
+    return str(value or "").strip().casefold().replace("-", "_").replace(" ", "_")
 
 
 def _list_request_fields(request: RoadmapRequest) -> dict[str, tuple[str, ...]]:
@@ -1953,6 +3175,7 @@ def _item_id_list_request_fields(request: RoadmapRequest) -> dict[str, tuple[str
 
 def _path_list_request_fields(request: RoadmapRequest) -> dict[str, tuple[str, ...]]:
     return {
+        SOURCE_MEMBERS_FIELD: request.source_members,
         "related_specs": request.related_specs,
     }
 
@@ -1986,6 +3209,134 @@ def _field_list(fields: dict[str, object], key: str) -> tuple[str, ...]:
     if isinstance(value, (list, tuple)):
         return tuple(str(item).strip() for item in value if str(item).strip())
     return (str(value).strip(),)
+
+
+def _roadmap_scope_source_text(inventory: Inventory, fields: dict[str, object]) -> str:
+    rels = _dedupe_nonempty(
+        (
+            _normalize_rel(_field_scalar(fields, "source_incubation")),
+            _normalize_rel(_field_scalar(fields, RELATED_INCUBATION_FIELD)),
+            _normalize_rel(_field_scalar(fields, "source_research")),
+            *(_normalize_rel(value) for value in _field_list(fields, SOURCE_MEMBERS_FIELD)),
+        )
+    )
+    chunks: list[str] = []
+    for rel in rels:
+        if not rel or _roadmap_readiness_path_problem(inventory, rel):
+            continue
+        path = inventory.root / rel
+        try:
+            chunks.append(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError):
+            continue
+    return "\n\n".join(chunks)
+
+
+def _implementation_scope_reason(fields: dict[str, object], source_text: str) -> str:
+    stage = _normalized_status(_field_scalar(fields, "stage"))
+    combined = "\n".join(
+        (
+            _field_scalar(fields, "slice_goal"),
+            _field_scalar(fields, "verification_summary"),
+            _field_scalar(fields, "carry_forward"),
+            source_text,
+        )
+    )
+    folded = combined.casefold()
+    if stage in IMPLEMENTATION_STAGE_VALUES:
+        return "accepted implementation roadmap item"
+    if "[mlh-fix-candidate]" in folded or "meta-feedback" in folded:
+        return "accepted meta-feedback implementation candidate"
+    if "future implementation" in folded or "expected_owner_command:" in folded:
+        return "accepted implementation roadmap item"
+    return ""
+
+
+def _source_scope_is_recovery_only(value: str) -> bool:
+    text = str(value or "").casefold()
+    return any(
+        marker in text
+        for marker in (
+            "recovered missing source-incubation evidence",
+            "recovered missing source incubation evidence",
+            "recreated missing source-incubation evidence",
+            "source-incubation evidence recovery",
+            "source incubation recovery",
+            "source-note evidence is recovery-only",
+            "safe_boundary: evidence recovery only",
+        )
+    )
+
+
+def _target_artifact_routes_from_scope_text(value: str) -> tuple[str, ...]:
+    routes: list[str] = []
+    hint = _affected_routes_hint(value)
+    if hint:
+        routes.extend(_parse_route_hint_list(hint))
+    routes.extend(_explicit_target_routes_from_text(value))
+    return tuple(route for route in _dedupe_nonempty(routes) if _looks_like_target_artifact_route(route))
+
+
+def _affected_routes_hint(value: str) -> str:
+    match = re.search(
+        r"(?is)(?:^|\s)affected_routes:\s*(.+?)(?=\s+(?:agent_friction|authority_boundary|command_choreography|drift_risk|expected_owner_command|false_positive_risk|leak_shape|manual_step|repeatability|safe_boundary|severity|signal_type):|$)",
+        str(value or ""),
+    )
+    return match.group(1).strip() if match else ""
+
+
+def _parse_route_hint_list(value: str) -> tuple[str, ...]:
+    cleaned = str(value or "").strip().strip("`")
+    if cleaned.startswith("["):
+        try:
+            parsed = json.loads(cleaned)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, list):
+            return tuple(_normalize_route_hint(item) for item in parsed if _normalize_route_hint(item))
+    return tuple(route for route in (_normalize_route_hint(part) for part in cleaned.split(",")) if route)
+
+
+def _normalize_route_hint(value: object) -> str:
+    route = str(value or "").strip().strip("`\"'")
+    if route.endswith("."):
+        route = route[:-1].rstrip()
+    return _normalize_rel(route.strip("[] "))
+
+
+def _explicit_target_routes_from_text(value: str) -> tuple[str, ...]:
+    text = str(value or "").replace("\\", "/")
+    routes: list[str] = []
+    path_pattern = re.compile(
+        r"(?<![A-Za-z0-9_./-])((?:src|tests|docs|project/specs|build_backend|packages|apps)/[A-Za-z0-9_./*-]+)",
+        flags=re.IGNORECASE,
+    )
+    for match in path_pattern.finditer(text):
+        route = _normalize_route_hint(match.group(1))
+        if route:
+            routes.append(route)
+    return tuple(_dedupe_nonempty(routes))
+
+
+def _looks_like_target_artifact_route(value: str) -> bool:
+    route = _normalize_rel(value)
+    lower = route.casefold()
+    if not route or "://" in route or lower.startswith("..") or "/../" in lower:
+        return False
+    if lower.startswith(("src/", "tests/", "docs/", "build_backend/", "packages/", "apps/", "project/specs/")):
+        return True
+    return lower in {"agents.md", "readme.md", "package.json", "pyproject.toml", "uv.lock", "pytest.ini", "tox.ini"}
+
+
+def _human_review_gate_enabled(value: object) -> bool:
+    if value in (None, [], ()):
+        return False
+    if isinstance(value, (list, tuple)):
+        return any(_human_review_gate_enabled(item) for item in value)
+    normalized = str(value or "").strip().casefold().replace("_", "-")
+    if normalized in HUMAN_REVIEW_GATE_FALSEY:
+        return False
+    return normalized in HUMAN_REVIEW_GATE_TRUTHY
 
 
 def _values_from_items(items: list[RoadmapItem], key: str) -> list[str]:

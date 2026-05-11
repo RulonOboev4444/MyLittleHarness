@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -58,17 +59,32 @@ class WorkResultCapsule:
     remains: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class NextSafeRoute:
+    command: str
+    source_code: str
+    severity: str
+    source: str | None
+    apply_after: str
+    authority_boundary: str
+    docs_decision: str
+
+
 READ_ONLY_REPORT_COMMANDS = {
     "adapter",
     "audit-links",
     "bootstrap",
     "check",
+    "claim",
     "closeout",
     "context-budget",
     "doctor",
     "evidence",
     "intelligence",
+    "manifest",
     "preflight",
+    "reconcile",
+    "review-token",
     "semantic",
     "snapshot",
     "status",
@@ -84,9 +100,11 @@ MUTATING_REPORT_COMMANDS = {
     "intake",
     "memory-hygiene",
     "meta-feedback",
-    "mirror",
     "plan",
     "projection",
+    "research-compare",
+    "research-distill",
+    "research-import",
     "repair",
     "roadmap",
     "transition",
@@ -110,7 +128,6 @@ CHANGE_CODE_MARKERS = (
 ADD_CODE_MARKERS = ("created", "written", "wrote")
 REMOVE_CODE_MARKERS = ("archived", "deleted", "removed")
 NOOP_CODE_MARKERS = ("noop", "no-op", "unchanged")
-MIRROR_APPLY_RESOLVED_WARNING_CODES = {"mirror-drift", "mirror-target-missing"}
 MESSAGE_OPERATION_WORDS = {
     "applied": ("applied",),
     "archived": ("archived",),
@@ -283,6 +300,7 @@ def render_json_report(
         "root": str(root),
         "result": {"status": result, "advisory": True},
         "work_result": work_result_to_report_dict(work_result_capsule_for_report(command, result, findings, suggestions)),
+        "next_safe_routes": [next_safe_route_to_report_dict(route) for route in next_safe_routes_for_report(findings)],
         "boundary": {
             "reports_advisory": True,
             "repo_visible_files_authoritative": True,
@@ -304,6 +322,18 @@ def render_json_report(
     if route_manifest is not None:
         payload["route_manifest"] = list(route_manifest)
     return json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=True)
+
+
+def next_safe_route_to_report_dict(route: NextSafeRoute) -> dict[str, object]:
+    return {
+        "command": route.command,
+        "source_code": route.source_code,
+        "severity": route.severity,
+        "source": route.source,
+        "apply_after": route.apply_after,
+        "authority_boundary": route.authority_boundary,
+        "docs_decision": route.docs_decision,
+    }
 
 
 def work_result_to_report_dict(capsule: WorkResultCapsule) -> dict[str, object]:
@@ -367,10 +397,13 @@ def work_result_capsule_for_report(
     base_command = _base_command(command)
     errors = [finding for finding in findings if finding.severity == "error"]
     warnings = [finding for finding in findings if finding.severity == "warn"]
-    preview = _is_preview_report(command, findings)
     apply = _is_apply_report(command, findings)
-    noop = _is_noop_report(findings) and not _has_change_evidence(findings)
-    read_only = base_command in READ_ONLY_REPORT_COMMANDS and not apply
+    scan_read_only = _is_memory_hygiene_scan_report(command, findings) and not apply
+    preview = _is_preview_report(command, findings) and not scan_read_only
+    refused_preview = preview and _is_refused_preview_report(base_command, findings)
+    noop = _is_noop_report(command, findings) and not _has_change_evidence(findings)
+    projection_inspect = _is_projection_inspect_report(command)
+    read_only = ((base_command in READ_ONLY_REPORT_COMMANDS or projection_inspect) and not apply and not preview) or scan_read_only
 
     nonblocking_compaction_hygiene = _nonblocking_compaction_hygiene_after_lifecycle_apply(
         base_command,
@@ -384,18 +417,17 @@ def work_result_capsule_for_report(
         findings,
         warnings,
     )
-    nonblocking_mirror_apply_warnings = _nonblocking_mirror_apply_warnings(base_command, apply, findings, warnings)
-
     nonblocking_warning_hygiene = (
         nonblocking_compaction_hygiene
         or nonblocking_incubation_archive_hygiene
-        or nonblocking_mirror_apply_warnings
     )
     blocking_warnings = warnings and not nonblocking_warning_hygiene
     actionable_warnings = [] if nonblocking_warning_hygiene else warnings
 
     if errors:
         outcome = "refused" if apply or base_command in MUTATING_REPORT_COMMANDS else "blocked"
+    elif refused_preview:
+        outcome = "refused"
     elif blocking_warnings:
         outcome = "partial"
     elif noop:
@@ -406,7 +438,31 @@ def work_result_capsule_for_report(
     changes: tuple[str, ...]
     additions: tuple[str, ...]
     removals: tuple[str, ...]
-    if preview or read_only:
+    if scan_read_only:
+        changes = (
+            "No repository files were changed; scan findings are advisory and any mutation requires a separate explicit source dry-run/apply path.",
+        )
+        additions = ()
+        removals = ()
+    elif refused_preview:
+        changes = (
+            "No repository files were changed; the dry-run refused before previewing a reliable apply target.",
+        )
+        additions = ()
+        removals = ()
+    elif noop and preview:
+        changes = (
+            "No repository files were changed; the preview found no apply target for the current posture.",
+        )
+        additions = ()
+        removals = ()
+    elif read_only:
+        changes = (
+            "No repository files were changed; this read-only report is advisory and any mutation requires a separate explicit route.",
+        )
+        additions = ()
+        removals = ()
+    elif preview:
         changes = ("No repository files were changed; this report is advisory until an explicit apply path writes files.",)
         additions = ()
         removals = ()
@@ -423,10 +479,10 @@ def work_result_capsule_for_report(
 
     return WorkResultCapsule(
         outcome=outcome,
-        work_kind=_work_kind_for_command(base_command),
+        work_kind="verification" if projection_inspect else _work_kind_for_command(base_command),
         what_done=_what_done(command, suggestions),
-        ceremony=_ceremony_budget_for_report(base_command, preview, apply, read_only, errors, actionable_warnings),
-        next_safe_command=_next_safe_command_for_report(base_command, preview, apply, read_only, findings, errors, actionable_warnings),
+        ceremony=_ceremony_budget_for_report(base_command, preview, apply, read_only, errors, actionable_warnings, scan_read_only, noop, refused_preview),
+        next_safe_command=_next_safe_command_for_report(base_command, preview, apply, read_only, findings, errors, actionable_warnings, scan_read_only, noop, refused_preview),
         changed=changes,
         added=additions,
         removed=removals,
@@ -436,13 +492,16 @@ def work_result_capsule_for_report(
             base_command,
             preview,
             apply,
+            read_only,
             findings,
             warnings,
             errors,
             suggestions,
             nonblocking_compaction_hygiene,
             nonblocking_incubation_archive_hygiene,
-            nonblocking_mirror_apply_warnings,
+            scan_read_only,
+            noop,
+            refused_preview,
         ),
     )
 
@@ -550,19 +609,53 @@ def _is_apply_report(command: str, findings: list[Finding]) -> bool:
     return "--apply" in lowered or any(finding.code.endswith("-apply") for finding in findings)
 
 
-def _is_noop_report(findings: list[Finding]) -> bool:
+def _is_projection_inspect_report(command: str) -> bool:
+    lowered = str(command or "").casefold()
+    return lowered.startswith("projection --inspect")
+
+
+def _is_memory_hygiene_scan_report(command: str, findings: list[Finding]) -> bool:
+    lowered = str(command or "").casefold()
+    if _base_command(command) != "memory-hygiene":
+        return False
+    return "--scan" in lowered or any(finding.code == "memory-hygiene-scan" for finding in findings)
+
+
+def _is_noop_report(command: str, findings: list[Finding]) -> bool:
     for finding in findings:
         if _finding_is_noop(finding):
             return True
+    base_command = _base_command(command)
+    if base_command == "repair":
+        return any(
+            finding.code == "repair-proposal" and "no missing scaffold" in str(finding.message or "").casefold()
+            for finding in findings
+        )
+    if base_command == "writeback":
+        has_compact_only = any(finding.code == "writeback-compact-only" for finding in findings)
+        compaction_skipped = any(
+            finding.code == "state-auto-compaction-posture" and "skipped" in str(finding.message or "").casefold()
+            for finding in findings
+        )
+        return has_compact_only and compaction_skipped
     return False
+
+
+def _is_refused_preview_report(command: str, findings: list[Finding]) -> bool:
+    if not any("dry-run" in str(finding.code or "") for finding in findings):
+        return False
+    return any(
+        str(finding.code or "").endswith("-refused")
+        or "dry-run refused before" in str(finding.message or "")
+        for finding in findings
+        if finding.severity in {"warn", "error", "info"}
+    )
 
 
 def _finding_is_noop(finding: Finding) -> bool:
     code = str(finding.code or "").casefold()
     message = str(finding.message or "").casefold()
     if any(code.endswith(marker) for marker in NOOP_CODE_MARKERS):
-        return True
-    if code == "mirror-summary" and "copied=0" in message:
         return True
     return "no-op" in message
 
@@ -583,11 +676,30 @@ def _ceremony_budget_for_report(
     read_only: bool,
     errors: list[Finding],
     warnings: list[Finding],
+    scan_read_only: bool = False,
+    noop: bool = False,
+    refused_preview: bool = False,
 ) -> str:
     if errors:
+        if preview:
+            return "cost=bounded preview refusal; guarantee=no repository writes before a reviewed matching apply"
+        if read_only:
+            return "cost=bounded read-only refusal; guarantee=no repository files were changed and repo-visible files remain authoritative"
+        if apply:
+            return "cost=bounded apply refusal; guarantee=no apply writes after blocking errors"
         return "cost=bounded refusal; guarantee=no apply writes after blocking errors"
     if warnings:
+        if refused_preview:
+            return "cost=bounded preview refusal; guarantee=no repository writes and no apply path until a clean dry-run is reviewed"
+        if scan_read_only:
+            return "cost=review scan warnings; guarantee=read-only scan with no repository writes or apply path implied by the scan itself"
+        if read_only:
+            return "cost=review warning findings; guarantee=read-only advisory output with repo-visible files still authoritative"
         return "cost=review warning findings; guarantee=repo-visible authority is unchanged until an explicit apply succeeds"
+    if noop and preview:
+        return "cost=low; guarantee=no repository writes and no matching apply is needed for the current posture"
+    if scan_read_only:
+        return "cost=low; guarantee=read-only scan; explicit source dry-run is required before any memory-hygiene apply"
     if preview:
         return "cost=review pass; guarantee=no repository writes and a bounded apply path"
     if read_only:
@@ -607,26 +719,116 @@ def _next_safe_command_for_report(
     findings: list[Finding],
     errors: list[Finding],
     warnings: list[Finding],
+    scan_read_only: bool = False,
+    noop: bool = False,
+    refused_preview: bool = False,
 ) -> str:
+    first_actionable_route = _first_next_safe_route(findings, severities={"warn", "error"})
     if errors:
-        return "resolve the error findings, then rerun the dry-run or read-only check"
+        if read_only and first_actionable_route:
+            return f"review the blocking finding, then run its reported next_safe_command: `{first_actionable_route.command}`"
+        if preview:
+            return "resolve the error findings, then rerun the dry-run before any apply"
+        if read_only:
+            return "resolve the error findings, then rerun the read-only command or run `mylittleharness --root <root> suggest --intent \"<operator-action>\"` if the route is unclear"
+        if apply:
+            return "resolve the error findings, rerun the matching dry-run, and apply only after review"
+        return "resolve the error findings, then rerun the command after review"
     if warnings:
-        return "review warnings; if the route is unclear, run `mylittleharness --root <root> suggest --intent <operator-action>`"
+        if refused_preview:
+            return "resolve the refusal findings, then rerun the dry-run before any apply"
+        if read_only and command == "projection":
+            return "rebuild generated cache only with `mylittleharness --root <root> projection --rebuild --target all` after reviewing stale or missing cache findings"
+        if read_only and first_actionable_route:
+            return f"run the first reported next_safe_command after review: `{first_actionable_route.command}`"
+        if scan_read_only:
+            return "review scan warnings; choose an explicit cleanup dry-run only when a finding reports one"
+        return "review warnings; if the route is unclear, run `mylittleharness --root <root> suggest --intent \"<operator-action>\"`"
+    if noop:
+        if preview and command == "repair":
+            return "no repair apply is needed for the reported classes; rerun check or a narrower repair dry-run after new diagnostics"
+        if preview and command == "writeback":
+            return "no compact-only apply is needed while project-state stays below the compaction threshold"
+        return "no apply is needed for the reported current posture"
+    if scan_read_only:
+        if any(finding.code == "incubation-cleanup-batch-preview" for finding in findings):
+            token = _memory_hygiene_batch_token_from_findings(findings)
+            token_part = f" --proposal-token {token}" if token else " --proposal-token <mhb-token>"
+            return f"review reported candidate ids, source hashes, archive targets, and link repairs, then run `memory-hygiene --apply --scan{token_part}` while the proposal is current"
+        return "choose an explicit `memory-hygiene --dry-run --source ...` only if the scan reports a cleanup candidate"
     if preview:
         if command == "transition":
             token = _review_token_from_findings(findings)
             token_part = f" --review-token {token}" if token else " --review-token <token>"
             return f"rerun the matching `transition --apply{token_part}` with the same reviewed flags"
         return "rerun the same reviewed command with `--apply` after confirming the preview"
-    if apply or command in MUTATING_REPORT_COMMANDS:
-        return "run `mylittleharness --root <root> check` before closeout, archive, commit, or next-plan decisions"
     if read_only and command == "suggest":
-        return "run the reported first_safe_command, then apply only after its matching dry-run is reviewed"
+        return "choose the matching reported first_safe_command; run an apply command only after reviewing its matching dry-run"
+    if read_only and command == "projection":
+        if any(finding.code in {"projection-artifact-current", "projection-index-current"} for finding in findings):
+            return "no projection rebuild is needed for the reported current cache posture"
+        return "rebuild generated cache only with `mylittleharness --root <root> projection --rebuild --target all` after reviewing stale or missing cache findings"
     if read_only and command in {"closeout", "evidence"}:
         return "record chosen closeout facts with `mylittleharness --root <root> writeback --dry-run ...`"
     if read_only:
-        return "choose the smallest matching dry-run, or run `mylittleharness --root <root> suggest --intent <operator-action>`"
+        return "choose the smallest matching dry-run, or run `mylittleharness --root <root> suggest --intent \"<operator-action>\"`"
+    if apply or command in MUTATING_REPORT_COMMANDS:
+        return "run `mylittleharness --root <root> check` before closeout, archive, commit, or next-plan decisions"
     return "run `mylittleharness --root <root> check` before relying on the result"
+
+
+def next_safe_routes_for_report(findings: list[Finding]) -> tuple[NextSafeRoute, ...]:
+    routes: list[NextSafeRoute] = []
+    seen: set[tuple[str, str]] = set()
+    for finding in findings:
+        for command in _next_safe_commands_from_message(finding.message):
+            key = (finding.code, command)
+            if key in seen:
+                continue
+            seen.add(key)
+            routes.append(
+                NextSafeRoute(
+                    command=command,
+                    source_code=finding.code,
+                    severity=finding.severity,
+                    source=finding.source,
+                    apply_after=_apply_after_command(command),
+                    authority_boundary=(
+                        "advisory route candidate only; review the reported finding and matching dry-run before any apply, "
+                        "and do not treat it as closeout, archive, roadmap, staging, commit, rollback, or lifecycle approval"
+                    ),
+                    docs_decision="not affected",
+                )
+            )
+    return tuple(routes)
+
+
+def _first_next_safe_route(findings: list[Finding], severities: set[str] | None = None) -> NextSafeRoute | None:
+    for route in next_safe_routes_for_report(findings):
+        if severities is None or route.severity in severities:
+            return route
+    return None
+
+
+_NEXT_SAFE_COMMAND_RE = re.compile(r"\bnext_safe_command=([^;\n]+)")
+
+
+def _next_safe_commands_from_message(message: str) -> tuple[str, ...]:
+    commands: list[str] = []
+    for match in _NEXT_SAFE_COMMAND_RE.finditer(str(message or "")):
+        command = _plain_text(match.group(1)).strip()
+        if command:
+            commands.append(command)
+    return tuple(commands)
+
+
+def _apply_after_command(command: str) -> str:
+    if "--dry-run" in command:
+        apply_command = command.replace("--dry-run", "--apply", 1)
+        if "writeback --apply --compact-only" in apply_command and "--source-hash" not in apply_command:
+            apply_command += " --source-hash <sha256-from-dry-run>"
+        return apply_command
+    return ""
 
 
 def _review_token_from_findings(findings: list[Finding]) -> str:
@@ -640,21 +842,14 @@ def _review_token_from_findings(findings: list[Finding]) -> str:
     return ""
 
 
-def _nonblocking_mirror_apply_warnings(
-    command: str,
-    apply: bool,
-    findings: list[Finding],
-    warnings: list[Finding],
-) -> bool:
-    if command != "mirror" or not apply or not warnings:
-        return False
-    if any(finding.severity == "error" for finding in findings):
-        return False
-    if any(warning.code not in MIRROR_APPLY_RESOLVED_WARNING_CODES for warning in warnings):
-        return False
-    return any(finding.code == "mirror-file-copied" for finding in findings) and any(
-        finding.code == "mirror-verified" for finding in findings
-    )
+def _memory_hygiene_batch_token_from_findings(findings: list[Finding]) -> str:
+    for finding in findings:
+        if finding.code != "incubation-cleanup-batch-preview":
+            continue
+        match = re.search(r"batch_review_token=(mhb-[0-9a-f]{16})", finding.message)
+        if match:
+            return match.group(1)
+    return ""
 
 
 def _nonblocking_compaction_hygiene_after_lifecycle_apply(
@@ -703,16 +898,36 @@ def _nonblocking_incubation_archive_hygiene_after_lifecycle_apply(
 
 
 def _work_kind_for_command(command: str) -> str:
-    if command in {"check", "validate", "status", "audit-links", "context-budget", "doctor", "preflight", "tasks", "bootstrap", "semantic", "intelligence", "evidence", "snapshot", "adapter", "suggest"}:
+    if command in {
+        "adapter",
+        "audit-links",
+        "bootstrap",
+        "check",
+        "claim",
+        "context-budget",
+        "doctor",
+        "evidence",
+        "intelligence",
+        "manifest",
+        "preflight",
+        "reconcile",
+        "review-token",
+        "semantic",
+        "snapshot",
+        "status",
+        "suggest",
+        "tasks",
+        "validate",
+    }:
         return "verification"
+    if command in {"approval-packet", "handoff"}:
+        return "coordination"
     if command in {"plan", "roadmap", "incubate", "intake", "meta-feedback"}:
         return "planning"
     if command in {"writeback", "transition", "closeout"}:
         return "lifecycle"
     if command in {"repair", "memory-hygiene", "detach", "projection", "init", "attach"}:
         return "hygiene"
-    if command == "mirror":
-        return "implementation"
     return "task"
 
 
@@ -772,18 +987,27 @@ def _remaining_items(
     command: str,
     preview: bool,
     apply: bool,
+    read_only: bool,
     findings: list[Finding],
     warnings: list[Finding],
     errors: list[Finding],
     suggestions: list[str],
     nonblocking_compaction_hygiene: bool = False,
     nonblocking_incubation_archive_hygiene: bool = False,
-    nonblocking_mirror_apply_warnings: bool = False,
+    scan_read_only: bool = False,
+    noop: bool = False,
+    refused_preview: bool = False,
 ) -> tuple[str, ...]:
     if errors:
         if suggestions:
             return tuple(_plain_text(item) for item in suggestions[:2])
-        return ("Resolve the error findings, then rerun the dry-run or read-only check before applying changes.",)
+        if preview:
+            return ("Resolve the error findings, then rerun the dry-run before any apply.",)
+        if read_only:
+            return ("Resolve the error findings, then rerun the read-only command; no apply is implied.",)
+        if apply:
+            return ("Resolve the error findings, rerun the matching dry-run, and apply only after review.",)
+        return ("Resolve the error findings, then rerun the command after review.",)
     if warnings:
         if nonblocking_compaction_hygiene:
             return (
@@ -793,13 +1017,41 @@ def _remaining_items(
             return (
                 "Source-incubation auto-archive remains a separate operating-memory hygiene follow-up; the lifecycle writes above already landed. Keep shared or mixed incubation notes active until coverage is explicit, then use a bounded memory-hygiene or writeback route after review; this does not approve manual archive cleanup, staging, commit, rollback, or additional next-plan movement.",
             )
-        if nonblocking_mirror_apply_warnings:
-            return (_remaining_manual_decisions(command, findings),)
+        if refused_preview:
+            if suggestions:
+                return tuple(_plain_text(item) for item in suggestions[:2])
+            return ("Resolve the refusal findings, then rerun the dry-run; no apply is available from this report.",)
+        if read_only:
+            if command == "intelligence" and suggestions:
+                return tuple(_plain_text(item) for item in suggestions[:2])
+            return (
+                "Review warning findings before relying on this read-only report; choose a separate explicit route before any mutation.",
+            )
         if suggestions:
             return tuple(_plain_text(item) for item in suggestions[:2])
         return ("Review warning findings before relying on this result.",)
+    if noop:
+        if preview and command == "repair":
+            return ("No repairable target was reported; do not run repair apply unless a later check reports a repairable diagnostic.",)
+        if preview and command == "writeback":
+            return ("Whole-state compaction was skipped for the current state size; no compact-only apply is needed now.",)
+        return ("No apply follow-up is needed for the reported current posture.",)
+    if scan_read_only:
+        if any(finding.code == "incubation-cleanup-batch-preview" for finding in findings):
+            return (
+                "Cleanup candidates remain advisory until the reviewed token-bound scan apply succeeds; stale source or link hashes require a fresh dry-run scan.",
+            )
+        return (
+            "Scan findings are advisory; no memory-hygiene apply is available without an explicit source/archive dry-run chosen from reported candidates.",
+        )
     if preview:
         return ("Review the preview target and boundary before running the matching explicit apply command.",)
+    if read_only and command == "suggest":
+        return (
+            "Suggested command routes remain advisory; choose one only when it matches operator intent and root posture, and no lifecycle, archive, staging, commit, push, or apply action is approved by this report.",
+        )
+    if read_only:
+        return ("No required follow-up was reported.",)
     if apply or command in MUTATING_REPORT_COMMANDS:
         return (_remaining_manual_decisions(command, findings),)
     return ("No required follow-up was reported.",)

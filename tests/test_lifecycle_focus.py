@@ -14,13 +14,13 @@ class LifecycleFocusTests(unittest.TestCase):
     def test_sync_inserts_active_focus_and_removes_legacy_leading_summary(self) -> None:
         state = (
             "---\n"
-            'project: "Demo"\n'
+            'project: "Sample"\n'
             'plan_status: "active"\n'
             'active_plan: "project/implementation-plan.md"\n'
             'active_phase: "phase-2-build"\n'
             'phase_status: "in_progress"\n'
             "---\n"
-            "# Demo Project State\n\n"
+            "# Sample Project State\n\n"
             "## Current Focus\n\n"
             "Current focus: stale old phase text.\n\n"
             "Durable note stays here.\n\n"
@@ -39,12 +39,12 @@ class LifecycleFocusTests(unittest.TestCase):
     def test_sync_replaces_existing_focus_block(self) -> None:
         state = (
             "---\n"
-            'project: "Demo"\n'
+            'project: "Sample"\n'
             'plan_status: "none"\n'
             'active_plan: ""\n'
             'last_archived_plan: "project/archive/plans/closed.md"\n'
             "---\n"
-            "# Demo Project State\n\n"
+            "# Sample Project State\n\n"
             "## Current Focus\n\n"
             "<!-- BEGIN mylittleharness-current-focus v1 -->\n"
             "Current focus: active implementation plan is open at `project/implementation-plan.md`.\n"

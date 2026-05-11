@@ -35,6 +35,11 @@ HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 MARKDOWN_LINK_RE = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
 QUOTED_RE = re.compile(r"['\"]([^'\"]+)['\"]")
 BACKTICK_RE = re.compile(r"`([^`\n]+)`")
+PATH_WITH_PROSE_SUFFIX_RE = re.compile(
+    r"^((?:[A-Za-z]:[\\/]|\.{1,2}[\\/]|\.mylittleharness/|\.agents/|\.codex/|docs/|project/|specs/|src/|tests/|[A-Za-z0-9_.-]+/)"
+    r"[^\s`'\"<>]+?\.(?:md|yaml|yml|toml|py|txt|json|zip|docx|pdf))(?:\s+.+)$",
+    re.IGNORECASE,
+)
 
 
 def parse_frontmatter(text: str) -> Frontmatter:
@@ -115,9 +120,22 @@ def _refs_from_regex(line: str, line_number: int, regex: re.Pattern[str], source
     refs = []
     for match in regex.finditer(line):
         target = match.group(1).strip()
-        if _looks_like_path_ref(target):
-            refs.append(LinkRef(target, line_number, source))
+        normalized_target = _path_ref_target(target)
+        if normalized_target:
+            refs.append(LinkRef(normalized_target, line_number, source))
     return refs
+
+
+def _path_ref_target(value: str) -> str:
+    value = value.strip()
+    if _looks_like_path_ref(value):
+        suffix_match = PATH_WITH_PROSE_SUFFIX_RE.match(value.replace("\\", "/"))
+        if suffix_match:
+            return suffix_match.group(1)
+        if re.search(r"\s", value):
+            return ""
+        return value
+    return ""
 
 
 def _looks_like_path_ref(value: str) -> bool:

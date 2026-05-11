@@ -406,6 +406,48 @@ class InventoryTests(unittest.TestCase):
             ]
             self.assertEqual(warnings, [])
 
+    def test_product_root_relative_links_include_build_backend(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_minimal_root(Path(tmp), active=False, docmap=True)
+            (root / "build_backend").mkdir()
+            (root / "build_backend/mylittleharness_build.py").write_text("# backend\n", encoding="utf-8")
+            (root / "docs/specs").mkdir(parents=True)
+            (root / "docs/specs/package.md").write_text(
+                "Package smoke requires `build_backend/mylittleharness_build.py`.\n",
+                encoding="utf-8",
+            )
+
+            inventory = load_inventory(root)
+            warnings = [
+                finding
+                for finding in audit_link_findings(inventory)
+                if finding.severity == "warn" and "build_backend/mylittleharness_build.py" in finding.message
+            ]
+
+            self.assertEqual(warnings, [])
+
+    def test_audit_links_ignores_known_text_only_slash_labels(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_minimal_root(Path(tmp), active=False, docmap=True)
+            (root / "docs/specs").mkdir(parents=True)
+            (root / "docs/specs/labels.md").write_text(
+                "Log labels include `docs/API`, `docs/spec/package`, `docs/tests`, "
+                "`tests/docs`, `tests/docs/components`, `tests/checks`, "
+                "and `tests/product verification`.\n",
+                encoding="utf-8",
+            )
+
+            inventory = load_inventory(root)
+            rendered = "\n".join(finding.message for finding in audit_link_findings(inventory) if finding.severity == "warn")
+
+            self.assertNotIn("docs/API", rendered)
+            self.assertNotIn("docs/spec/package", rendered)
+            self.assertNotIn("docs/tests", rendered)
+            self.assertNotIn("tests/docs", rendered)
+            self.assertNotIn("tests/docs/components", rendered)
+            self.assertNotIn("tests/checks", rendered)
+            self.assertNotIn("tests/product verification", rendered)
+
     def test_audit_links_reports_product_docmap_gaps_and_stale_root_wording(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_minimal_root(Path(tmp), active=False, docmap=True)
@@ -664,7 +706,7 @@ def make_minimal_root(root: Path, active: bool, docmap: bool, mirrors: bool = Fa
 def make_route_metadata_live_root(root: Path) -> Path:
     make_minimal_root(root, active=False, docmap=True)
     (root / "project/project-state.md").write_text(
-        '---\nproject: "Demo"\nworkflow: "workflow-core"\noperating_mode: "ad_hoc"\nplan_status: "none"\nactive_plan: ""\n---\n# State\n',
+        '---\nproject: "Sample"\nworkflow: "workflow-core"\noperating_mode: "ad_hoc"\nplan_status: "none"\nactive_plan: ""\n---\n# State\n',
         encoding="utf-8",
     )
     return root

@@ -8,7 +8,7 @@
 - Treat `workflow-core` as a compatibility label in fixture manifests and operator wording only. It is not the architectural baseline for MyLittleHarness.
 - Keep `.codex/project-workflow.toml`, `.agents/docmap.yaml`, `project/project-state.md`, and `project/specs/workflow/**` as product compatibility fixtures only while the CLI/tests need a workflow-shaped target root.
 - Do not change PATH, user config, installed skills, package archives, attach/install distribution, MCP, hooks, runtime helpers, or workstation state from this product tree.
-- Do not create or import active implementation plans, archived plans, research/history/raw intake, archive-under-study material, candidate source packs, old migration evidence, package zips, broad research corpus, runtime/demo debris, reports, logs, caches, generated validation artifacts, local databases, or pycache into this product tree.
+- Do not create or import active implementation plans, archived plans, research/history/raw intake, archive-under-study material, candidate source packs, old migration evidence, package zips, broad research corpus, runtime debris, reports, logs, caches, generated validation artifacts, local databases, or pycache into this product tree.
 
 ## Start Pass
 
@@ -42,4 +42,3 @@ There should be no active `project/implementation-plan.md` in this repository.
 - On closeout, use manual commit policy and record skipped commit decisions when this directory is not a git worktree.
 - If the compatibility fixture contract is missing or broken, report that it needs repair from the operating project root instead of silently installing or adopting workstation tooling.
 <!-- END workflow-core v1 -->
-
