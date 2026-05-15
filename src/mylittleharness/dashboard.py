@@ -418,6 +418,7 @@ def _accelerator_adoption_payload(inventory: Inventory) -> dict[str, object]:
         "schema": "mylittleharness.agent-accelerator-adoption.v1",
         "dashboardPacketAvailable": True,
         "mcp": codex_mcp_adoption_payload(inventory),
+        "firstContactHookCommand": "mylittleharness --root <root> hooks --run session-start --json",
         "projectionWarmCacheCommand": "mylittleharness --root <root> projection --warm-cache --target all",
         "rgVerificationRequired": True,
         "sequence": [
@@ -443,6 +444,7 @@ def _accelerator_adoption_finding(inventory: Inventory, code_prefix: str) -> Fin
         f"{code_prefix}-accelerator-adoption",
         (
             f"first-contact accelerators: dashboard_packet=available; mcp={status}; "
+            "session_start_hook=`mylittleharness --root <root> hooks --run session-start --json`; "
             "projection_warm_cache_command=`mylittleharness --root <root> projection --warm-cache --target all`; "
             "rg_verification=required; config_merge=idempotent-explicit"
         ),

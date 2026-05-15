@@ -305,7 +305,7 @@ def mcp_read_projection_sections(
     requested_root: str | None = None,
 ) -> list[tuple[str, list[Finding]]]:
     projection = build_projection(inventory)
-    root_selection = _root_selection_payload(inventory, default_root or inventory.root, requested_root)
+    root_selection = _root_selection_payload(inventory, _selection_default_root(inventory, default_root, requested_root), requested_root)
     return [
         ("Adapter", _adapter_findings(inventory, root_selection=root_selection)),
         ("Projection", _projection_findings(projection)),
@@ -321,7 +321,7 @@ def mcp_read_projection_payload(
     default_root: Path | None = None,
     requested_root: str | None = None,
 ) -> dict[str, object]:
-    root_selection = _root_selection_payload(inventory, default_root or inventory.root, requested_root)
+    root_selection = _root_selection_payload(inventory, _selection_default_root(inventory, default_root, requested_root), requested_root)
     runtime = _adapter_runtime_payload(inventory, root_selection)
     sections = mcp_read_projection_sections(inventory, default_root=default_root, requested_root=requested_root)
     findings = [finding for _, section_findings in sections for finding in section_findings]
@@ -373,18 +373,14 @@ def mcp_read_projection_payload(
     }
 
 
-def mcp_read_projection_serve_command(inventory: Inventory) -> list[str]:
-    return [
-        "mylittleharness",
-        "--root",
-        str(inventory.root),
-        "adapter",
-        "--serve",
-        "--target",
-        MCP_READ_PROJECTION_TARGET,
-        "--transport",
-        "stdio",
-    ]
+def mcp_read_projection_serve_command(inventory: Inventory | None = None, *, bind_root: bool = False) -> list[str]:
+    command = ["mylittleharness"]
+    if bind_root:
+        if inventory is None:
+            raise ValueError("bind_root requires an inventory")
+        command.extend(["--root", str(inventory.root)])
+    command.extend(["adapter", "--serve", "--target", MCP_READ_PROJECTION_TARGET, "--transport", "stdio"])
+    return command
 
 
 def mcp_read_projection_client_config(inventory: Inventory, *, codex_config_path: str | Path | None = None) -> dict[str, object]:
@@ -412,9 +408,11 @@ def mcp_read_projection_client_config(inventory: Inventory, *, codex_config_path
         "toolInputSchema": _read_projection_input_schema(),
         "rootSelection": {
             "defaultRoot": str(inventory.root),
+            "defaultRootOptional": True,
             "toolArgument": "root",
             "supportsPerCallRoot": True,
             "refreshesInventoryPerCall": True,
+            "serverLaunch": "rootless-router",
             "boundary": (
                 "per-call root selection reads another MLH-serviced root without installing scaffold, lifecycle debris, "
                 "generated cache authority, or another runtime layer"
@@ -573,7 +571,7 @@ def codex_mcp_install_sections(
 
 
 def serve_mcp_read_projection(
-    inventory: Inventory,
+    inventory: Inventory | None,
     stdin: TextIO,
     stdout: TextIO,
     inventory_loader: InventoryLoader = load_inventory,
@@ -630,8 +628,8 @@ def _adapter_findings(inventory: Inventory, *, root_selection: dict[str, object]
             "info",
             "adapter-mcp-helper",
             (
-                "read-only MCP helper can be served with `mylittleharness --root <root> adapter --serve --target "
-                "mcp-read-projection --transport stdio`; each tool call reloads the selected root inventory while generated inputs remain optional"
+                "read-only MCP helper can be served rootless with `mylittleharness adapter --serve --target "
+                "mcp-read-projection --transport stdio`; each tool call can select an MLH root while generated inputs remain optional"
             ),
         ),
         Finding(
@@ -662,11 +660,19 @@ def _adapter_findings(inventory: Inventory, *, root_selection: dict[str, object]
             "info",
             "adapter-root-selection",
             (
-                "mylittleharness.read_projection accepts optional `root` per call and reloads that MLH-serviced root read-only; "
-                "omitting `root` reloads the adapter startup root"
+                "MCP tools accept optional `root` per call and reload that MLH-serviced root read-only; rootless server launches "
+                "require `root`, while legacy root-bound launches may omit it to reload the startup root"
             ),
         ),
     ]
+    if runtime.get("routerMode") is True:
+        findings.append(
+            Finding(
+                "info",
+                "adapter-runtime-rootless-router",
+                "MCP server is operating without a startup authority root; each tool call must select a root or fail read-only",
+            )
+        )
     if runtime["requestedRoot"] and runtime["startupRoot"] != runtime["selectedRoot"]:
         findings.append(
             Finding(
@@ -784,12 +790,14 @@ def _generated_posture(kind: str, findings: list[Finding]) -> Finding:
 
 
 def _adapter_runtime_payload(inventory: Inventory, root_selection: dict[str, object]) -> dict[str, object]:
+    startup_root = str(root_selection.get("defaultRoot") or "")
     return {
         "packageVersion": __version__,
         "modulePath": str(Path(__file__).resolve()),
-        "startupRoot": str(root_selection.get("defaultRoot") or inventory.root),
+        "startupRoot": startup_root,
         "selectedRoot": str(root_selection.get("selectedRoot") or inventory.root),
         "requestedRoot": str(root_selection.get("requestedRoot") or ""),
+        "routerMode": bool(root_selection.get("routerMode")),
         "serveCommand": mcp_read_projection_serve_command(inventory),
         "recovery": (
             "if MCP output disagrees with current CLI/source posture, restart or reconfigure the MCP server from the reported "
@@ -908,7 +916,14 @@ def _codex_config_status(
     args_matches = server.get("args") == expected_server["args"]
     extra_keys = tuple(sorted(str(key) for key in set(server) - {"command", "args"}))
     if command_matches and args_matches:
-        return "mounted", True, "Codex config already mounts the expected mylittleharness MCP server", extra_keys
+        return "mounted", True, "Codex config already mounts the expected rootless mylittleharness MCP server", extra_keys
+    if _is_legacy_root_bound_mcp_server(server) and not extra_keys:
+        return (
+            "legacy-root-bound",
+            False,
+            "Codex config mounts the legacy root-bound mylittleharness MCP server; reviewed apply can replace it with the rootless router command",
+            extra_keys,
+        )
     return "conflict", False, "Codex config already has a mylittleharness MCP server table with different command or args; apply is refused", extra_keys
 
 
@@ -917,13 +932,15 @@ def _codex_merge_mode(status: str) -> str:
         return "no-op"
     if status in {"missing", "missing-server"}:
         return "append-managed-server-table"
+    if status == "legacy-root-bound":
+        return "replace-legacy-root-bound-server-table"
     return "refuse-unreviewed-existing-config"
 
 
 def _apply_codex_mcp_config(config_path: Path, command: list[str], status: str, mounted: bool) -> list[Finding]:
     if mounted:
         return [Finding("info", "adapter-codex-config-apply-unchanged", "MCP server is already mounted; no workstation file was changed")]
-    if status not in {"missing", "missing-server"}:
+    if status not in {"missing", "missing-server", "legacy-root-bound"}:
         return [
             Finding(
                 "error",
@@ -939,7 +956,7 @@ def _apply_codex_mcp_config(config_path: Path, command: list[str], status: str, 
         before = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
         backup_finding = _backup_codex_config(config_path, before) if before else None
         config_path.parent.mkdir(parents=True, exist_ok=True)
-        config_path.write_text(_merged_codex_config_text(before, command), encoding="utf-8")
+        config_path.write_text(_merged_codex_config_text(before, command, replace_existing=status == "legacy-root-bound"), encoding="utf-8")
     except OSError as exc:
         return [Finding("error", "adapter-codex-config-apply-refused", f"could not write Codex config: {exc}")]
     after_status, after_mounted, after_reason, _extra = _codex_config_status(config_path, _codex_expected_server(command))
@@ -977,12 +994,42 @@ def _backup_codex_config(config_path: Path, text: str) -> Finding:
     )
 
 
-def _merged_codex_config_text(before: str, command: list[str]) -> str:
+def _merged_codex_config_text(before: str, command: list[str], *, replace_existing: bool = False) -> str:
+    if replace_existing:
+        replaced = _replace_codex_mcp_server_block(before, command)
+        if replaced is not None:
+            return replaced
     prefix = before.rstrip()
     block = _codex_mcp_toml_block(command).rstrip()
     if not prefix:
         return block + "\n"
     return prefix + "\n\n" + block + "\n"
+
+
+def _replace_codex_mcp_server_block(before: str, command: list[str]) -> str | None:
+    lines = before.splitlines()
+    header = f"[mcp_servers.{MCP_READ_PROJECTION_SERVER_NAME}]"
+    start = next((index for index, line in enumerate(lines) if line.strip() == header), None)
+    if start is None:
+        return None
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        stripped = lines[index].strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            end = index
+            break
+    block_lines = _codex_mcp_toml(command).splitlines()
+    merged = lines[:start] + block_lines + lines[end:]
+    text = "\n".join(merged).rstrip()
+    return text + "\n"
+
+
+def _is_legacy_root_bound_mcp_server(server: dict[str, object]) -> bool:
+    args = server.get("args")
+    if server.get("command") != "mylittleharness" or not isinstance(args, list):
+        return False
+    legacy_suffix = ["adapter", "--serve", "--target", MCP_READ_PROJECTION_TARGET, "--transport", "stdio"]
+    return len(args) == len(legacy_suffix) + 2 and args[0] == "--root" and isinstance(args[1], str) and args[2:] == legacy_suffix
 
 
 def _codex_config_install_boundary_findings() -> list[Finding]:
@@ -1000,19 +1047,27 @@ def _codex_config_install_boundary_findings() -> list[Finding]:
     ]
 
 
-def _root_selection_payload(inventory: Inventory, default_root: Path, requested_root: str | None) -> dict[str, object]:
+def _root_selection_payload(inventory: Inventory, default_root: Path | None, requested_root: str | None) -> dict[str, object]:
     return {
-        "defaultRoot": str(default_root),
+        "defaultRoot": str(default_root) if default_root is not None else "",
         "selectedRoot": str(inventory.root),
         "requestedRoot": requested_root or "",
         "toolArgument": "root",
         "inventoryReloadedPerCall": True,
+        "startupRootAvailable": default_root is not None,
+        "routerMode": default_root is None,
         "writesFiles": False,
         "authorizesLifecycle": False,
     }
 
 
-def _handle_jsonrpc_message(inventory: Inventory, message: object, inventory_loader: InventoryLoader) -> dict[str, object] | None:
+def _selection_default_root(inventory: Inventory, default_root: Path | None, requested_root: str | None) -> Path | None:
+    if default_root is None and requested_root:
+        return None
+    return default_root or inventory.root
+
+
+def _handle_jsonrpc_message(inventory: Inventory | None, message: object, inventory_loader: InventoryLoader) -> dict[str, object] | None:
     if not isinstance(message, dict):
         return _error_response(None, -32600, "Invalid Request")
     request_id = message.get("id")
@@ -1057,7 +1112,7 @@ def _root_input_property() -> dict[str, object]:
         "type": "string",
         "description": (
             "Optional filesystem path to an MLH-serviced root to read for this call. "
-            "Omit to reload the adapter startup root."
+            "Required when the server was launched rootless; legacy root-bound launches may omit it to reload the adapter startup root."
         ),
     }
 
@@ -1271,7 +1326,7 @@ def _related_or_bundle_tool_definition() -> dict[str, object]:
 
 
 def _tools_call_response(
-    inventory: Inventory,
+    inventory: Inventory | None,
     request_id: object,
     params: object,
     inventory_loader: InventoryLoader,
@@ -1292,11 +1347,12 @@ def _tools_call_response(
     except RootLoadError as exc:
         return _tool_error_response(request_id, f"Invalid root: {exc}")
 
+    default_root = inventory.root if inventory is not None else None
     if name == MCP_READ_PROJECTION_TOOL:
         structured, tool_error = (
             mcp_read_projection_payload(
                 selected_inventory,
-                default_root=inventory.root,
+                default_root=default_root,
                 requested_root=requested_root,
             ),
             None,
@@ -1305,21 +1361,21 @@ def _tools_call_response(
         structured, tool_error = _mcp_read_source_payload(
             selected_inventory,
             arguments,
-            default_root=inventory.root,
+            default_root=default_root,
             requested_root=requested_root,
         )
     elif name == MCP_SEARCH_TOOL:
         structured, tool_error = _mcp_search_payload(
             selected_inventory,
             arguments,
-            default_root=inventory.root,
+            default_root=default_root,
             requested_root=requested_root,
         )
     else:
         structured, tool_error = _mcp_related_or_bundle_payload(
             selected_inventory,
             arguments,
-            default_root=inventory.root,
+            default_root=default_root,
             requested_root=requested_root,
         )
     if tool_error:
@@ -1346,17 +1402,22 @@ def _tool_argument_names(tool_name: str) -> set[str]:
     return {"root"}
 
 
-def _selected_root_argument(inventory: Inventory, arguments: object, allowed_fields: set[str]) -> tuple[Path | str, str | None, str | None]:
+def _selected_root_argument(inventory: Inventory | None, arguments: object, allowed_fields: set[str]) -> tuple[Path | str, str | None, str | None]:
     if not isinstance(arguments, dict):
-        return inventory.root, None, "Invalid arguments: MCP tools accept a JSON object."
+        fallback = inventory.root if inventory is not None else ""
+        return fallback, None, "Invalid arguments: MCP tools accept a JSON object."
     unknown = sorted(set(arguments) - allowed_fields)
     if unknown:
-        return inventory.root, None, f"Invalid arguments: unknown field(s): {', '.join(unknown)}."
+        fallback = inventory.root if inventory is not None else ""
+        return fallback, None, f"Invalid arguments: unknown field(s): {', '.join(unknown)}."
     requested_root = arguments.get("root")
     if requested_root in (None, ""):
+        if inventory is None:
+            return "", None, "Invalid arguments: root is required when the MCP adapter is launched without a startup root."
         return inventory.root, None, None
     if not isinstance(requested_root, str):
-        return inventory.root, None, "Invalid arguments: root must be a string path when supplied."
+        fallback = inventory.root if inventory is not None else ""
+        return fallback, None, "Invalid arguments: root must be a string path when supplied."
     return requested_root, requested_root, None
 
 
@@ -1364,7 +1425,7 @@ def _mcp_read_source_payload(
     inventory: Inventory,
     arguments: dict[str, object],
     *,
-    default_root: Path,
+    default_root: Path | None,
     requested_root: str | None,
 ) -> tuple[dict[str, object], str | None]:
     rel_path, error = _source_path_argument(arguments.get("path"))
@@ -1410,7 +1471,7 @@ def _mcp_search_payload(
     inventory: Inventory,
     arguments: dict[str, object],
     *,
-    default_root: Path,
+    default_root: Path | None,
     requested_root: str | None,
 ) -> tuple[dict[str, object], str | None]:
     query, error = _required_text_argument(arguments.get("query"), "query")
@@ -1478,7 +1539,7 @@ def _mcp_related_or_bundle_payload(
     inventory: Inventory,
     arguments: dict[str, object],
     *,
-    default_root: Path,
+    default_root: Path | None,
     requested_root: str | None,
 ) -> tuple[dict[str, object], str | None]:
     rel_path, error = _source_path_argument(arguments.get("path"))

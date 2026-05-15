@@ -32,6 +32,7 @@ def hooks_doctor_sections(inventory: Inventory) -> list[tuple[str, list[Finding]
     return [
         ("Summary", _hooks_summary_findings(inventory)),
         ("Install Targets", _hook_install_target_findings(inventory, HookInstallRequest(HOOK_PRE_COMMIT))),
+        ("First Contact Adoption", _hook_first_contact_adoption_findings(inventory)),
         ("Runnable Events", _hook_event_findings()),
         ("Boundary", _hook_boundary_findings()),
     ]
@@ -165,6 +166,7 @@ def render_hook_shim(root: Path, hook_id: str) -> str:
     if hook_id != HOOK_PRE_COMMIT:
         raise ValueError(f"unsupported installable hook: {hook_id}")
     root_literal = shlex.quote(str(root.resolve()))
+    import_root_literal = shlex.quote(str(_module_import_root()))
     return "\n".join(
         [
             "#!/bin/sh",
@@ -172,13 +174,29 @@ def render_hook_shim(root: Path, hook_id: str) -> str:
             "# Installed only by explicit `mylittleharness hooks --apply`; never by init/attach.",
             "# This shim does not approve lifecycle, archive, roadmap, staging, commit, push, or release.",
             f"MLH_ROOT={root_literal}",
+            f"MLH_PYTHONPATH={import_root_literal}",
             "",
-            "if ! command -v mylittleharness >/dev/null 2>&1; then",
-            "    printf '%s\\n' 'warning: mylittleharness is not available; skipping advisory hook.' >&2",
-            "    exit 0",
-            "fi",
+            "run_mlh() {",
+            "    if command -v mylittleharness >/dev/null 2>&1; then",
+            "        mylittleharness \"$@\"",
+            "        return $?",
+            "    fi",
+            "    if command -v python >/dev/null 2>&1; then",
+            "        PYTHONPATH=\"$MLH_PYTHONPATH\" python -m mylittleharness \"$@\"",
+            "        return $?",
+            "    fi",
+            "    if command -v py >/dev/null 2>&1; then",
+            "        PYTHONPATH=\"$MLH_PYTHONPATH\" py -m mylittleharness \"$@\"",
+            "        return $?",
+            "    fi",
+            "    return 127",
+            "}",
             "",
-            'if ! mylittleharness --root "$MLH_ROOT" hooks --run git-pre-commit -- "$@"; then',
+            'run_mlh --root "$MLH_ROOT" hooks --run git-pre-commit -- "$@"',
+            "MLH_STATUS=$?",
+            "if [ \"$MLH_STATUS\" -eq 127 ]; then",
+            "    printf '%s\\n' 'warning: mylittleharness is not available via console script or Python module; skipping advisory hook.' >&2",
+            "elif [ \"$MLH_STATUS\" -ne 0 ]; then",
             "    printf '%s\\n' 'warning: mylittleharness hook did not complete; this shim remains warning-only.' >&2",
             "fi",
             "",
@@ -194,6 +212,11 @@ def _hooks_summary_findings(inventory: Inventory) -> list[Finding]:
             "info",
             "hooks-doctor-posture",
             "hooks doctor is read-only; install requires explicit hooks --dry-run followed by hooks --apply",
+        ),
+        Finding(
+            "info",
+            "hooks-doctor-first-contact",
+            "first-contact context is a runnable native-client event (`hooks --run session-start --json`); Git pre-commit is only a warning shim and does not make agents use the dashboard",
         ),
     ]
 
@@ -215,7 +238,37 @@ def _hook_install_target_findings(inventory: Inventory, request: HookInstallRequ
         findings.append(Finding("info", "hooks-target-existing", f"hook target already exists: {_rel_path(inventory.root, target)}", _rel_path(inventory.root, target)))
     else:
         findings.append(Finding("info", "hooks-target-missing", f"hook target is absent: {_rel_path(inventory.root, target)}", _rel_path(inventory.root, target)))
+    findings.append(
+        Finding(
+            "info",
+            "hooks-target-runtime-fallback",
+            "installed Git shim tries the mylittleharness console script first, then falls back to `python -m mylittleharness` with the install-time package import root",
+        )
+    )
     return findings
+
+
+def _hook_first_contact_adoption_findings(inventory: Inventory) -> list[Finding]:
+    state_ref = "project/project-state.md" if inventory.state and inventory.state.exists else None
+    return [
+        Finding(
+            "info",
+            "hooks-first-contact-command",
+            f"native first-contact command: mylittleharness --root {shlex.quote(str(inventory.root))} hooks --run session-start --json",
+            state_ref,
+        ),
+        Finding(
+            "info",
+            "hooks-first-contact-dashboard-first",
+            "session-start emits the dashboard agent packet, projection/SQLite posture, MCP adoption posture, and rg-verification reminder before agent navigation",
+            state_ref,
+        ),
+        Finding(
+            "info",
+            "hooks-first-contact-native-client-boundary",
+            "MLH currently exposes the session-start event and payload but does not install Codex/IDE/native-client hook configuration; clients or operator contracts must opt in explicitly",
+        ),
+    ]
 
 
 def _hook_event_findings() -> list[Finding]:
@@ -426,3 +479,7 @@ def _rel_path(root: Path, path: Path) -> str:
         return path.relative_to(root).as_posix()
     except ValueError:
         return path.as_posix()
+
+
+def _module_import_root() -> Path:
+    return Path(__file__).resolve().parents[1]

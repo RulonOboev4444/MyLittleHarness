@@ -22,7 +22,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="MyLittleHarness repo safety utility. Primary commands: init, check, repair, detach.",
         epilog="Compatibility and advanced diagnostics remain available for recovery and transition.",
     )
-    parser.add_argument("--root", default=".", help="Target workflow root. Defaults to the current directory.")
+    parser.add_argument("--root", default=None, help="Target workflow root. Defaults to the current directory.")
     subparsers = parser.add_subparsers(dest="command", required=True, metavar="{init,check,repair,detach,...}")
     init = subparsers.add_parser("init", help="Attach MyLittleHarness to a target repository.")
     init_mode = init.add_mutually_exclusive_group(required=True)

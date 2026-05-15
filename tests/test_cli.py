@@ -17500,6 +17500,8 @@ class CliTests(unittest.TestCase):
             self.assertIn("MyLittleHarness hooks --doctor", doctor_rendered)
             self.assertIn("hooks-doctor-posture", doctor_rendered)
             self.assertIn("hooks-git-dir", doctor_rendered)
+            self.assertIn("hooks-first-contact-command", doctor_rendered)
+            self.assertIn("hooks-target-runtime-fallback", doctor_rendered)
             self.assertIn("hooks-boundary", doctor_rendered)
 
             dry_run_output = io.StringIO()
@@ -17516,7 +17518,9 @@ class CliTests(unittest.TestCase):
             hook_path = root / ".git/hooks/pre-commit"
             hook_text = hook_path.read_text(encoding="utf-8")
             self.assertIn("hooks-install-written", rendered_apply)
-            self.assertIn('mylittleharness --root "$MLH_ROOT" hooks --run git-pre-commit -- "$@"', hook_text)
+            self.assertIn("MLH_PYTHONPATH=", hook_text)
+            self.assertIn("python -m mylittleharness", hook_text)
+            self.assertIn('run_mlh --root "$MLH_ROOT" hooks --run git-pre-commit -- "$@"', hook_text)
             self.assertIn("warning-only hook shim", hook_text)
 
             before_run = snapshot_tree_bytes(root)
@@ -17573,8 +17577,9 @@ class CliTests(unittest.TestCase):
             self.assertFalse(payload["cachePosture"]["refreshable_by_adapter"])
             self.assertEqual("mylittleharness.agent-accelerator-adoption.v1", payload["acceleratorAdoption"]["schema"])
             self.assertTrue(payload["acceleratorAdoption"]["dashboardPacketAvailable"])
-            self.assertIn(payload["acceleratorAdoption"]["mcp"]["status"], {"missing", "missing-server", "mounted", "conflict", "invalid-toml", "blocked", "unreadable"})
+            self.assertIn(payload["acceleratorAdoption"]["mcp"]["status"], {"missing", "missing-server", "mounted", "legacy-root-bound", "conflict", "invalid-toml", "blocked", "unreadable"})
             self.assertTrue(payload["acceleratorAdoption"]["rgVerificationRequired"])
+            self.assertEqual("mylittleharness --root <root> hooks --run session-start --json", payload["acceleratorAdoption"]["firstContactHookCommand"])
             self.assertFalse(payload["boundary"]["refreshesGeneratedCache"])
             self.assertFalse(payload["boundary"]["authorizesLifecycle"])
             self.assertFalse(payload["boundary"]["authorizesGit"])
@@ -17904,21 +17909,21 @@ class CliTests(unittest.TestCase):
             self.assertEqual("root", payload["rootSelection"]["toolArgument"])
             self.assertTrue(payload["rootSelection"]["supportsPerCallRoot"])
             self.assertTrue(payload["rootSelection"]["refreshesInventoryPerCall"])
+            self.assertTrue(payload["rootSelection"]["defaultRootOptional"])
+            self.assertEqual("rootless-router", payload["rootSelection"]["serverLaunch"])
             self.assertEqual("root", next(iter(payload["toolInputSchema"]["properties"])))
             self.assertIn("Optional filesystem path", payload["toolInputSchema"]["properties"]["root"]["description"])
             self.assertEqual("%USERPROFILE%\\.codex\\config.toml", payload["codex"]["configPath"])
             self.assertEqual("mylittleharness.codex-mcp-adoption.v1", payload["adoption"]["schema"])
-            self.assertIn(payload["adoption"]["status"], {"missing", "missing-server", "mounted", "conflict", "invalid-toml", "blocked", "unreadable"})
+            self.assertIn(payload["adoption"]["status"], {"missing", "missing-server", "mounted", "legacy-root-bound", "conflict", "invalid-toml", "blocked", "unreadable"})
             self.assertTrue(payload["adoption"]["merge"]["idempotent"])
             self.assertFalse(payload["adoption"]["merge"]["storesSecrets"])
             self.assertIn("[mcp_servers.mylittleharness]", payload["codex"]["toml"])
-            self.assertIn('"--root"', payload["codex"]["toml"])
+            self.assertNotIn('"--root"', payload["codex"]["toml"])
             self.assertEqual(
                 {
                     "command": "mylittleharness",
                     "args": [
-                        "--root",
-                        str(root),
                         "adapter",
                         "--serve",
                         "--target",
@@ -18042,6 +18047,56 @@ class CliTests(unittest.TestCase):
             self.assertIn("adapter-codex-config-apply-refused", rendered)
             self.assertNotIn("should-not-print", rendered)
 
+    def test_adapter_install_client_config_replaces_legacy_root_bound_server(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp) / "root")
+            old_root = Path(tmp) / "old-root"
+            config_path = Path(tmp) / "home" / ".codex" / "config.toml"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text(
+                "\n".join(
+                    [
+                        'model = "gpt-test"',
+                        "",
+                        "[mcp_servers.mylittleharness]",
+                        'command = "mylittleharness"',
+                        f"args = ['--root', '{old_root}', 'adapter', '--serve', '--target', 'mcp-read-projection', '--transport', 'stdio']",
+                        "",
+                        "[projects.sample]",
+                        'trust_level = "trusted"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "adapter",
+                        "--install-client-config",
+                        "--target",
+                        "mcp-read-projection",
+                        "--config-path",
+                        str(config_path),
+                        "--apply",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            config_text = config_path.read_text(encoding="utf-8")
+            self.assertEqual(code, 0)
+            self.assertIn("legacy-root-bound", rendered)
+            self.assertIn("adapter-codex-config-apply-written", rendered)
+            self.assertIn('model = "gpt-test"', config_text)
+            self.assertIn("[projects.sample]", config_text)
+            self.assertIn("[mcp_servers.mylittleharness]", config_text)
+            self.assertNotIn('"--root"', config_text)
+            self.assertNotIn(str(old_root), config_text)
+
     def test_adapter_reports_stale_generated_projection_as_optional_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_root(Path(tmp), active=False, mirrors=False)
@@ -18155,8 +18210,6 @@ class CliTests(unittest.TestCase):
             self.assertEqual(
                 [
                     "mylittleharness",
-                    "--root",
-                    str(root),
                     "adapter",
                     "--serve",
                     "--target",
@@ -18331,6 +18384,51 @@ class CliTests(unittest.TestCase):
                 )
             )
             self.assertIn("project/implementation-plan.md [active-plan; required; present]", structured["sources"])
+
+    def test_adapter_serve_mcp_stdio_rootless_router_requires_per_call_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            selected_root = make_operating_root(Path(tmp) / "selected")
+            before_selected = snapshot_tree(selected_root)
+            messages = [
+                {"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {"name": "mylittleharness.read_projection", "arguments": {}},
+                },
+                {
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": {"name": "mylittleharness.read_projection", "arguments": {"root": str(selected_root)}},
+                },
+            ]
+
+            input_stream = io.StringIO("\n".join(json.dumps(message) for message in messages) + "\n")
+            output = io.StringIO()
+            with patch("sys.stdin", input_stream), redirect_stdout(output):
+                code = main(["adapter", "--serve", "--target", "mcp-read-projection", "--transport", "stdio"])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(before_selected, snapshot_tree(selected_root))
+            responses = jsonrpc_lines(output.getvalue())
+            self.assertEqual("mylittleharness.read_projection", responses[0]["result"]["tools"][0]["name"])
+            self.assertTrue(responses[1]["result"]["isError"])
+            self.assertIn("root is required", responses[1]["result"]["content"][0]["text"])
+            structured = responses[2]["result"]["structuredContent"]
+            self.assertEqual(str(selected_root), structured["root"]["path"])
+            self.assertEqual("", structured["rootSelection"]["defaultRoot"])
+            self.assertEqual(str(selected_root), structured["rootSelection"]["selectedRoot"])
+            self.assertEqual(str(selected_root), structured["rootSelection"]["requestedRoot"])
+            self.assertFalse(structured["rootSelection"]["startupRootAvailable"])
+            self.assertTrue(structured["rootSelection"]["routerMode"])
+            self.assertEqual("", structured["runtime"]["startupRoot"])
+            self.assertTrue(structured["runtime"]["routerMode"])
+            self.assertIn(
+                "adapter-runtime-rootless-router",
+                [finding["code"] for section in structured["sections"] for finding in section["findings"]],
+            )
 
     def test_adapter_serve_mcp_stdio_reloads_startup_root_per_tool_call(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -20632,7 +20730,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("adapter --install-client-config --target mcp-read-projection --dry-run", payload["agentPacket"]["recommendedCommands"][3])
             self.assertEqual("mylittleharness.agent-accelerator-adoption.v1", payload["acceleratorAdoption"]["schema"])
             self.assertTrue(payload["acceleratorAdoption"]["dashboardPacketAvailable"])
-            self.assertIn(payload["acceleratorAdoption"]["mcp"]["status"], {"missing", "missing-server", "mounted", "conflict", "invalid-toml", "blocked", "unreadable"})
+            self.assertIn(payload["acceleratorAdoption"]["mcp"]["status"], {"missing", "missing-server", "mounted", "legacy-root-bound", "conflict", "invalid-toml", "blocked", "unreadable"})
             self.assertTrue(payload["acceleratorAdoption"]["rgVerificationRequired"])
             self.assertIn("writeback --dry-run --phase-status complete", payload["agentPacket"]["nextLegalDryRun"]["command"])
             self.assertFalse(payload["agentPacket"]["nextLegalDryRun"]["approves_git"])

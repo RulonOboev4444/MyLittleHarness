@@ -280,7 +280,10 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("--approval-packet-ref and --relay-* are only valid with adapter --target approval-relay")
     if args.command == "hooks" and getattr(args, "json", False) and not getattr(args, "run", None):
         parser.error("hooks --json is only valid with --run")
-    root = Path(args.root).expanduser()
+    if args.command == "adapter" and args.serve and args.root is None:
+        return serve_mcp_read_projection(None, sys.stdin, sys.stdout)
+
+    root = Path(args.root or ".").expanduser()
     try:
         inventory = load_for_root(root)
     except RootLoadError as exc:

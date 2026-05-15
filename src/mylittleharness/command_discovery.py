@@ -533,6 +533,7 @@ COMMAND_INTENTS: tuple[CommandIntent, ...] = (
         ),
         "mylittleharness --root <root> dashboard --inspect",
         (
+            "mylittleharness --root <root> hooks --run session-start --json",
             "mylittleharness --root <root> intelligence --query \"<topic-or-route-question>\"",
             "mylittleharness --root <root> intelligence --focus routes",
             "mylittleharness --root <root> adapter --client-config --target mcp-read-projection",
