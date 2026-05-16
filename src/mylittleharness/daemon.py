@@ -11,6 +11,7 @@ from .projection_artifacts import (
     CACHE_OPERATION_MARKER_NAME,
     INDEX_DIRTY_MARKER_NAME,
     artifact_dir,
+    projection_cache_dirty_changed_paths,
 )
 
 
@@ -131,6 +132,7 @@ def projection_pulse_payload(inventory: Inventory) -> dict[str, object]:
     dirty_payloads = [payload for payload in dirty_payloads if payload]
     operation_payload = _read_json_marker(inventory.root, CACHE_OPERATION_MARKER_NAME)
     dirty_since_values = [str(payload.get("dirty_since_utc") or "") for payload in dirty_payloads if isinstance(payload, dict)]
+    changed_paths = projection_cache_dirty_changed_paths(inventory.root)
     status = "updating-or-interrupted" if operation_payload else "warmable" if dirty_payloads else "idle"
     return {
         "schema": "mylittleharness.projection-pulse.v1",
@@ -138,6 +140,10 @@ def projection_pulse_payload(inventory: Inventory) -> dict[str, object]:
         "dirty": bool(dirty_payloads),
         "dirty_since_utc": sorted(value for value in dirty_since_values if value)[:1][0] if any(dirty_since_values) else "",
         "dirty_marker_count": len(dirty_payloads),
+        "changed_path_count": len(changed_paths),
+        "changed_path_examples": list(changed_paths[:10]),
+        "quiet_period_seconds": 0,
+        "quiet_period_elapsed": not operation_payload,
         "operation": str(operation_payload.get("operation") or "") if isinstance(operation_payload, dict) else "",
         "operation_created_at_utc": str(operation_payload.get("created_at_utc") or "") if isinstance(operation_payload, dict) else "",
         "warm_cache_command": "mylittleharness --root <root> projection --warm-cache --target all",

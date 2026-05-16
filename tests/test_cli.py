@@ -17671,7 +17671,7 @@ class CliTests(unittest.TestCase):
             cwd = Path.cwd()
             try:
                 os.chdir(root)
-                with redirect_stdout(script_output), self.assertRaises(SystemExit) as raised:
+                with patch("sys.stdin", io.StringIO("")), redirect_stdout(script_output), self.assertRaises(SystemExit) as raised:
                     runpy.run_path(str(script_path), run_name="__main__")
             finally:
                 os.chdir(cwd)
@@ -19581,6 +19581,94 @@ class CliTests(unittest.TestCase):
             self.assertIn("projection-index-warm-cache", rendered)
             self.assertIn("watcher writes only", rendered)
             self.assertIn("cannot affect lifecycle authority", rendered)
+
+    def test_projection_warm_cache_incrementally_updates_dirty_index_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=False)
+            build_output = io.StringIO()
+            with redirect_stdout(build_output):
+                build_code = main(["--root", str(root), "projection", "--build", "--target", "index"])
+            self.assertEqual(build_code, 0)
+
+            probe = "mlhincrementalsqliteprobe"
+            readme = root / "README.md"
+            readme.write_text(readme.read_text(encoding="utf-8") + f"\n{probe}\n", encoding="utf-8")
+            mark_projection_cache_dirty(load_inventory(root), ["README.md"], "test")
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "projection", "--warm-cache", "--target", "index"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("projection-index-incremental-refresh", rendered)
+            self.assertIn("changed_paths=1", rendered)
+            self.assertFalse((root / ARTIFACT_DIR_REL / INDEX_DIRTY_MARKER_NAME).exists())
+
+            search_output = io.StringIO()
+            with redirect_stdout(search_output):
+                search_code = main(["--root", str(root), "intelligence", "--full-text", probe])
+            self.assertEqual(search_code, 0)
+            self.assertIn("projection-index-query-current", search_output.getvalue())
+            self.assertIn(probe, search_output.getvalue())
+
+    def test_projection_warm_cache_quiet_period_defers_dirty_index_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=False)
+            build_output = io.StringIO()
+            with redirect_stdout(build_output):
+                build_code = main(["--root", str(root), "projection", "--build", "--target", "index"])
+            self.assertEqual(build_code, 0)
+
+            readme = root / "README.md"
+            readme.write_text(readme.read_text(encoding="utf-8") + "\nquiet period probe\n", encoding="utf-8")
+            mark_projection_cache_dirty(load_inventory(root), ["README.md"], "test")
+            before = snapshot_tree_bytes(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "projection",
+                        "--warm-cache",
+                        "--target",
+                        "index",
+                        "--quiet-period-seconds",
+                        "3600",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            self.assertIn("projection --warm-cache --target index --quiet-period-seconds 3600", rendered)
+            self.assertIn("projection-index-warm-cache-deferred", rendered)
+            self.assertTrue((root / ARTIFACT_DIR_REL / INDEX_DIRTY_MARKER_NAME).is_file())
+
+    def test_projection_warm_cache_falls_back_to_full_rebuild_when_incremental_reconciliation_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=False)
+            build_output = io.StringIO()
+            with redirect_stdout(build_output):
+                build_code = main(["--root", str(root), "projection", "--build", "--target", "index"])
+            self.assertEqual(build_code, 0)
+
+            readme = root / "README.md"
+            readme.write_text(readme.read_text(encoding="utf-8") + "\nfallback rebuild probe\n", encoding="utf-8")
+            mark_projection_cache_dirty(load_inventory(root), ["README.md"], "test")
+
+            output = io.StringIO()
+            with patch("mylittleharness.projection_index._write_fts_rows_autoids", return_value=None), redirect_stdout(output):
+                code = main(["--root", str(root), "projection", "--warm-cache", "--target", "index"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("projection-index-incremental-fallback", rendered)
+            self.assertIn("projection-index-full-rebuild-fallback", rendered)
+            self.assertIn("projection-index-build", rendered)
+            self.assertFalse((root / ARTIFACT_DIR_REL / INDEX_DIRTY_MARKER_NAME).exists())
 
     def test_projection_warm_cache_crash_degrades_without_blocking_check(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

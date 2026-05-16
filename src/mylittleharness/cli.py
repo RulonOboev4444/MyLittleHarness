@@ -127,11 +127,13 @@ from .planning import (
     resolve_plan_request_from_roadmap,
 )
 from .projection_artifacts import (
+    ARTIFACT_DIRTY_MARKER_NAME,
     ARTIFACT_DIR_REL,
     build_projection_artifacts,
     delete_projection_artifacts,
     inspect_projection_artifacts,
     mark_projection_cache_dirty,
+    projection_cache_dirty_quiet_period_pending,
     rebuild_projection_artifacts,
 )
 from .projection_index import (
@@ -926,6 +928,9 @@ def main(argv: list[str] | None = None) -> int:
         emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
         return 2 if args.apply and result == "error" else 0
     if command == "projection":
+        if not args.warm_cache and args.quiet_period_seconds:
+            emit_text("mylittleharness: --quiet-period-seconds is only valid with projection --warm-cache", stream=sys.stderr)
+            return 2
         report_name = f"projection --inspect --target {args.target}"
         if args.build:
             findings = _projection_target_findings(args.target, build_projection_artifacts, build_projection_index, inventory)
@@ -937,8 +942,15 @@ def main(argv: list[str] | None = None) -> int:
             findings = _projection_target_findings(args.target, rebuild_projection_artifacts, rebuild_projection_index, inventory)
             report_name = f"projection --rebuild --target {args.target}"
         elif args.warm_cache:
-            findings = _projection_target_findings(args.target, _warm_projection_artifacts, warm_projection_index, inventory)
+            findings = _projection_target_findings(
+                args.target,
+                lambda target_inventory: _warm_projection_artifacts(target_inventory, quiet_period_seconds=args.quiet_period_seconds),
+                lambda target_inventory: warm_projection_index(target_inventory, quiet_period_seconds=args.quiet_period_seconds),
+                inventory,
+            )
             report_name = f"projection --warm-cache --target {args.target}"
+            if args.quiet_period_seconds:
+                report_name = f"{report_name} --quiet-period-seconds {args.quiet_period_seconds:g}"
         else:
             findings = _projection_target_findings(args.target, inspect_projection_artifacts, inspect_projection_index, inventory)
         result = _result_for(findings)
@@ -1859,7 +1871,7 @@ def _projection_target_findings(target: str, artifacts_fn, index_fn, inventory: 
     return artifacts_fn(inventory) + index_fn(inventory)
 
 
-def _warm_projection_artifacts(inventory: object) -> list[Finding]:
+def _warm_projection_artifacts(inventory: object, quiet_period_seconds: float = 0.0) -> list[Finding]:
     try:
         inspect_findings = inspect_projection_artifacts(inventory)
     except Exception as exc:
@@ -1888,6 +1900,26 @@ def _warm_projection_artifacts(inventory: object) -> list[Finding]:
         ]
 
     reason = blocking[0]
+    if reason.code == "projection-artifact-dirty":
+        pending, quiet_until_utc = projection_cache_dirty_quiet_period_pending(
+            inventory.root,
+            (ARTIFACT_DIRTY_MARKER_NAME,),
+            quiet_period_seconds,
+        )
+        if pending:
+            return [
+                Finding(
+                    "info",
+                    "projection-artifact-warm-cache-deferred",
+                    (
+                        "optional projection artifact warm-cache daemon pulse deferred until dirty markers are quiet; "
+                        f"quiet_period_seconds={quiet_period_seconds:g}; quiet_until_utc={quiet_until_utc}; "
+                        "repo-visible source files remain authoritative"
+                    ),
+                    reason.source or ARTIFACT_DIR_REL,
+                    reason.line,
+                )
+            ]
     try:
         refresh_findings = rebuild_projection_artifacts(inventory)
     except Exception as exc:

@@ -68,7 +68,7 @@ from .projection_artifacts import (
     projection_artifact_path_query_findings,
     rebuild_projection_artifacts,
 )
-from .projection_index import INDEX_REL_PATH, build_projection_index, full_text_search_findings, inspect_projection_index, rebuild_projection_index
+from .projection_index import INDEX_REL_PATH, build_projection_index, full_text_search_findings, inspect_projection_index, warm_projection_index
 from .reporting import RouteWriteEvidence, route_write_findings
 from .research_recovery import (
     deep_research_rubric_recovery_findings,
@@ -2086,7 +2086,7 @@ def _ensure_projection_index_for_navigation(inventory: Inventory, projection: Pr
             )
         ]
     reason = blocking[0]
-    refresh = rebuild_projection_index(inventory)
+    refresh = warm_projection_index(inventory, projection)
     findings = [
         Finding(
             "info",

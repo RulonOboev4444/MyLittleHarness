@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import sqlite3
+import time
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,8 +22,10 @@ from .projection_artifacts import (
     artifact_dir,
     clear_projection_cache_dirty_marker,
     clear_projection_cache_operation_marker,
+    projection_cache_dirty_changed_paths,
     projection_cache_operation_marker_findings,
     projection_cache_dirty_marker_findings,
+    projection_cache_dirty_quiet_period_pending,
     write_projection_cache_operation_marker,
 )
 
@@ -42,6 +45,12 @@ INDEX_PUBLISH_SIDECAR_NAMES = (
     f"{INDEX_NAME}-shm",
     f"{INDEX_NAME}-wal",
 )
+INDEX_REPLACE_ATTEMPTS = 8
+INDEX_REPLACE_RETRY_SECONDS = 0.025
+
+
+class IncrementalIndexFallback(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -100,7 +109,7 @@ def build_projection_index(inventory: Inventory) -> list[Finding]:
             _write_path_rows(connection, shape.path_rows)
             connection.commit()
         _delete_index_publish_sidecars(inventory.root)
-        tmp_path.replace(path)
+        _replace_index_with_retry(tmp_path, path)
         clear_projection_cache_dirty_marker(inventory.root, INDEX_DIRTY_MARKER_NAME)
     except sqlite3.Error as exc:
         _delete_temporary_index_paths(inventory.root, tmp_path.name)
@@ -195,6 +204,7 @@ def inspect_projection_index(inventory: Inventory, projection: Projection | None
             if _has_index_shape(tables):
                 metadata = _metadata(connection)
                 findings.extend(_metadata_findings(inventory, projection, metadata))
+                findings.extend(_metadata_row_hash_findings(connection, metadata))
                 findings.extend(_source_stale_findings(connection, projection))
                 findings.extend(_count_findings(connection, projection, metadata))
     except sqlite3.DatabaseError as exc:
@@ -256,13 +266,25 @@ def delete_projection_index(inventory: Inventory) -> list[Finding]:
 
 
 def rebuild_projection_index(inventory: Inventory) -> list[Finding]:
-    findings = delete_projection_index(inventory)
+    findings = _boundary_preflight(inventory.root, create=False)
     if _has_errors(findings):
         return findings
-    return findings + build_projection_index(inventory)
+    return [
+        Finding(
+            "info",
+            "projection-index-rebuild",
+            "rebuild uses the same old-good publish path as build; stale indexes are replaced only after a complete SQLite database is ready",
+            INDEX_REL_PATH,
+        ),
+        *build_projection_index(inventory),
+    ]
 
 
-def warm_projection_index(inventory: Inventory, projection: Projection | None = None) -> list[Finding]:
+def warm_projection_index(
+    inventory: Inventory,
+    projection: Projection | None = None,
+    quiet_period_seconds: float = 0.0,
+) -> list[Finding]:
     try:
         projection = projection or build_projection(inventory)
         inspect_findings = inspect_projection_index(inventory, projection)
@@ -288,8 +310,112 @@ def warm_projection_index(inventory: Inventory, projection: Projection | None = 
         ]
 
     reason = blocking[0]
+    if reason.code == "projection-index-dirty":
+        pending, quiet_until_utc = projection_cache_dirty_quiet_period_pending(
+            inventory.root,
+            (INDEX_DIRTY_MARKER_NAME,),
+            quiet_period_seconds,
+        )
+        if pending:
+            return [
+                Finding(
+                    "info",
+                    "projection-index-warm-cache-deferred",
+                    (
+                        "optional SQLite warm-cache daemon pulse deferred until dirty markers are quiet; "
+                        f"quiet_period_seconds={quiet_period_seconds:g}; quiet_until_utc={quiet_until_utc}; "
+                        "repo-visible source files remain authoritative"
+                    ),
+                    reason.source or INDEX_REL_PATH,
+                    reason.line,
+                )
+            ]
+
+    refresh_findings = _incremental_or_rebuild_projection_index(inventory, projection, reason, inspect_findings)
+    findings = [
+        Finding(
+            "info",
+            "projection-index-warm-cache",
+            (
+                f"optional SQLite warm-cache daemon pulse refreshed generated index because {reason.code}; "
+                f"daemon pulse watcher writes only {INDEX_REL_PATH} and cannot affect lifecycle authority"
+            ),
+            reason.source or INDEX_REL_PATH,
+            reason.line,
+        ),
+        *refresh_findings,
+    ]
+    if any(finding.severity in {"warn", "error"} for finding in refresh_findings):
+        findings.append(
+            Finding(
+                "info",
+                "projection-index-warm-cache-degraded",
+                "optional SQLite warm-cache daemon pulse degraded; direct source reads and in-memory projection remain authoritative",
+                INDEX_REL_PATH,
+            )
+        )
+    return findings
+
+
+def _incremental_or_rebuild_projection_index(
+    inventory: Inventory,
+    projection: Projection,
+    reason: Finding,
+    inspect_findings: list[Finding],
+) -> list[Finding]:
+    changed_paths = projection_cache_dirty_changed_paths(inventory.root, (INDEX_DIRTY_MARKER_NAME,))
+    has_corrupt_or_malformed = any(
+        finding.severity == "error"
+        or finding.code
+        in {
+            "projection-index-corrupt",
+            "projection-index-integrity",
+            "projection-index-malformed",
+            "projection-index-root-mismatch",
+            "projection-index-schema",
+        }
+        for finding in inspect_findings
+    )
+    can_try_incremental = (
+        changed_paths
+        and reason.code in {"projection-index-dirty", "projection-index-hash", "projection-index-stale", "projection-index-count"}
+        and index_path(inventory.root).is_file()
+        and not has_corrupt_or_malformed
+    )
+    if can_try_incremental:
+        incremental = incremental_projection_index(inventory, projection, changed_paths)
+        needs_full_rebuild = any(
+            finding.severity in {"warn", "error"}
+            or finding.code in {"projection-index-incremental-fallback", "projection-index-incremental-skipped"}
+            for finding in incremental
+        )
+        if not needs_full_rebuild:
+            return incremental
+        return [
+            *incremental,
+            Finding(
+                "info",
+                "projection-index-full-rebuild-fallback",
+                "incremental SQLite refresh was not source-hash clean; falling back to the old-good full rebuild path",
+                INDEX_REL_PATH,
+            ),
+            *rebuild_projection_index(inventory),
+        ]
+
     try:
-        refresh_findings = rebuild_projection_index(inventory)
+        return [
+            Finding(
+                "info",
+                "projection-index-full-rebuild-fallback",
+                (
+                    f"full SQLite rebuild selected because {reason.code}; "
+                    "missing, corrupt, unscoped, or markerless stale index state is recovered from source files"
+                ),
+                reason.source or INDEX_REL_PATH,
+                reason.line,
+            ),
+            *rebuild_projection_index(inventory),
+        ]
     except Exception as exc:
         return [
             Finding(
@@ -304,29 +430,117 @@ def warm_projection_index(inventory: Inventory, projection: Projection | None = 
             )
         ]
 
-    findings = [
-        Finding(
-            "info",
-            "projection-index-warm-cache",
-            (
-                f"optional SQLite warm-cache watcher refreshed generated index because {reason.code}; "
-                f"watcher writes only {INDEX_REL_PATH} and cannot affect lifecycle authority"
-            ),
-            reason.source or INDEX_REL_PATH,
-            reason.line,
-        ),
-        *refresh_findings,
-    ]
-    if any(finding.severity in {"warn", "error"} for finding in refresh_findings):
-        findings.append(
+
+def incremental_projection_index(
+    inventory: Inventory,
+    projection: Projection,
+    changed_paths: tuple[str, ...],
+) -> list[Finding]:
+    changed = tuple(sorted({path for path in changed_paths if path}))
+    if not changed:
+        return [
             Finding(
-                "info",
-                "projection-index-warm-cache-degraded",
-                "optional SQLite warm-cache watcher degraded; direct source reads and in-memory projection remain authoritative",
+                "warn",
+                "projection-index-incremental-skipped",
+                "incremental SQLite refresh skipped because dirty markers did not name source paths; full rebuild fallback is required",
                 INDEX_REL_PATH,
             )
-        )
-    return findings
+        ]
+    findings = _boundary_preflight(inventory.root, create=True)
+    if _has_errors(findings):
+        return findings
+    path = index_path(inventory.root)
+    if not path.is_file():
+        return [
+            Finding(
+                "warn",
+                "projection-index-incremental-skipped",
+                "incremental SQLite refresh skipped because no old-good index is available; full rebuild fallback is required",
+                INDEX_REL_PATH,
+            )
+        ]
+
+    operation_findings = write_projection_cache_operation_marker(inventory.root, "projection-index-incremental-refresh")
+    tmp_path = _temporary_index_path(inventory.root)
+    changed_set = set(changed)
+    try:
+        shape = _index_shape(projection)
+        with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as source, closing(sqlite3.connect(tmp_path)) as destination:
+            source.backup(destination)
+            destination.commit()
+        with closing(sqlite3.connect(tmp_path)) as connection:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA journal_mode=DELETE")
+            connection.execute("PRAGMA synchronous=FULL")
+            preflight_findings = _connection_shape_findings(connection, inventory, projection, validate_current_hashes=False)
+            if any(finding.severity in {"warn", "error"} for finding in preflight_findings):
+                raise IncrementalIndexFallback(_finding_summary(preflight_findings[0]))
+
+            _delete_rows_for_changed_paths(connection, changed)
+            _replace_metadata(connection, inventory, projection, shape)
+            _write_source_rows(connection, tuple(row for row in shape.source_rows if row["path"] in changed_set))
+            _write_fts_rows_autoids(connection, tuple(row for row in shape.fts_rows if row["source_path"] in changed_set))
+            _write_path_rows_autoids(connection, tuple(row for row in shape.path_rows if row["source_path"] in changed_set))
+            connection.commit()
+
+            validation_findings = _connection_shape_findings(connection, inventory, projection, validate_current_hashes=True)
+            if any(finding.severity in {"warn", "error"} for finding in validation_findings):
+                raise IncrementalIndexFallback(_finding_summary(validation_findings[0]))
+
+        _delete_index_publish_sidecars(inventory.root)
+        _replace_index_with_retry(tmp_path, path)
+        clear_projection_cache_dirty_marker(inventory.root, INDEX_DIRTY_MARKER_NAME)
+    except IncrementalIndexFallback as exc:
+        _delete_temporary_index_paths(inventory.root, tmp_path.name)
+        return [
+            *operation_findings,
+            Finding("info", "projection-index-boundary", f"owned generated-output boundary: {ARTIFACT_DIR_REL}", ARTIFACT_DIR_REL),
+            Finding(
+                "info",
+                "projection-index-incremental-fallback",
+                f"incremental SQLite refresh could not be source-hash reconciled; full rebuild fallback is required: {exc}",
+                INDEX_REL_PATH,
+            ),
+        ]
+    except (sqlite3.Error, OSError) as exc:
+        _delete_temporary_index_paths(inventory.root, tmp_path.name)
+        return [
+            *operation_findings,
+            Finding("info", "projection-index-boundary", f"owned generated-output boundary: {ARTIFACT_DIR_REL}", ARTIFACT_DIR_REL),
+            Finding(
+                "info",
+                "projection-index-incremental-fallback",
+                f"incremental SQLite refresh failed before publish; old-good index remains advisory and full rebuild fallback is required: {exc}",
+                INDEX_REL_PATH,
+            ),
+        ]
+    finally:
+        _delete_temporary_index_paths(inventory.root, tmp_path.name)
+        clear_projection_cache_operation_marker(inventory.root)
+
+    replaced_sources = len([row for row in shape.source_rows if row["path"] in changed_set])
+    replaced_fts_rows = len([row for row in shape.fts_rows if row["source_path"] in changed_set])
+    replaced_path_rows = len([row for row in shape.path_rows if row["source_path"] in changed_set])
+    return [
+        *operation_findings,
+        Finding("info", "projection-index-boundary", f"owned generated-output boundary: {ARTIFACT_DIR_REL}", ARTIFACT_DIR_REL),
+        Finding(
+            "info",
+            "projection-index-incremental-refresh",
+            (
+                f"incrementally refreshed SQLite rows for changed_paths={len(changed)}; "
+                f"sources={replaced_sources}; indexed_rows={replaced_fts_rows}; path_rows={replaced_path_rows}; "
+                f"source_set_hash={shape.source_set_hash[:12]}; record_set_hash={shape.record_set_hash[:12]}"
+            ),
+            INDEX_REL_PATH,
+        ),
+        Finding(
+            "info",
+            "projection-index-incremental-boundary",
+            "incremental SQLite refresh mutates only the disposable generated index and falls back to full rebuild when hash reconciliation fails",
+            INDEX_REL_PATH,
+        ),
+    ]
 
 
 def source_verified_full_text_results(
@@ -617,40 +831,107 @@ def _write_path_rows(connection: sqlite3.Connection, rows: tuple[dict[str, Any],
     )
 
 
+def _write_fts_rows_autoids(connection: sqlite3.Connection, rows: tuple[dict[str, Any], ...]) -> None:
+    connection.executemany(
+        """
+        INSERT INTO index_rows(
+          source_path, line_start, line_end, source_hash, source_role,
+          source_type, indexed_text, provenance
+        )
+        VALUES (:source_path, :line_start, :line_end, :source_hash,
+                :source_role, :source_type, :indexed_text, :provenance)
+        """,
+        rows,
+    )
+    connection.executemany(
+        """
+        INSERT INTO fts_rows(source_path, line_start, line_end, source_hash,
+                             source_role, source_type, indexed_text, provenance)
+        VALUES (:source_path, :line_start, :line_end, :source_hash,
+                :source_role, :source_type, :indexed_text, :provenance)
+        """,
+        rows,
+    )
+
+
+def _write_path_rows_autoids(connection: sqlite3.Connection, rows: tuple[dict[str, Any], ...]) -> None:
+    connection.executemany(
+        """
+        INSERT INTO path_rows(
+          row_kind, source_path, line_number, target_path, status,
+          resolution_kind, indexed_text, provenance
+        )
+        VALUES (:row_kind, :source_path, :line_number, :target_path,
+                :status, :resolution_kind, :indexed_text, :provenance)
+        """,
+        rows,
+    )
+    connection.executemany(
+        """
+        INSERT INTO path_fts(row_kind, source_path, line_number, target_path,
+                             status, resolution_kind, indexed_text, provenance)
+        VALUES (:row_kind, :source_path, :line_number, :target_path,
+                :status, :resolution_kind, :indexed_text, :provenance)
+        """,
+        rows,
+    )
+
+
+def _replace_metadata(connection: sqlite3.Connection, inventory: Inventory, projection: Projection, shape: IndexShape) -> None:
+    connection.execute("DELETE FROM metadata")
+    _write_metadata(connection, inventory, projection, shape)
+
+
+def _delete_rows_for_changed_paths(connection: sqlite3.Connection, changed_paths: tuple[str, ...]) -> None:
+    placeholders = ",".join("?" for _ in changed_paths)
+    parameters = tuple(changed_paths)
+    connection.execute(f"DELETE FROM source_records WHERE path IN ({placeholders})", parameters)
+    connection.execute(f"DELETE FROM index_rows WHERE source_path IN ({placeholders})", parameters)
+    connection.execute(f"DELETE FROM fts_rows WHERE source_path IN ({placeholders})", parameters)
+    connection.execute(f"DELETE FROM path_rows WHERE source_path IN ({placeholders})", parameters)
+    connection.execute(f"DELETE FROM path_fts WHERE source_path IN ({placeholders})", parameters)
+
+
 def _index_shape(projection: Projection) -> IndexShape:
     source_rows = tuple(_source_row(source) for source in projection.sources)
     fts_rows = tuple(_fts_rows(projection.sources))
     path_rows = tuple(_path_rows(projection))
     source_set_hash = _payload_hash(
-        [
-            {"path": row["path"], "content_hash": row["content_hash"]}
-            for row in source_rows
-            if row["content_hash"] is not None
-        ]
+        sorted(
+            [
+                {"path": row["path"], "content_hash": row["content_hash"]}
+                for row in source_rows
+                if row["content_hash"] is not None
+            ],
+            key=_payload_sort_key,
+        )
     )
     record_set_hash = _payload_hash(
-        [
-            {
-                "source_path": row["source_path"],
-                "line_start": row["line_start"],
-                "line_end": row["line_end"],
-                "source_hash": row["source_hash"],
-                "text_hash": _text_hash(row["indexed_text"]),
-            }
-            for row in fts_rows
-        ]
-        + [
-            {
-                "row_kind": row["row_kind"],
-                "source_path": row["source_path"],
-                "line_number": row["line_number"],
-                "target_path": row["target_path"],
-                "status": row["status"],
-                "resolution_kind": row["resolution_kind"],
-                "text_hash": _text_hash(row["indexed_text"]),
-            }
-            for row in path_rows
-        ]
+        sorted(
+            [
+                {
+                    "source_path": row["source_path"],
+                    "line_start": row["line_start"],
+                    "line_end": row["line_end"],
+                    "source_hash": row["source_hash"],
+                    "text_hash": _text_hash(row["indexed_text"]),
+                }
+                for row in fts_rows
+            ]
+            + [
+                {
+                    "row_kind": row["row_kind"],
+                    "source_path": row["source_path"],
+                    "line_number": row["line_number"],
+                    "target_path": row["target_path"],
+                    "status": row["status"],
+                    "resolution_kind": row["resolution_kind"],
+                    "text_hash": _text_hash(row["indexed_text"]),
+                }
+                for row in path_rows
+            ],
+            key=_payload_sort_key,
+        )
     )
     return IndexShape(
         source_rows=source_rows,
@@ -840,6 +1121,129 @@ def _metadata_findings(inventory: Inventory, projection: Projection, metadata: d
     return findings
 
 
+def _metadata_identity_findings(inventory: Inventory, metadata: dict[str, str]) -> list[Finding]:
+    findings: list[Finding] = []
+    if metadata.get("schema_version") != str(INDEX_SCHEMA_VERSION):
+        findings.append(
+            Finding(
+                "warn",
+                "projection-index-schema",
+                f"unsupported SQLite index schema {metadata.get('schema_version')!r}; expected {INDEX_SCHEMA_VERSION}",
+                INDEX_REL_PATH,
+            )
+        )
+    if metadata.get("root") and _normalize_path_text(metadata["root"]) != _normalize_path_text(str(inventory.root)):
+        findings.append(
+            Finding(
+                "warn",
+                "projection-index-root-mismatch",
+                f"index root {metadata['root']} does not match current root {inventory.root}",
+                INDEX_REL_PATH,
+            )
+        )
+    return findings
+
+
+def _metadata_row_hash_findings(connection: sqlite3.Connection, metadata: dict[str, str]) -> list[Finding]:
+    try:
+        source_set_hash = _source_set_hash_from_connection(connection)
+        record_set_hash = _record_set_hash_from_connection(connection)
+    except sqlite3.DatabaseError as exc:
+        return [Finding("warn", "projection-index-malformed", f"SQLite index row hashes could not be read: {exc}", INDEX_REL_PATH)]
+
+    findings: list[Finding] = []
+    if metadata.get("source_set_hash") and metadata.get("source_set_hash") != source_set_hash:
+        findings.append(
+            Finding(
+                "warn",
+                "projection-index-hash",
+                f"stored source-set hash does not match SQLite source_records rows; rebuild recommended; {PROJECTION_REBUILD_NEXT_SAFE_COMMAND}",
+                INDEX_REL_PATH,
+            )
+        )
+    if metadata.get("record_set_hash") and metadata.get("record_set_hash") != record_set_hash:
+        findings.append(
+            Finding(
+                "warn",
+                "projection-index-hash",
+                f"stored record-set hash does not match SQLite index/path rows; rebuild recommended; {PROJECTION_REBUILD_NEXT_SAFE_COMMAND}",
+                INDEX_REL_PATH,
+            )
+        )
+    return findings
+
+
+def _connection_shape_findings(
+    connection: sqlite3.Connection,
+    inventory: Inventory,
+    projection: Projection,
+    *,
+    validate_current_hashes: bool,
+) -> list[Finding]:
+    findings = _integrity_findings(connection)
+    tables = _table_names(connection)
+    findings.extend(_schema_findings(connection, tables))
+    if not _has_index_shape(tables):
+        return findings
+
+    metadata = _metadata(connection)
+    findings.extend(_metadata_identity_findings(inventory, metadata))
+    findings.extend(_metadata_row_hash_findings(connection, metadata))
+    if validate_current_hashes:
+        findings.extend(_metadata_findings(inventory, projection, metadata))
+        findings.extend(_source_stale_findings(connection, projection))
+        findings.extend(_count_findings(connection, projection, metadata))
+    return findings
+
+
+def _source_set_hash_from_connection(connection: sqlite3.Connection) -> str:
+    rows = connection.execute("SELECT path, content_hash FROM source_records WHERE content_hash IS NOT NULL").fetchall()
+    payload = sorted(
+        [
+            {"path": str(row["path"]), "content_hash": str(row["content_hash"])}
+            for row in rows
+            if row["content_hash"] is not None
+        ],
+        key=_payload_sort_key,
+    )
+    return _payload_hash(payload)
+
+
+def _record_set_hash_from_connection(connection: sqlite3.Connection) -> str:
+    fts_rows = connection.execute(
+        "SELECT source_path, line_start, line_end, source_hash, indexed_text FROM index_rows"
+    ).fetchall()
+    path_rows = connection.execute(
+        "SELECT row_kind, source_path, line_number, target_path, status, resolution_kind, indexed_text FROM path_rows"
+    ).fetchall()
+    payload = sorted(
+        [
+            {
+                "source_path": str(row["source_path"]),
+                "line_start": int(row["line_start"]),
+                "line_end": int(row["line_end"]),
+                "source_hash": str(row["source_hash"] or ""),
+                "text_hash": _text_hash(str(row["indexed_text"])),
+            }
+            for row in fts_rows
+        ]
+        + [
+            {
+                "row_kind": str(row["row_kind"]),
+                "source_path": str(row["source_path"]),
+                "line_number": int(row["line_number"]),
+                "target_path": str(row["target_path"]),
+                "status": str(row["status"]),
+                "resolution_kind": str(row["resolution_kind"]),
+                "text_hash": _text_hash(str(row["indexed_text"])),
+            }
+            for row in path_rows
+        ],
+        key=_payload_sort_key,
+    )
+    return _payload_hash(payload)
+
+
 def _source_stale_findings(connection: sqlite3.Connection, projection: Projection) -> list[Finding]:
     findings: list[Finding] = []
     try:
@@ -1022,6 +1426,21 @@ def _temporary_index_path(root: Path) -> Path:
     return artifact_dir(root) / f".{INDEX_NAME}.{uuid4().hex}.tmp"
 
 
+def _replace_index_with_retry(tmp_path: Path, path: Path) -> None:
+    last_error: OSError | None = None
+    for attempt in range(INDEX_REPLACE_ATTEMPTS):
+        try:
+            tmp_path.replace(path)
+            return
+        except OSError as exc:
+            last_error = exc
+            if attempt == INDEX_REPLACE_ATTEMPTS - 1:
+                break
+            time.sleep(INDEX_REPLACE_RETRY_SECONDS * (attempt + 1))
+    if last_error is not None:
+        raise last_error
+
+
 def _delete_temporary_index_paths(root: Path, tmp_name: str) -> None:
     projection_dir = artifact_dir(root)
     if not projection_dir.exists():
@@ -1121,6 +1540,15 @@ def _row_is_source_verified(source: ProjectionSourceRecord | None, line_number: 
 def _payload_hash(payload: Any) -> str:
     rendered = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+
+
+def _payload_sort_key(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def _finding_summary(finding: Finding) -> str:
+    source = f" ({finding.source})" if finding.source else ""
+    return f"{finding.code}{source}: {finding.message}"
 
 
 def _text_hash(text: str) -> str:

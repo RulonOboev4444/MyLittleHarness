@@ -16,6 +16,16 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
+def _nonnegative_float(value: str) -> float:
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("--quiet-period-seconds must be a number >= 0") from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("--quiet-period-seconds must be >= 0")
+    return parsed
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="mylittleharness",
@@ -539,6 +549,12 @@ def build_parser() -> argparse.ArgumentParser:
     projection_mode.add_argument("--rebuild", action="store_true", help="Delete and rebuild generated projection artifacts inside the owned boundary.")
     projection_mode.add_argument("--warm-cache", action="store_true", help="Run one optional generated-cache watcher tick without installing a daemon.")
     projection.add_argument("--target", choices=("artifacts", "index", "all"), default="artifacts", help="Generated projection target to manage. Defaults to artifacts.")
+    projection.add_argument(
+        "--quiet-period-seconds",
+        type=_nonnegative_float,
+        default=0.0,
+        help="With --warm-cache, defer refresh until dirty markers have been quiet for this many seconds.",
+    )
     snapshot = subparsers.add_parser(
         "snapshot",
         help=argparse.SUPPRESS,

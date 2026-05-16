@@ -378,6 +378,51 @@ def projection_cache_dirty_marker_findings(root: Path, marker_name: str, code: s
     ]
 
 
+def projection_cache_dirty_marker_payloads(root: Path, marker_names: Iterable[str] = CACHE_DIRTY_MARKER_NAMES) -> tuple[dict[str, Any], ...]:
+    payloads: list[dict[str, Any]] = []
+    for marker_name in marker_names:
+        payload = _read_json_marker(root, marker_name)
+        if payload:
+            payloads.append(payload)
+    return tuple(payloads)
+
+
+def projection_cache_dirty_changed_paths(root: Path, marker_names: Iterable[str] = CACHE_DIRTY_MARKER_NAMES) -> tuple[str, ...]:
+    paths: set[str] = set()
+    for payload in projection_cache_dirty_marker_payloads(root, marker_names):
+        raw_paths = payload.get("changed_paths")
+        if not isinstance(raw_paths, list):
+            continue
+        for raw_path in raw_paths:
+            path = _dirty_source_rel_path(str(raw_path))
+            if path:
+                paths.add(path)
+    return tuple(sorted(paths))
+
+
+def projection_cache_dirty_quiet_period_pending(
+    root: Path,
+    marker_names: Iterable[str],
+    quiet_period_seconds: float,
+) -> tuple[bool, str]:
+    if quiet_period_seconds <= 0:
+        return False, ""
+    dirty_times = [
+        parsed
+        for payload in projection_cache_dirty_marker_payloads(root, marker_names)
+        for parsed in [_parse_marker_utc(str(payload.get("dirty_since_utc") or ""))]
+        if parsed is not None
+    ]
+    if not dirty_times:
+        return False, ""
+    latest_dirty = max(dirty_times)
+    quiet_until = latest_dirty.timestamp() + quiet_period_seconds
+    now = datetime.now(timezone.utc).timestamp()
+    if now >= quiet_until:
+        return False, ""
+    return True, datetime.fromtimestamp(quiet_until, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def projection_cache_posture_payload(
     artifact_findings: list[Finding],
     index_findings: list[Finding],
@@ -1045,6 +1090,29 @@ def _dirty_source_rel_path(value: str) -> str:
     if normalized == ARTIFACT_DIR_REL or normalized.startswith(f"{ARTIFACT_DIR_REL}/"):
         return ""
     return normalized
+
+
+def _read_json_marker(root: Path, marker_name: str) -> dict[str, Any]:
+    marker_path = artifact_dir(root) / marker_name
+    if not marker_path.is_file() or marker_path.is_symlink():
+        return {}
+    try:
+        payload = json.loads(marker_path.read_text(encoding="utf-8"))
+    except (OSError, JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _parse_marker_utc(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        if value.endswith("Z"):
+            return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        parsed = datetime.fromisoformat(value)
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
 
 
 def _payload_hash(payload: Any) -> str:
