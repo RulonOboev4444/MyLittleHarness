@@ -801,7 +801,11 @@ def _canonical_target_exists(inventory: Inventory, canonical_id: str) -> bool:
 
 
 def _canonical_topic(request: MetaFeedbackRequest, observation: ClusterObservation) -> str:
-    if observation.canonical_id == request.roadmap_item and not request.dedupe_to:
+    if (
+        observation.canonical_id == request.roadmap_item
+        and not request.dedupe_to
+        and _safe_slug(request.topic) == observation.canonical_id
+    ):
         return request.topic
     return _title_from_topic(observation.canonical_id)
 

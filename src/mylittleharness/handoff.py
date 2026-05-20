@@ -534,6 +534,12 @@ def _dispatcher_boundary_findings(code_prefix: str) -> list[Finding]:
             "handoffs, claims, and agent-run evidence paths are repo-visible launch preconditions only; lifecycle, fan-in, archive, Git, release, and roadmap decisions remain explicit MLH rails",
             HANDOFF_PACKETS_DIR_REL,
         ),
+        Finding(
+            "info",
+            f"{code_prefix}-completion-claim-policy",
+            "external completion claims must cite repo-visible handoff/claim/agent-run evidence; Linear/Symphony status alone is not launch or closeout evidence",
+            HANDOFF_PACKETS_DIR_REL,
+        ),
     ]
 
 

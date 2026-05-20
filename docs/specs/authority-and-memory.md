@@ -57,6 +57,22 @@ Autonomous audit context stays tiered so the operator can inspect a root without
 
 Selective forgetting is compaction and archive with provenance. It is not deletion of authority and not generated-memory sovereignty.
 
+## Source-Bound Memory Capsules
+
+Long sessions, phase transitions, handoffs, and resumed agent runs may use a compact source-bound memory capsule, but the capsule is a navigation aid and not a hidden memory runtime. A capsule is valid only when it is recoverable from repo-visible sources or explicitly records that a fact is stale_or_unknown.
+
+The minimum capsule shape is:
+
+- current objective, lifecycle pointers, active phase, stop conditions, and write scope;
+- decisions made, docs_decision posture, unresolved blockers, residual risks, and explicit stale_or_unknown markers;
+- failed-attempt budget with the verifier or route that failed, the attempt count, and the escalation boundary;
+- next safe command or next explicit dry-run route;
+- source refs to the state, plan, roadmap item, research, verification, command output, or observation that can be reread.
+
+Provider compaction items, prompt caches, retrieval results, chat summaries, SQLite/projection indexes, MCP output, hook output, dashboard packets, and model memory can help route attention, but they remain non-authority unless the same fact is written through an explicit MLH route into repo-visible files. A memory capsule cannot approve lifecycle movement, closeout, archive, roadmap status, staging, commit, push, provider routing, hidden queues, hidden databases, daemons, or a next-plan opening.
+
+Repeated verifier or route failures must not turn into unbounded retries or quiet success. When the failed-attempt budget is exhausted, the capsule should record deterministic rejection, a human gate, or a bounded handoff with source refs and the next safe command.
+
 Read-only tools may recover lifecycle pointers from a prose-style operating-root `project/project-state.md` when it contains explicit assignment lines such as `plan_status = "active"`, `active_plan = "project/implementation-plan.md"`, `active_phase = "Phase 2"`, and `phase_status = "in_progress"`. This fallback is an analyzer recovery aid. The only mutating bridge from that posture is the bounded `state-frontmatter-repair` class, which snapshots default-path state bytes and prepends deterministic frontmatter before any other repair class can run.
 
 Read-only drift tools may also compare explicit delivered/current capability tokens against future/backlog/remainder wording in operating-memory and research surfaces. That remainder-drift signal is advisory memory hygiene only: it can point to stale backlog wording, but it cannot approve plan edits, closeout, archive, commit, repair, cleanup, or any lifecycle mutation.

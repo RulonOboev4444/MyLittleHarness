@@ -17,7 +17,8 @@ from pathlib import Path
 
 from . import __version__
 from .atomic_files import AtomicFileWrite, FileTransactionError, apply_file_transaction
-from .dashboard import dashboard_check_findings
+from .dashboard import connect_readiness_findings, dashboard_check_findings
+from .daemon import mlhd_runtime_findings
 from .evidence import lifecycle_mutation_provenance_findings
 from .inventory import (
     EXPECTED_SPEC_NAMES,
@@ -155,6 +156,7 @@ DOCMAP_REPAIR_TARGET_REL = ".agents/docmap.yaml"
 DOCMAP_REPAIR_TARGET_SLUG = "agents-docmap-yaml"
 DOCMAP_REPAIR_COPY_REL = "files/.agents/docmap.yaml"
 LIFECYCLE_MARKDOWN_FRONTMATTER_REPAIR_CLASS = "lifecycle-markdown-frontmatter-repair"
+SPEC_POSTURE_FRONTMATTER_REPAIR_CLASS = "spec-posture-frontmatter-repair"
 STABLE_SPEC_CREATE_CLASS = "stable-spec-create"
 STABLE_SPEC_ROOT_REL = "project/specs/workflow"
 STABLE_SPEC_TEMPLATE_PACKAGE = "mylittleharness"
@@ -276,6 +278,10 @@ SPEC_IMPLEMENTATION_POSTURE_VALUES = (
     "retired",
 )
 SPEC_LIFECYCLE_FIELDS = ("spec_status", "implementation_posture")
+SPEC_POSTURE_REPAIR_DEFAULTS = {
+    "spec_status": "draft",
+    "implementation_posture": "target-only",
+}
 SPEC_IMPLEMENTATION_EVIDENCE_FIELDS = (
     "implemented_by",
     "verification_refs",
@@ -530,6 +536,15 @@ class RouteReferenceRecoveryGuidance:
     action: str
     next_safe_command: str
     boundary: str
+
+
+@dataclass(frozen=True)
+class SpecPostureFrontmatterPlan:
+    rel_path: str
+    route_id: str
+    fields: dict[str, str]
+    current_text: str
+    updated_text: str
 
 
 def make_intake_request(text: str | None, text_source: str, title: str | None, target: str | None) -> IntakeRequest:
@@ -885,6 +900,8 @@ def validation_findings(inventory: Inventory) -> list[Finding]:
     findings.extend(_verification_ledger_status_findings(inventory))
     findings.extend(_working_memory_compaction_rail_findings(inventory))
     findings.extend(multi_agent_security_findings(inventory))
+    findings.extend(connect_readiness_findings(inventory, "check-connect-readiness"))
+    findings.extend(mlhd_runtime_findings(inventory, "check-mlhd"))
     findings.extend(dashboard_check_findings(inventory))
     findings.extend(lifecycle_mutation_provenance_findings(inventory, "check-lifecycle-provenance"))
     findings.extend(_docmap_findings(inventory))
@@ -1584,6 +1601,7 @@ def audit_link_findings(inventory: Inventory) -> list[Finding]:
         findings.append(Finding("info", "external-links-skipped", f"skipped {skipped_external} external URL links"))
     if skipped_mirrors:
         findings.append(Finding("info", "package-mirrors-skipped", f"skipped duplicate link audit for {skipped_mirrors} package-source mirror files"))
+    findings.extend(_product_doc_frontmatter_audit_findings(inventory))
     findings.extend(_docmap_gap_findings(inventory))
     findings.extend(_stale_root_pointer_findings(inventory))
     if not findings:
@@ -2226,6 +2244,7 @@ def doctor_findings(root: Path, inventory: Inventory) -> list[Finding]:
     findings.extend(_git_findings(root))
     findings.extend(hygiene)
     findings.extend(relationship_hygiene)
+    findings.extend(connect_readiness_findings(inventory, "doctor-connect-readiness"))
     validation = validation_findings(inventory)
     link_warnings = [finding for finding in audit_link_findings(inventory) if finding.severity in {"warn", "error"}]
     context_warnings = [finding for finding in context_budget_findings(inventory) if finding.severity in {"warn", "error"}]
@@ -2674,6 +2693,7 @@ def attach_dry_run_findings(inventory: Inventory, project_name: str | None = Non
     normalized_project = _normalize_project_name(project_name)
     if _is_attach_already_attached_live_root(inventory, normalized_project):
         findings.extend(_attach_already_attached_dry_run_findings())
+        findings.extend(connect_readiness_findings(inventory, "attach-connect-readiness"))
         return findings
 
     state_path = inventory.root / ATTACH_STATE_REL_PATH
@@ -2724,6 +2744,7 @@ def attach_dry_run_findings(inventory: Inventory, project_name: str | None = Non
 
     if not any(finding.code == "attach-proposal" and finding.severity == "warn" for finding in findings):
         findings.append(Finding("info", "attach-proposal", "no missing required surfaces were found"))
+    findings.extend(connect_readiness_findings(inventory, "attach-connect-readiness"))
     return findings
 
 
@@ -2810,6 +2831,7 @@ def attach_apply_findings(inventory: Inventory, project_name: str | None) -> lis
     refreshed_inventory = load_inventory(inventory.root)
     findings.extend(_attach_codex_hook_apply_findings(refreshed_inventory))
     findings.extend(_attach_generated_projection_findings(refreshed_inventory))
+    findings.extend(connect_readiness_findings(load_inventory(inventory.root), "attach-connect-readiness"))
     return findings
 
 
@@ -2940,6 +2962,7 @@ def _attach_already_attached_apply_findings(inventory: Inventory) -> list[Findin
     if hook_errors:
         return hook_errors
     findings.extend(_attach_codex_hook_apply_findings(inventory))
+    findings.extend(connect_readiness_findings(load_inventory(inventory.root), "attach-connect-readiness"))
     return findings
 
 
@@ -3228,7 +3251,7 @@ def repair_dry_run_findings(inventory: Inventory) -> list[Finding]:
         Finding(
             "info",
             "mutation-guard",
-            "use repair --apply only for deterministic scaffold, create-only AGENTS.md, create-only docmap, create-only stable spec restoration, snapshot-protected docmap route repairs, snapshot-protected lifecycle markdown frontmatter repair, or snapshot-protected state frontmatter repair",
+            "use repair --apply only for deterministic scaffold, create-only AGENTS.md, create-only docmap, create-only stable spec restoration, snapshot-protected docmap route repairs, snapshot-protected lifecycle markdown frontmatter repair, snapshot-protected spec posture frontmatter repair, or snapshot-protected state frontmatter repair",
         ),
     ]
     validation = validation_findings(inventory)
@@ -3239,6 +3262,7 @@ def repair_dry_run_findings(inventory: Inventory) -> list[Finding]:
     ]
     findings.extend(_state_frontmatter_plan_findings(inventory, validation))
     findings.extend(_lifecycle_markdown_frontmatter_plan_findings(inventory, validation))
+    findings.extend(_spec_posture_frontmatter_plan_findings(inventory, validation))
     findings.extend(_agents_contract_create_plan_findings(inventory, validation))
     findings.extend(_docmap_snapshot_plan_findings(inventory, validation))
     findings.extend(_docmap_create_plan_findings(inventory, validation))
@@ -3309,6 +3333,8 @@ def repair_apply_findings(inventory: Inventory) -> list[Finding]:
     if not errors:
         errors.extend(_lifecycle_markdown_frontmatter_apply_preflight_errors(inventory, validation))
     if not errors:
+        errors.extend(_spec_posture_frontmatter_apply_preflight_errors(inventory, validation))
+    if not errors:
         errors.extend(_repair_apply_preflight_errors(inventory))
     if not errors:
         errors.extend(_agents_contract_create_apply_preflight_errors(inventory, validation))
@@ -3334,6 +3360,20 @@ def repair_apply_findings(inventory: Inventory) -> list[Finding]:
             )
         )
         return lifecycle_frontmatter_findings
+
+    spec_posture_findings, spec_posture_changed = _spec_posture_frontmatter_apply_findings(inventory, validation)
+    if any(finding.severity == "error" for finding in spec_posture_findings):
+        return spec_posture_findings
+    if spec_posture_changed:
+        spec_posture_findings.extend(_post_repair_validation_findings(inventory))
+        spec_posture_findings.append(
+            Finding(
+                "info",
+                "spec-posture-frontmatter-rerun",
+                "spec posture frontmatter repair completed first; review validation and rerun repair --apply for any remaining scaffold, docmap, or stable spec repair classes",
+            )
+        )
+        return spec_posture_findings
 
     findings: list[Finding] = [Finding("info", "repair-apply", "bounded repair apply started")]
     created_paths: list[str] = []
@@ -3378,7 +3418,7 @@ def repair_apply_findings(inventory: Inventory) -> list[Finding]:
         Finding(
             "info",
             "repair-apply-boundary",
-            "repair --apply wrote only absent eager scaffold directories, selected create-only AGENTS.md creation, selected create-only docmap creation, selected create-only stable spec restoration, selected snapshot-protected lifecycle markdown frontmatter repair, and selected snapshot-protected docmap route repair classes",
+            "repair --apply wrote only absent eager scaffold directories, selected create-only AGENTS.md creation, selected create-only docmap creation, selected create-only stable spec restoration, selected snapshot-protected lifecycle markdown frontmatter repair, selected snapshot-protected spec posture frontmatter repair, and selected snapshot-protected docmap route repair classes",
         )
     )
 
@@ -3648,6 +3688,7 @@ def _repair_proposal_for(finding: Finding) -> Finding:
         "roadmap-done-docs-archive-evidence-gap": "run check --focus archive-context, then restore or retarget archived evidence before finalizing docs_decision",
         "missing-stable-spec": "restore the expected workflow spec fixture from product docs or the operating source of truth",
         "frontmatter-parse": "fix malformed markdown frontmatter without changing body authority",
+        "spec-posture-missing": "preview bounded spec posture frontmatter repair or amend the spec manually; repair adds only missing spec_status and implementation_posture metadata for plan-facing MLH-owned specs/docs",
         "research-frontmatter": "add lightweight routing frontmatter only if the research artifact remains durable",
         "lifecycle-frontmatter": "add canonical route frontmatter or rewrite the note through its owning MLH lifecycle command",
         "docmap-routing": "update docmap routes after confirming the target files are canonical entrypoints",
@@ -3916,6 +3957,138 @@ def _lifecycle_markdown_frontmatter_plan_findings(inventory: Inventory, validati
             )
         )
     findings.extend(_lifecycle_markdown_frontmatter_route_write_findings(plans, apply=False))
+    return findings
+
+
+def _spec_posture_frontmatter_plan_findings(inventory: Inventory, validation: list[Finding]) -> list[Finding]:
+    findings: list[Finding] = [
+        Finding(
+            "info",
+            "spec-posture-frontmatter-plan-scope",
+            f"selected repair class: {SPEC_POSTURE_FRONTMATTER_REPAIR_CLASS}; target route files: plan-facing specs and docs/specs contracts missing only spec posture metadata",
+        )
+    ]
+
+    if _is_product_source_inventory(inventory):
+        findings.append(
+            Finding(
+                "warn",
+                "spec-posture-frontmatter-plan-refused",
+                "target is a product-source compatibility fixture; spec posture frontmatter repair planning is report-only and snapshot creation is refused",
+                inventory.state.rel_path if inventory.state else ATTACH_STATE_REL_PATH,
+            )
+        )
+        return findings
+    if _is_fallback_or_archive_inventory(inventory):
+        findings.append(
+            Finding(
+                "warn",
+                "spec-posture-frontmatter-plan-refused",
+                "target is fallback/archive or generated-output evidence; spec posture frontmatter repair planning is refused",
+                inventory.state.rel_path if inventory.state else None,
+            )
+        )
+        return findings
+    if inventory.root_kind != "live_operating_root":
+        findings.append(
+            Finding(
+                "warn",
+                "spec-posture-frontmatter-plan-refused",
+                f"target root kind is {inventory.root_kind}; spec posture frontmatter repair requires an explicit live operating root",
+            )
+        )
+        return findings
+    if not _has_repair_apply_authority(inventory):
+        findings.append(
+            Finding(
+                "warn",
+                "spec-posture-frontmatter-plan-refused",
+                "snapshot-protected spec posture frontmatter repair would require an existing readable workflow-core manifest and strict project-state frontmatter authority",
+                inventory.manifest_surface.rel_path if inventory.manifest_surface else ATTACH_MANIFEST_REL_PATH,
+            )
+        )
+        return findings
+
+    candidates = _spec_posture_frontmatter_candidate_rows(inventory, validation)
+    if not candidates:
+        findings.append(
+            Finding(
+                "info",
+                "spec-posture-frontmatter-plan-skipped",
+                "no plan-facing spec posture diagnostics require a snapshot plan",
+            )
+        )
+        return findings
+
+    refusal = _spec_posture_frontmatter_candidate_refusal(inventory, candidates, severity="warn")
+    if refusal:
+        findings.append(refusal)
+        return findings
+
+    plans = [plan for _surface, _diagnostics, plan in candidates]
+    snapshot_dir = _spec_posture_frontmatter_snapshot_dir(plans, SNAPSHOT_DRY_RUN_TIMESTAMP)
+    boundary_conflict = _snapshot_boundary_conflict(inventory.root, snapshot_dir)
+    if boundary_conflict:
+        findings.append(_spec_posture_frontmatter_refusal_from(boundary_conflict, "warn"))
+        return findings
+
+    diagnostics = [diagnostic for _surface, diagnostics, _plan in candidates for diagnostic in diagnostics]
+    diagnostic_codes = ", ".join(sorted({finding.code for finding in diagnostics}))
+    target_paths = [plan.rel_path for plan in plans]
+    metadata_fields = ", ".join([*SNAPSHOT_METADATA_FIELDS, "planned_frontmatter_keys_by_path"])
+    findings.extend(
+        [
+            Finding(
+                "warn",
+                "spec-posture-frontmatter-plan",
+                (
+                    f"would add only missing spec posture frontmatter to {len(plans)} plan-facing spec/document contract(s); "
+                    f"source diagnostics: {diagnostic_codes}"
+                ),
+                target_paths[0] if target_paths else None,
+            ),
+            Finding(
+                "info",
+                "spec-posture-frontmatter-targets",
+                f"planned target files: {_lifecycle_frontmatter_path_summary(target_paths)}",
+                target_paths[0] if target_paths else None,
+            ),
+            Finding(
+                "info",
+                "spec-posture-frontmatter-snapshot-path",
+                f"planned snapshot directory: {snapshot_dir}/; metadata: {snapshot_dir}/snapshot.json; copied files under {snapshot_dir}/files/",
+                target_paths[0] if target_paths else None,
+            ),
+            Finding(
+                "info",
+                "spec-posture-frontmatter-metadata",
+                f"metadata fields: {metadata_fields}",
+                target_paths[0] if target_paths else None,
+            ),
+            Finding(
+                "info",
+                "spec-posture-frontmatter-boundary",
+                "repair is limited to MLH-owned stable-specs and plan-facing docs/specs contracts; no blanket all-*.md rewrite, lifecycle movement, archive, closeout, staging, or commit is implied",
+                target_paths[0] if target_paths else None,
+            ),
+            Finding(
+                "info",
+                "spec-posture-frontmatter-validation",
+                "validation method after a future apply: python -m mylittleharness --root <target-root> validate; python -m mylittleharness --root <target-root> audit-links",
+                target_paths[0] if target_paths else None,
+            ),
+        ]
+    )
+    for plan in plans:
+        findings.append(
+            Finding(
+                "info",
+                "spec-posture-frontmatter-keys",
+                f"planned frontmatter keys for {plan.rel_path}: {', '.join(plan.fields)}",
+                plan.rel_path,
+            )
+        )
+    findings.extend(_spec_posture_frontmatter_route_write_findings(plans, apply=False))
     return findings
 
 
@@ -5173,6 +5346,129 @@ def _lifecycle_markdown_frontmatter_apply_findings(
     return findings, True
 
 
+def _spec_posture_frontmatter_apply_preflight_errors(inventory: Inventory, validation: list[Finding]) -> list[Finding]:
+    candidates = _spec_posture_frontmatter_candidate_rows(inventory, validation)
+    if not candidates:
+        return []
+    refusal = _spec_posture_frontmatter_candidate_refusal(inventory, candidates, severity="error")
+    if refusal:
+        return [refusal]
+    snapshot_dir = _spec_posture_frontmatter_snapshot_dir([plan for _surface, _diagnostics, plan in candidates], _current_snapshot_timestamp())
+    boundary_conflict = _snapshot_boundary_conflict(inventory.root, snapshot_dir)
+    if boundary_conflict:
+        return [_spec_posture_frontmatter_refusal_from(boundary_conflict)]
+    return []
+
+
+def _spec_posture_frontmatter_apply_findings(
+    inventory: Inventory,
+    validation: list[Finding],
+) -> tuple[list[Finding], bool]:
+    findings: list[Finding] = [
+        Finding(
+            "info",
+            "spec-posture-frontmatter-apply-scope",
+            f"selected repair class: {SPEC_POSTURE_FRONTMATTER_REPAIR_CLASS}; target route files: plan-facing specs and docs/specs contracts missing only spec posture metadata",
+        )
+    ]
+    candidates = _spec_posture_frontmatter_candidate_rows(inventory, validation)
+    if not candidates:
+        findings.append(
+            Finding(
+                "info",
+                "spec-posture-frontmatter-apply-skipped",
+                "no plan-facing spec posture diagnostics required snapshot-protected repair",
+            )
+        )
+        return findings, False
+
+    plans = [plan for _surface, _diagnostics, plan in candidates]
+    changed_plans = [plan for plan in plans if plan.current_text != plan.updated_text]
+    if not changed_plans:
+        findings.append(
+            Finding(
+                "info",
+                "spec-posture-frontmatter-apply-skipped",
+                "planned spec posture frontmatter already matched current files; no snapshot or rewrite was needed",
+            )
+        )
+        return findings, False
+
+    timestamp = _current_snapshot_timestamp()
+    snapshot_dir_rel = _spec_posture_frontmatter_snapshot_dir(changed_plans, timestamp)
+    metadata_rel = f"{snapshot_dir_rel}/snapshot.json"
+    diagnostics_by_path = _spec_posture_frontmatter_diagnostics_by_source(validation)
+    metadata = _spec_posture_frontmatter_snapshot_metadata(
+        inventory,
+        timestamp,
+        snapshot_dir_rel,
+        changed_plans,
+        diagnostics_by_path,
+    )
+    operations: list[AtomicFileWrite] = []
+    for plan in changed_plans:
+        target = inventory.root / plan.rel_path
+        copy_path = inventory.root / _lifecycle_markdown_frontmatter_copy_rel(snapshot_dir_rel, plan.rel_path)
+        operations.append(_lifecycle_frontmatter_atomic_write(copy_path, plan.current_text))
+        operations.append(_lifecycle_frontmatter_atomic_write(target, plan.updated_text))
+    operations.append(_lifecycle_frontmatter_atomic_write(inventory.root / metadata_rel, json.dumps(metadata, indent=2, sort_keys=True) + "\n"))
+
+    try:
+        cleanup_warnings = apply_file_transaction(operations)
+    except FileTransactionError as exc:
+        return [
+            Finding(
+                "error",
+                "spec-posture-frontmatter-refused",
+                f"snapshot-protected spec posture frontmatter repair failed before target mutation completed: {exc}",
+                changed_plans[0].rel_path,
+            )
+        ], False
+
+    findings.append(
+        Finding(
+            "info",
+            "snapshot-created",
+            f"created repair snapshot before spec posture frontmatter mutation: {snapshot_dir_rel}/",
+            changed_plans[0].rel_path,
+        )
+    )
+    for plan in changed_plans:
+        copy_rel = _lifecycle_markdown_frontmatter_copy_rel(snapshot_dir_rel, plan.rel_path)
+        findings.extend(
+            [
+                Finding("info", "snapshot-copied-file", f"copied pre-repair bytes to {copy_rel}", plan.rel_path),
+                Finding(
+                    "info",
+                    "spec-posture-frontmatter-updated",
+                    f"added missing spec posture frontmatter keys: {', '.join(plan.fields)}",
+                    plan.rel_path,
+                ),
+            ]
+        )
+    findings.extend(_spec_posture_frontmatter_route_write_findings(changed_plans, apply=True))
+    findings.extend(
+        [
+            Finding("info", "snapshot-metadata-written", f"wrote snapshot metadata: {metadata_rel}", changed_plans[0].rel_path),
+            Finding(
+                "info",
+                "spec-posture-frontmatter-rollback",
+                f"manual rollback only: copy files from {snapshot_dir_rel}/files/ back to matching repo paths; then run validate and audit-links",
+                changed_plans[0].rel_path,
+            ),
+            Finding(
+                "info",
+                "spec-posture-frontmatter-authority",
+                "snapshot metadata and repair-added spec posture frontmatter are metadata evidence only and cannot approve closeout, archive, commit, lifecycle decisions, truth selection, or future repairs",
+                changed_plans[0].rel_path,
+            ),
+        ]
+    )
+    for warning in cleanup_warnings:
+        findings.append(Finding("warn", "repair-cleanup-warning", warning, changed_plans[0].rel_path))
+    return findings, True
+
+
 def _docmap_create_target_conflict(root: Path) -> Finding | None:
     target_path = root / DOCMAP_REPAIR_TARGET_REL
     for candidate in _root_relative_path_chain(root, DOCMAP_REPAIR_TARGET_REL):
@@ -5580,6 +5876,193 @@ def _lifecycle_frontmatter_path_summary(paths: list[str], limit: int = 8) -> str
     return ", ".join(paths[:limit]) + f", +{len(paths) - limit} more"
 
 
+def _spec_posture_frontmatter_candidate_rows(
+    inventory: Inventory,
+    validation: list[Finding],
+) -> list[tuple[Surface, list[Finding], SpecPostureFrontmatterPlan]]:
+    diagnostics_by_path = _spec_posture_frontmatter_diagnostics_by_source(validation)
+    rows: list[tuple[Surface, list[Finding], SpecPostureFrontmatterPlan]] = []
+    for surface in sorted(inventory.present_surfaces, key=lambda item: item.rel_path):
+        diagnostics = diagnostics_by_path.get(surface.rel_path)
+        if not diagnostics:
+            continue
+        if not _is_spec_lifecycle_surface(surface):
+            continue
+        if surface.frontmatter.errors:
+            continue
+        if lifecycle_markdown_requires_frontmatter(surface) and not surface.frontmatter.has_frontmatter:
+            continue
+        fields = _missing_spec_posture_frontmatter_fields(surface)
+        if not fields:
+            continue
+        rows.append((surface, diagnostics, _spec_posture_frontmatter_plan(surface, fields)))
+    return rows
+
+
+def _spec_posture_frontmatter_diagnostics_by_source(validation: list[Finding]) -> dict[str, list[Finding]]:
+    diagnostics_by_path: dict[str, list[Finding]] = {}
+    for finding in validation:
+        if finding.code != "spec-posture-missing" or not finding.source:
+            continue
+        diagnostics_by_path.setdefault(finding.source, []).append(finding)
+    return diagnostics_by_path
+
+
+def _missing_spec_posture_frontmatter_fields(surface: Surface) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for key, default in SPEC_POSTURE_REPAIR_DEFAULTS.items():
+        if not surface.frontmatter.has_frontmatter or not _frontmatter_value_present(surface.frontmatter.data.get(key)):
+            fields[key] = default
+    return fields
+
+
+def _spec_posture_frontmatter_plan(surface: Surface, fields: dict[str, str]) -> SpecPostureFrontmatterPlan:
+    updated_text = _spec_posture_frontmatter_text(surface.content, fields)
+    return SpecPostureFrontmatterPlan(
+        rel_path=surface.rel_path,
+        route_id=surface.memory_route,
+        fields=fields,
+        current_text=surface.content,
+        updated_text=updated_text,
+    )
+
+
+def _spec_posture_frontmatter_text(text: str, fields: dict[str, str]) -> str:
+    if not fields:
+        return text
+    lines = text.splitlines(keepends=True)
+    if not lines or lines[0].strip() != "---":
+        return lifecycle_markdown_text_with_frontmatter(text, fields)
+    for index, line in enumerate(lines[1:], start=1):
+        if line.strip() == "---":
+            insert_lines = [f'{key}: "{_yaml_double_quoted_value(value)}"\n' for key, value in fields.items()]
+            return "".join([*lines[:index], *insert_lines, *lines[index:]])
+    return text
+
+
+def _spec_posture_frontmatter_candidate_refusal(
+    inventory: Inventory,
+    candidates: list[tuple[Surface, list[Finding], SpecPostureFrontmatterPlan]],
+    *,
+    severity: str,
+) -> Finding | None:
+    for surface, _diagnostics, _plan in candidates:
+        target_conflict = _snapshot_target_conflict(inventory.root, surface.rel_path)
+        if target_conflict:
+            return _spec_posture_frontmatter_refusal_from(target_conflict, severity)
+        if surface.read_error:
+            return Finding(
+                severity,
+                "spec-posture-frontmatter-plan-refused" if severity == "warn" else "spec-posture-frontmatter-refused",
+                f"target file could not be read as clean UTF-8 before spec posture frontmatter repair: {surface.read_error}",
+                surface.rel_path,
+            )
+        if surface.frontmatter.errors:
+            return Finding(
+                severity,
+                "spec-posture-frontmatter-plan-refused" if severity == "warn" else "spec-posture-frontmatter-refused",
+                "target has malformed frontmatter; repair refuses to guess metadata boundaries",
+                surface.rel_path,
+            )
+    return None
+
+
+def _spec_posture_frontmatter_snapshot_dir(plans: list[SpecPostureFrontmatterPlan], timestamp: str) -> str:
+    payload_parts: list[bytes] = [SPEC_POSTURE_FRONTMATTER_REPAIR_CLASS.encode("utf-8")]
+    for plan in sorted(plans, key=lambda item: item.rel_path):
+        payload_parts.extend(
+            [
+                plan.rel_path.encode("utf-8"),
+                plan.route_id.encode("utf-8"),
+                "\n".join(plan.fields).encode("utf-8"),
+                plan.current_text.encode("utf-8"),
+                plan.updated_text.encode("utf-8"),
+            ]
+        )
+    hash_prefix = hashlib.sha256(b"\n".join(payload_parts)).hexdigest()[:12]
+    count = len(plans)
+    return f"{SNAPSHOT_REPAIR_ROOT_REL}/{timestamp}-{SPEC_POSTURE_FRONTMATTER_REPAIR_CLASS}-{count}-files-{hash_prefix}"
+
+
+def _spec_posture_frontmatter_snapshot_metadata(
+    inventory: Inventory,
+    timestamp: str,
+    snapshot_dir_rel: str,
+    plans: list[SpecPostureFrontmatterPlan],
+    diagnostics_by_path: dict[str, list[Finding]],
+) -> dict[str, object]:
+    copied_files = []
+    pre_repair_hashes: dict[str, str] = {}
+    source_diagnostics: list[dict[str, object]] = []
+    planned_keys: dict[str, list[str]] = {}
+    target_paths = [plan.rel_path for plan in plans]
+    for plan in plans:
+        pre_repair_bytes = plan.current_text.encode("utf-8")
+        digest = hashlib.sha256(pre_repair_bytes).hexdigest()
+        copy_rel = _lifecycle_markdown_frontmatter_copy_rel(snapshot_dir_rel, plan.rel_path)
+        copied_files.append(
+            {
+                "target_path": plan.rel_path,
+                "snapshot_path": copy_rel,
+                "sha256": digest,
+                "byte_count": len(pre_repair_bytes),
+            }
+        )
+        pre_repair_hashes[plan.rel_path] = digest
+        planned_keys[plan.rel_path] = list(plan.fields)
+        for diagnostic in diagnostics_by_path.get(plan.rel_path, []):
+            source_diagnostics.append(
+                {
+                    "code": diagnostic.code,
+                    "message": diagnostic.message,
+                    "source": diagnostic.source,
+                    "line": diagnostic.line,
+                }
+            )
+    return {
+        "schema_version": SNAPSHOT_SCHEMA_VERSION,
+        "created_at_utc": timestamp,
+        "tool_name": "mylittleharness",
+        "tool_version": __version__,
+        "command": "repair --apply",
+        "root_kind": inventory.root_kind,
+        "repair_class": SPEC_POSTURE_FRONTMATTER_REPAIR_CLASS,
+        "target_root": str(inventory.root),
+        "snapshot_root": snapshot_dir_rel,
+        "target_paths": target_paths,
+        "copied_files": copied_files,
+        "pre_repair_hashes": pre_repair_hashes,
+        "planned_post_repair_paths": target_paths,
+        "source_diagnostics": source_diagnostics,
+        "planned_route_entries": [],
+        "planned_frontmatter_keys_by_path": planned_keys,
+        "retention": "manual; MyLittleHarness does not silently delete, rotate, compress, move, or hide repair snapshots",
+        "rollback_instructions": (
+            f"Copy files from {snapshot_dir_rel}/files/ back to matching repo paths, then run "
+            "python -m mylittleharness --root <target-root> validate and "
+            "python -m mylittleharness --root <target-root> audit-links."
+        ),
+        "authority_note": (
+            "snapshot metadata and repair-added spec posture frontmatter are metadata evidence only and cannot approve repair, "
+            "truth selection, closeout, archive, commit, lifecycle decisions, or future repairs"
+        ),
+    }
+
+
+def _spec_posture_frontmatter_route_write_findings(
+    plans: list[SpecPostureFrontmatterPlan],
+    *,
+    apply: bool,
+) -> list[Finding]:
+    writes = tuple(RouteWriteEvidence(plan.rel_path, plan.current_text, plan.updated_text) for plan in plans)
+    return route_write_findings("spec-posture-frontmatter-route-write", writes, apply=apply)
+
+
+def _spec_posture_frontmatter_refusal_from(finding: Finding, severity: str = "error") -> Finding:
+    code = "spec-posture-frontmatter-plan-refused" if severity == "warn" else "spec-posture-frontmatter-refused"
+    return Finding(severity, code, finding.message, finding.source, finding.line)
+
+
 def _current_snapshot_timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
@@ -5933,7 +6416,12 @@ def _snapshot_metadata_contract_findings(inventory: Inventory, snapshot_dir: Pat
         )
 
     repair_class = metadata.get("repair_class")
-    if repair_class in {DOCMAP_REPAIR_CLASS, STATE_FRONTMATTER_REPAIR_CLASS, LIFECYCLE_MARKDOWN_FRONTMATTER_REPAIR_CLASS}:
+    if repair_class in {
+        DOCMAP_REPAIR_CLASS,
+        STATE_FRONTMATTER_REPAIR_CLASS,
+        LIFECYCLE_MARKDOWN_FRONTMATTER_REPAIR_CLASS,
+        SPEC_POSTURE_FRONTMATTER_REPAIR_CLASS,
+    }:
         findings.append(Finding("info", "snapshot-repair-class", f"repair class: {repair_class}", f"{snapshot_rel}/snapshot.json"))
     else:
         findings.append(Finding("warn", "snapshot-repair-class", f"unexpected or missing repair class: {repair_class!r}", f"{snapshot_rel}/snapshot.json"))
@@ -5992,7 +6480,7 @@ def _snapshot_metadata_contract_findings(inventory: Inventory, snapshot_dir: Pat
             )
 
     planned_frontmatter_keys_by_path = metadata.get("planned_frontmatter_keys_by_path")
-    if repair_class == LIFECYCLE_MARKDOWN_FRONTMATTER_REPAIR_CLASS:
+    if repair_class in {LIFECYCLE_MARKDOWN_FRONTMATTER_REPAIR_CLASS, SPEC_POSTURE_FRONTMATTER_REPAIR_CLASS}:
         if _is_frontmatter_keys_by_path(planned_frontmatter_keys_by_path):
             key_summary = "; ".join(
                 f"{path}: {', '.join(keys)}" for path, keys in sorted(planned_frontmatter_keys_by_path.items())
@@ -9610,6 +10098,42 @@ def _mirror_findings(inventory: Inventory) -> list[Finding]:
     return findings
 
 
+def _product_doc_frontmatter_audit_findings(inventory: Inventory) -> list[Finding]:
+    if inventory.root_kind != "live_operating_root":
+        return []
+    findings: list[Finding] = []
+    plan_facing_specs = _plan_facing_spec_paths(inventory)
+    for surface in sorted(inventory.present_surfaces, key=lambda item: item.rel_path):
+        if surface.role != "product-doc" or surface.path.suffix.lower() != ".md":
+            continue
+        if surface.frontmatter.has_frontmatter or surface.frontmatter.errors:
+            continue
+        if surface.rel_path.startswith("docs/specs/") and surface.rel_path in plan_facing_specs:
+            continue
+        findings.append(
+            Finding(
+                "info",
+                "product-doc-frontmatter-optional",
+                (
+                    f"{surface.rel_path} product doc has no frontmatter; product docs may use lightweight "
+                    "routing frontmatter, while strict spec_status/implementation_posture is reserved for "
+                    "plan-facing docs/specs contracts; suggested route class: product-docs"
+                ),
+                surface.rel_path,
+                route_id=surface.memory_route,
+            )
+        )
+    if findings:
+        findings.append(
+            Finding(
+                "info",
+                "product-doc-frontmatter-audit-boundary",
+                "product-doc frontmatter audit covers current docs/**/*.md only; project/archive/** and project/archive/reference/** remain historical routes and are excluded from blanket docs/spec normalization",
+            )
+        )
+    return findings
+
+
 def _docmap_gap_findings(inventory: Inventory) -> list[Finding]:
     docmap = inventory.surface_by_rel.get(".agents/docmap.yaml")
     if not docmap or not docmap.exists:
@@ -9770,6 +10294,193 @@ def _git_findings(root: Path) -> list[Finding]:
     message = (result.stderr or result.stdout).strip().splitlines()
     detail = message[0] if message else f"git exited {result.returncode}"
     return [Finding("info", "git-status", f"not a git worktree: {detail}")]
+
+
+def external_orchestrator_shell_preflight_findings(
+    inventory: Inventory,
+    workspace: str,
+    product_root: str = "",
+) -> list[Finding]:
+    workspace_path = Path(workspace).expanduser()
+    product_path = Path(product_root).expanduser() if product_root else _configured_product_source_root(inventory)
+    findings = [
+        Finding(
+            "info",
+            "orchestrator-shell-preflight-profile",
+            (
+                "profile=generic-external-orchestrator; required=shell, git status, MLH check, MCP/read path; "
+                "completion_policy=repo-visible handoff/claim/agent-run evidence before external done claims"
+            ),
+        ),
+        Finding(
+            "info",
+            "orchestrator-shell-preflight-boundary",
+            "capability probes are read-only process checks; they do not create workspaces, start workers, mutate trackers, write lifecycle routes, or approve dispatch",
+            str(workspace_path),
+        ),
+    ]
+    findings.extend(_external_orchestrator_live_product_findings(workspace_path, inventory.root, product_path))
+    findings.extend(_external_orchestrator_shell_probe_findings(workspace_path))
+    findings.extend(_external_orchestrator_git_probe_findings(workspace_path))
+    findings.extend(_external_orchestrator_mlh_probe_findings(workspace_path))
+    findings.extend(_external_orchestrator_mcp_probe_findings(workspace_path))
+    findings.append(
+        Finding(
+            "info",
+            "orchestrator-completion-claim-policy",
+            (
+                "external orchestrator completion claims require repo-visible handoff, work-claim, and agent-run evidence; "
+                "Linear/Symphony status, comments, or runtime memory alone are refused as MLH closeout or done-state proof"
+            ),
+            WORKSPACE_PREVIEW_SOURCE,
+        )
+    )
+    if any(finding.severity == "warn" for finding in findings):
+        findings.append(
+            Finding(
+                "warn",
+                "orchestrator-shell-preflight-refused",
+                (
+                    "external dispatch is not preflighted until shell/process spawn, git status, MLH check, "
+                    "MCP/read posture, and completion policy are all explicitly reviewable"
+                ),
+                str(workspace_path),
+            )
+        )
+    else:
+        findings.append(
+            Finding(
+                "info",
+                "orchestrator-shell-preflight-ready",
+                "external workspace capability probes passed; this remains readiness evidence only and does not start a worker",
+                str(workspace_path),
+            )
+        )
+    return findings
+
+
+WORKSPACE_PREVIEW_SOURCE = "external-orchestrator-workspace"
+
+
+def _configured_product_source_root(inventory: Inventory) -> Path | None:
+    data = inventory.state.frontmatter.data if inventory.state and inventory.state.exists else {}
+    value = str(data.get("product_source_root") or data.get("projection_root") or "").strip()
+    return Path(value).expanduser() if value else None
+
+
+def _external_orchestrator_live_product_findings(workspace: Path, root: Path, product_root: Path | None) -> list[Finding]:
+    findings: list[Finding] = []
+    resolved_workspace = _safe_resolve_path(workspace)
+    resolved_root = _safe_resolve_path(root)
+    if resolved_workspace == resolved_root:
+        findings.append(Finding("warn", "orchestrator-shell-preflight-live-root", "candidate workspace is the live coordination root; dispatch requires a disposable root or explicit allowlist", str(workspace)))
+    elif _path_is_within(resolved_workspace, resolved_root):
+        findings.append(Finding("warn", "orchestrator-shell-preflight-live-root", "candidate workspace is inside the live coordination root; dispatch requires a disposable root or explicit allowlist", str(workspace)))
+    if product_root:
+        resolved_product = _safe_resolve_path(product_root)
+        if resolved_workspace == resolved_product:
+            findings.append(Finding("warn", "orchestrator-shell-preflight-product-root", "candidate workspace is the configured product source root; external agents need a disposable product source unless explicitly allowed", str(workspace)))
+        elif _path_is_within(resolved_workspace, resolved_product):
+            findings.append(Finding("warn", "orchestrator-shell-preflight-product-root", "candidate workspace is inside the configured product source root; external agents need a disposable product source unless explicitly allowed", str(workspace)))
+    if not findings:
+        findings.append(Finding("info", "orchestrator-shell-preflight-disposable-root", "candidate workspace is separate from the live coordination root and configured product source root", str(workspace)))
+    return findings
+
+
+def _external_orchestrator_shell_probe_findings(workspace: Path) -> list[Finding]:
+    if not workspace.exists() or not workspace.is_dir():
+        return [Finding("warn", "orchestrator-shell-capability-refused", "shell/process capability was not proven because the candidate workspace is not an existing directory", str(workspace))]
+    result, error = _run_external_orchestrator_probe([sys.executable, "-c", "print('mlh-process-spawn-ok')"], workspace)
+    if error:
+        return [Finding("warn", "orchestrator-shell-capability-refused", f"process spawn failed before dispatch: {error}", str(workspace))]
+    assert result is not None
+    if result.returncode != 0:
+        return [Finding("warn", "orchestrator-shell-capability-refused", f"process spawn exited {result.returncode}: {_probe_output(result)}", str(workspace))]
+    return [Finding("info", "orchestrator-shell-capability-ok", f"process spawn succeeded in candidate workspace: {_probe_output(result)}", str(workspace))]
+
+
+def _external_orchestrator_git_probe_findings(workspace: Path) -> list[Finding]:
+    if not workspace.exists() or not workspace.is_dir():
+        return [Finding("warn", "orchestrator-git-status-refused", "git status was not proven because the candidate workspace is not an existing directory", str(workspace))]
+    if not shutil.which("git"):
+        return [Finding("warn", "orchestrator-git-status-refused", "git executable is not available on PATH", str(workspace))]
+    result, error = _run_external_orchestrator_probe(["git", "status", "--short", "--branch"], workspace)
+    if error:
+        return [Finding("warn", "orchestrator-git-status-refused", f"git status failed before dispatch: {error}", str(workspace))]
+    assert result is not None
+    if result.returncode != 0:
+        return [Finding("warn", "orchestrator-git-status-refused", f"git status exited {result.returncode}: {_probe_output(result)}", str(workspace))]
+    detail = _probe_output(result) or "clean or empty status"
+    return [Finding("info", "orchestrator-git-status-ok", f"git status ran in candidate workspace: {detail}", str(workspace))]
+
+
+def _external_orchestrator_mlh_probe_findings(workspace: Path) -> list[Finding]:
+    if not workspace.exists() or not workspace.is_dir():
+        return [Finding("warn", "orchestrator-mlh-check-refused", "MLH check was not proven because the candidate workspace is not an existing directory", str(workspace))]
+    if not shutil.which("mylittleharness"):
+        return [Finding("warn", "orchestrator-mlh-check-refused", "mylittleharness executable is not available on PATH", str(workspace))]
+    result, error = _run_external_orchestrator_probe(["mylittleharness", "--root", str(workspace), "check"], workspace)
+    if error:
+        return [Finding("warn", "orchestrator-mlh-check-refused", f"mylittleharness check failed before dispatch: {error}", str(workspace))]
+    assert result is not None
+    if result.returncode != 0:
+        return [Finding("warn", "orchestrator-mlh-check-refused", f"mylittleharness check exited {result.returncode}: {_probe_output(result)}", str(workspace))]
+    return [Finding("info", "orchestrator-mlh-check-ok", f"mylittleharness check ran in candidate workspace: {_probe_output(result)}", str(workspace))]
+
+
+def _external_orchestrator_mcp_probe_findings(workspace: Path) -> list[Finding]:
+    if not workspace.exists() or not workspace.is_dir():
+        return [Finding("warn", "orchestrator-mcp-read-path-refused", "MCP/read path was not proven because the candidate workspace is not an existing directory", str(workspace))]
+    if not shutil.which("mylittleharness"):
+        return [Finding("warn", "orchestrator-mcp-read-path-refused", "mylittleharness executable is not available for adapter client-config probing", str(workspace))]
+    command = ["mylittleharness", "--root", str(workspace), "adapter", "--client-config", "--target", "mcp-read-projection"]
+    result, error = _run_external_orchestrator_probe(command, workspace)
+    if error:
+        return [Finding("warn", "orchestrator-mcp-read-path-refused", f"MCP/read adapter probe failed before dispatch: {error}", str(workspace))]
+    assert result is not None
+    if result.returncode != 0:
+        return [Finding("warn", "orchestrator-mcp-read-path-refused", f"MCP/read adapter probe exited {result.returncode}: {_probe_output(result)}", str(workspace))]
+    detail = _probe_output(result) or "adapter client-config rendered"
+    return [Finding("info", "orchestrator-mcp-read-path-ok", f"MCP/read adapter posture is reviewable: {detail}", str(workspace))]
+
+
+def _run_external_orchestrator_probe(command: list[str], cwd: Path) -> tuple[subprocess.CompletedProcess[str] | None, str]:
+    try:
+        return (
+            subprocess.run(
+                command,
+                cwd=cwd,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            ),
+            "",
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, str(exc)
+
+
+def _probe_output(result: subprocess.CompletedProcess[str]) -> str:
+    output = (result.stdout or result.stderr or "").strip().splitlines()
+    if not output:
+        return ""
+    return output[0][:240]
+
+
+def _safe_resolve_path(path: Path) -> Path:
+    try:
+        return path.resolve()
+    except OSError:
+        return path.absolute()
+
+
+def _path_is_within(child: Path, parent: Path) -> bool:
+    try:
+        child.relative_to(parent)
+        return True
+    except ValueError:
+        return False
 
 
 def _intake_request_errors(inventory: Inventory, request: IntakeRequest, apply: bool) -> list[Finding]:

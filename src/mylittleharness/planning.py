@@ -1457,13 +1457,27 @@ def plan_apply_findings(inventory: Inventory, request: PlanRequest) -> list[Find
         *roadmap_source_incubation_evidence_findings(inventory, roadmap_item_ids),
         *roadmap_related_specs_evidence_findings(inventory, roadmap_item_ids),
         *roadmap_human_review_gate_findings(inventory, roadmap_item_ids),
-        *roadmap_batch_slice_gate_findings(inventory, roadmap_item_ids, route="plan", source=DEFAULT_PLAN_REL, apply=True),
+        *roadmap_batch_slice_gate_findings(
+            inventory,
+            roadmap_item_ids,
+            route="plan",
+            source=DEFAULT_PLAN_REL,
+            apply=True,
+            block_apply=True,
+        ),
         *roadmap_compacted_dependency_archive_evidence_findings(inventory, roadmap_item_ids),
     ]
-    if errors:
+    blocking_evidence = tuple(finding for finding in roadmap_evidence_findings if finding.severity == "error")
+    if errors or blocking_evidence:
         return [
             *roadmap_evidence_findings,
             *errors,
+            Finding(
+                "info",
+                "plan-validation-posture",
+                "apply refused before route writes; use --only-requested-item for one-slice work or record reviewed bundle/human-gate evidence before batching",
+                DEFAULT_PLAN_REL,
+            ),
         ]
 
     state = inventory.state

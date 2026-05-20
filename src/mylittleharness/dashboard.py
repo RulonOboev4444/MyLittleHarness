@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import json
 from collections import Counter
 from pathlib import Path
 
 from .adapter import codex_mcp_adoption_payload
 from .claims import work_claim_status_findings
+from .daemon import inspect_mlhd_control_state, mlhd_runtime_findings, mlhd_runtime_payload
 from .evidence import agent_run_record_findings, lifecycle_mutation_provenance_findings
 from .handoff import handoff_packet_status_findings
 from .inventory import Inventory
@@ -14,12 +14,7 @@ from .models import Finding
 from .projection import build_projection, projection_summary_to_dict
 from .projection_artifacts import (
     ARTIFACT_DIR_REL,
-    ARTIFACT_DIRTY_MARKER_NAME,
-    CACHE_OPERATION_MARKER_NAME,
-    INDEX_DIRTY_MARKER_NAME,
-    artifact_dir,
     inspect_projection_artifacts,
-    projection_cache_dirty_changed_paths,
     projection_cache_posture_payload,
 )
 from .projection_index import inspect_projection_index
@@ -28,15 +23,16 @@ from .vcs import worktree_coordination_findings
 
 
 DASHBOARD_SCHEMA = "mylittleharness.dashboard.v1"
-MLHD_RUNTIME_SCHEMA = "mylittleharness.mlhd-runtime.v1"
+CONNECT_READINESS_SCHEMA = "mylittleharness.connect-readiness-action-packet.v1"
 MLHD_RUNTIME_DIR_REL = ".mylittleharness/runtime/mlhd"
 
 
 def dashboard_sections(inventory: Inventory) -> list[tuple[str, list[Finding]]]:
     coordination = _coordination_findings(inventory)
-    runtime = mlhd_runtime_findings(inventory)
+    runtime = [*mlhd_runtime_findings(inventory), *_mlhd_freshness_findings(inventory)]
     return [
         ("Dashboard", _dashboard_summary_findings(inventory)),
+        ("Connect Readiness", connect_readiness_findings(inventory, "dashboard-connect-readiness")),
         ("Lifecycle", _lifecycle_findings(inventory)),
         ("Roadmap", _roadmap_findings(inventory)),
         ("Coordination", coordination),
@@ -51,6 +47,9 @@ def dashboard_sections(inventory: Inventory) -> list[tuple[str, list[Finding]]]:
 def dashboard_payload(inventory: Inventory, sections: list[tuple[str, list[Finding]]] | None = None) -> dict[str, object]:
     sections = dashboard_sections(inventory) if sections is None else sections
     findings = [finding for _section, section_findings in sections for finding in section_findings]
+    cache_posture = _cache_posture_payload(inventory)
+    agent_packet = dashboard_agent_packet(inventory)
+    accelerator_adoption = _accelerator_adoption_payload(inventory)
     return {
         "schema": DASHBOARD_SCHEMA,
         "root": str(inventory.root),
@@ -59,11 +58,17 @@ def dashboard_payload(inventory: Inventory, sections: list[tuple[str, list[Findi
         "source_refs": _dashboard_source_refs(sections),
         "lifecycle": _lifecycle_payload(inventory),
         "roadmap": _roadmap_payload(inventory),
-        "mlhd": mlhd_runtime_payload(inventory),
+        "mlhd": mlhd_freshness_payload(inventory),
         "projection": projection_summary_to_dict(build_projection(inventory)),
-        "cachePosture": _cache_posture_payload(inventory),
-        "agentPacket": dashboard_agent_packet(inventory),
-        "acceleratorAdoption": _accelerator_adoption_payload(inventory),
+        "cachePosture": cache_posture,
+        "agentPacket": agent_packet,
+        "acceleratorAdoption": accelerator_adoption,
+        "connectReadiness": connect_readiness_packet(
+            inventory,
+            cache_posture=cache_posture,
+            agent_packet=agent_packet,
+            accelerator_adoption=accelerator_adoption,
+        ),
         "nextLegalDryRun": _next_legal_dry_run_payload(inventory),
         "coordination": _coordination_payload(findings),
         "alerts": _alert_payload(findings),
@@ -415,6 +420,10 @@ def dashboard_agent_packet(inventory: Inventory) -> dict[str, object]:
         "exactVerification": exact_verification,
         "nextLegalDryRun": _next_legal_dry_run_payload(inventory),
         "acceleratorAdoption": adoption,
+        "connectReadiness": connect_readiness_packet(
+            inventory,
+            accelerator_adoption=adoption,
+        ),
         "lifecycle": {
             "plan_status": str(data.get("plan_status") or ""),
             "active_plan": str(data.get("active_plan") or ""),
@@ -423,6 +432,133 @@ def dashboard_agent_packet(inventory: Inventory) -> dict[str, object]:
         },
         "boundary": "agent packet is read-only navigation guidance and cannot approve lifecycle movement, repair, archive, staging, commit, or next-plan opening",
     }
+
+
+def connect_readiness_packet(
+    inventory: Inventory,
+    *,
+    cache_posture: dict[str, object] | None = None,
+    agent_packet: dict[str, object] | None = None,
+    accelerator_adoption: dict[str, object] | None = None,
+) -> dict[str, object]:
+    data = _state_data(inventory)
+    cache = cache_posture or _cache_posture_payload(inventory)
+    components = cache.get("components", {}) if isinstance(cache, dict) else {}
+    adoption = accelerator_adoption or _accelerator_adoption_payload(inventory)
+    mcp = adoption.get("mcp", {}) if isinstance(adoption.get("mcp"), dict) else {}
+    next_legal = (
+        agent_packet.get("nextLegalDryRun", {})
+        if isinstance(agent_packet, dict) and isinstance(agent_packet.get("nextLegalDryRun"), dict)
+        else _next_legal_dry_run_payload(inventory)
+    )
+    repair_targets = _repair_target_payload(inventory)
+    docmap = _docmap_readiness_payload(inventory)
+    mlhd = mlhd_freshness_payload(inventory)
+    plan_status = str(data.get("plan_status") or "")
+    return {
+        "schema": CONNECT_READINESS_SCHEMA,
+        "lifecycle": {
+            "plan_status": plan_status,
+            "active_plan": str(data.get("active_plan") or ""),
+            "active_phase": str(data.get("active_phase") or ""),
+            "phase_status": str(data.get("phase_status") or ""),
+        },
+        "hooks": {
+            "firstContactCommand": str(adoption.get("firstContactHookCommand") or "mylittleharness --root <root> hooks --run session-start --json"),
+            "codexAdapterDryRun": str(adoption.get("codexHookAdapterCommand") or "mylittleharness --root <root> hooks adapter --client codex --dry-run --scope project"),
+            "projectHookStatus": _project_hook_status(mcp),
+        },
+        "mcp": {
+            "status": str(mcp.get("status") or "unknown"),
+            "mounted": mcp.get("mounted") is True,
+            "toolCoverage": adoption.get("mcpToolCoverage", {}),
+        },
+        "cache": {
+            "artifacts": _component_status(components, "artifacts"),
+            "sqlite_index": _component_status(components, "sqlite_index"),
+            "selfHealCommand": str(cache.get("self_heal_command") or "mylittleharness --root <root> projection --warm-cache --target all"),
+        },
+        "mlhd": {
+            "controlStatus": str(mlhd.get("control_status") or "unknown"),
+            "runtimeCacheStatus": str(mlhd.get("runtime_cache_status") or "unknown"),
+            "pidStatus": str(mlhd.get("pid_status") or "unknown"),
+            "lastTickUtc": str(mlhd.get("last_tick_utc") or ""),
+            "lastAction": str(mlhd.get("last_action") or ""),
+            "lastRefreshStatus": str(mlhd.get("last_refresh_status") or ""),
+            "lastSuccessfulRefreshUtc": str(mlhd.get("last_successful_refresh_utc") or ""),
+            "lastFailedRefreshUtc": str(mlhd.get("last_failed_refresh_utc") or ""),
+            "dirtyCount": int(mlhd.get("dirty_count") or 0),
+            "changedPathCount": int(mlhd.get("changed_path_count") or 0),
+            "nextSafeCommand": str(mlhd.get("next_safe_command") or "mylittleharness --root <root> mlhd run-once --dry-run"),
+        },
+        "docs": docmap,
+        "repairTargets": repair_targets,
+        "writeback": {
+            "requiredWhenPlanStatusActive": plan_status.casefold() == "active",
+            "dryRunCommand": str(next_legal.get("command") or ""),
+            "reason": str(next_legal.get("reason") or ""),
+        },
+        "nextSafeCommand": _readiness_next_safe_command(next_legal, cache, repair_targets),
+        "recoveryCommand": _readiness_recovery_command(cache, repair_targets),
+        "boundary": (
+            "connect readiness is an LLM-compact action packet only; it cannot approve lifecycle movement, repair, "
+            "archive, roadmap status, staging, commit, push, release, provider routing, source mutation, or cache truth"
+        ),
+    }
+
+
+def connect_readiness_findings(inventory: Inventory, code_prefix: str = "connect-readiness") -> list[Finding]:
+    packet = connect_readiness_packet(inventory)
+    lifecycle = packet["lifecycle"]
+    cache = packet["cache"]
+    repair = packet["repairTargets"]
+    docs = packet["docs"]
+    writeback = packet["writeback"]
+    hooks = packet["hooks"]
+    mcp = packet["mcp"]
+    mlhd = packet["mlhd"]
+    return [
+        Finding(
+            "info",
+            f"{code_prefix}-action-packet",
+            (
+                "compact action packet: "
+                f"plan_status={lifecycle['plan_status'] or '<none>'}; active_phase={lifecycle['active_phase'] or '<none>'}; "
+                f"phase_status={lifecycle['phase_status'] or '<none>'}; hooks={hooks['projectHookStatus']}; "
+                f"mcp={mcp['status']}; cache artifacts={cache['artifacts']}; sqlite_index={cache['sqlite_index']}; "
+                f"mlhd={mlhd['controlStatus']}; dirty_count={mlhd['dirtyCount']}; "
+                f"docmap={docs['docmapStatus']}; writeback_required={str(writeback['requiredWhenPlanStatusActive']).lower()}; "
+                f"next_safe={packet['nextSafeCommand']}"
+            ),
+            "project/project-state.md" if inventory.state and inventory.state.exists else None,
+        ),
+        Finding(
+            "info",
+            f"{code_prefix}-repair-targets",
+            (
+                f"required_repair_targets={repair['requiredMissingCount']}; "
+                f"optional_repair_targets={repair['optionalMissingCount']}; "
+                f"required_examples={_display_examples(repair['requiredExamples'])}; "
+                f"optional_examples={_display_examples(repair['optionalExamples'])}; "
+                f"recovery={packet['recoveryCommand']}"
+            ),
+            "project/project-state.md" if inventory.state and inventory.state.exists else None,
+        ),
+        Finding(
+            "info",
+            f"{code_prefix}-docs-docmap",
+            (
+                f"docs_decision={docs['docsDecision']}; docmap_hygiene={docs['docmapStatus']}; "
+                f"candidate_check={docs['hygieneCheckCommand']}; repair_preview={docs['repairPreviewCommand']}"
+            ),
+            ".agents/docmap.yaml",
+        ),
+        Finding(
+            "info",
+            f"{code_prefix}-boundary",
+            str(packet["boundary"]),
+        ),
+    ]
 
 
 def _accelerator_adoption_payload(inventory: Inventory) -> dict[str, object]:
@@ -495,136 +631,156 @@ def _cache_posture_payload(inventory: Inventory, projection=None) -> dict[str, o
     )
 
 
-def mlhd_runtime_findings(inventory: Inventory, code_prefix: str = "dashboard-mlhd") -> list[Finding]:
-    posture = mlhd_runtime_payload(inventory)
-    pulse = projection_pulse_payload(inventory)
-    runtime_dir_rel = str(posture["runtime_dir"])
-    findings = [
+def _component_status(components: dict[str, object], name: str) -> str:
+    component = components.get(name, {}) if isinstance(components, dict) else {}
+    if isinstance(component, dict):
+        return str(component.get("status") or "unknown")
+    return "unknown"
+
+
+def _project_hook_status(mcp: dict[str, object]) -> str:
+    project_hooks = mcp.get("projectHooks") if isinstance(mcp, dict) else {}
+    if isinstance(project_hooks, dict):
+        return str(project_hooks.get("status") or "unknown")
+    return "unknown"
+
+
+def _docmap_readiness_payload(inventory: Inventory) -> dict[str, object]:
+    docmap = inventory.surface_by_rel.get(".agents/docmap.yaml")
+    docs_decision = _active_plan_docs_decision(inventory)
+    if docmap is None or not docmap.exists:
+        status = "missing"
+    elif docmap.read_error:
+        status = "unreadable"
+    else:
+        status = "present"
+    return {
+        "docmapStatus": status,
+        "docsDecision": docs_decision,
+        "hygieneCheckCommand": "mylittleharness --root <root> check --focus validation",
+        "repairPreviewCommand": "mylittleharness --root <root> repair --dry-run",
+        "candidateTargets": [
+            ".agents/docmap.yaml",
+            "README.md",
+            "docs/README.md",
+            "docs/specs/adapter-boundary.md",
+            "docs/specs/attach-repair-status-cli.md",
+            "docs/specs/generated-state-search-and-sqlite.md",
+            "docs/specs/metadata-routing-and-evidence.md",
+        ],
+        "roleMetadata": {
+            "docmapIsRoutingAid": True,
+            "productDocsAreLightweight": True,
+            "strictSpecPostureFields": ["spec_status", "implementation_posture"],
+            "strictSpecCandidates": ["project/specs/**/*.md", "docs/specs/**/*.md"],
+            "normalizationDryRunCommand": "mylittleharness --root <root> repair --dry-run",
+        },
+    }
+
+
+def _active_plan_docs_decision(inventory: Inventory) -> str:
+    plan = inventory.active_plan_surface
+    if plan and plan.exists and plan.frontmatter.data.get("docs_decision"):
+        return str(plan.frontmatter.data.get("docs_decision") or "")
+    state = _state_data(inventory)
+    return str(state.get("docs_decision") or "unknown")
+
+
+def _repair_target_payload(inventory: Inventory) -> dict[str, object]:
+    required = _missing_surface_examples(inventory, required=True)
+    optional = _missing_surface_examples(inventory, required=False)
+    return {
+        "requiredMissingCount": required[0],
+        "requiredExamples": required[1],
+        "optionalMissingCount": optional[0],
+        "optionalExamples": optional[1],
+        "repairDryRunCommand": "mylittleharness --root <root> repair --dry-run",
+    }
+
+
+def _missing_surface_examples(inventory: Inventory, *, required: bool) -> tuple[int, list[str]]:
+    missing = [
+        surface.rel_path
+        for surface in inventory.surfaces
+        if surface.required is required and (not surface.exists or bool(surface.read_error))
+    ]
+    return len(missing), missing[:5]
+
+
+def _readiness_next_safe_command(
+    next_legal: dict[str, object],
+    cache: dict[str, object],
+    repair_targets: dict[str, object],
+) -> str:
+    if int(repair_targets.get("requiredMissingCount") or 0) > 0:
+        return str(repair_targets.get("repairDryRunCommand") or "mylittleharness --root <root> repair --dry-run")
+    components = cache.get("components", {}) if isinstance(cache, dict) else {}
+    if _component_status(components, "artifacts") not in {"current", "unknown"} or _component_status(components, "sqlite_index") not in {"current", "unknown"}:
+        return str(cache.get("self_heal_command") or "mylittleharness --root <root> projection --warm-cache --target all")
+    return str(next_legal.get("command") or "mylittleharness --root <root> check")
+
+
+def _readiness_recovery_command(cache: dict[str, object], repair_targets: dict[str, object]) -> str:
+    if int(repair_targets.get("requiredMissingCount") or 0) > 0:
+        return str(repair_targets.get("repairDryRunCommand") or "mylittleharness --root <root> repair --dry-run")
+    components = cache.get("components", {}) if isinstance(cache, dict) else {}
+    if _component_status(components, "artifacts") != "current" or _component_status(components, "sqlite_index") != "current":
+        return str(cache.get("self_heal_command") or "mylittleharness --root <root> projection --warm-cache --target all")
+    return "mylittleharness --root <root> check"
+
+
+def _display_examples(examples: object) -> str:
+    if isinstance(examples, list) and examples:
+        return ", ".join(str(item) for item in examples[:5])
+    return "none"
+
+
+def mlhd_freshness_payload(inventory: Inventory) -> dict[str, object]:
+    runtime = dict(mlhd_runtime_payload(inventory))
+    control = inspect_mlhd_control_state(inventory)
+    pulse = runtime.get("projection_pulse") if isinstance(runtime.get("projection_pulse"), dict) else {}
+    runtime.update(
+        {
+            "control_status": str(control.get("control_status") or "unknown"),
+            "pid_status": str(control.get("pid_status") or "unknown"),
+            "last_action": str(control.get("last_action") or ""),
+            "last_tick_utc": str(control.get("heartbeat_at_utc") or ""),
+            "last_refresh_status": str(pulse.get("last_refresh_status") or ""),
+            "last_successful_refresh_utc": str(pulse.get("last_successful_refresh_utc") or ""),
+            "last_failed_refresh_utc": str(pulse.get("last_failed_refresh_utc") or ""),
+            "dirty_count": int(pulse.get("dirty_marker_count") or 0),
+            "changed_path_count": int(pulse.get("changed_path_count") or 0),
+            "next_safe_command": str(pulse.get("next_safe_command") or "mylittleharness --root <root> mlhd run-once --dry-run"),
+        }
+    )
+    return runtime
+
+
+def _mlhd_freshness_findings(inventory: Inventory, code_prefix: str = "dashboard-mlhd") -> list[Finding]:
+    mlhd = mlhd_freshness_payload(inventory)
+    return [
+        Finding(
+            "info" if mlhd["control_status"] not in {"invalid", "stale"} else "warn",
+            f"{code_prefix}-control-freshness",
+            (
+                f"mlhd control_status={mlhd['control_status']}; runtime_cache={mlhd['runtime_cache_status']}; "
+                f"pid_status={mlhd['pid_status']}; last_tick={mlhd['last_tick_utc'] or '<none>'}; "
+                f"last_action={mlhd['last_action'] or '<none>'}"
+            ),
+            MLHD_RUNTIME_DIR_REL,
+        ),
         Finding(
             "info",
-            f"{code_prefix}-optional-runtime",
+            f"{code_prefix}-refresh-freshness",
             (
-                "mlhd runtime is optional cockpit support for read-only logs, process/session posture, notifications, "
-                "WebSocket update posture, projection refresh cues, and attach/watch convenience"
+                f"projection dirty_count={mlhd['dirty_count']}; changed_path_count={mlhd['changed_path_count']}; "
+                f"last_refresh={mlhd['last_refresh_status'] or '<none>'}; "
+                f"last_success={mlhd['last_successful_refresh_utc'] or '<none>'}; "
+                f"last_failure={mlhd['last_failed_refresh_utc'] or '<none>'}; next_safe={mlhd['next_safe_command']}"
             ),
-            runtime_dir_rel,
-        )
+            ARTIFACT_DIR_REL,
+        ),
     ]
-    status = posture["runtime_cache_status"]
-    if status == "present":
-        examples = ", ".join(str(item) for item in posture["cache_file_examples"]) or "none"
-        findings.append(
-            Finding(
-                "info",
-                f"{code_prefix}-runtime-cache-present",
-                (
-                    f"optional mlhd runtime cache is present; cache_files={posture['cache_file_count']}; "
-                    f"examples={examples}; cache remains disposable"
-                ),
-                runtime_dir_rel,
-            )
-        )
-    elif status == "invalid":
-        findings.append(
-            Finding(
-                "warn",
-                f"{code_prefix}-runtime-cache-invalid",
-                "optional mlhd runtime cache path is not a regular directory; ignoring it as non-authoritative runtime state",
-                runtime_dir_rel,
-            )
-        )
-    else:
-        findings.append(
-            Finding(
-                "info",
-                f"{code_prefix}-runtime-cache-absent",
-                "mlhd runtime cache is absent; dashboard and check posture continue from repo-visible route files",
-                runtime_dir_rel,
-            )
-        )
-    findings.extend(
-        [
-            Finding(
-                "info",
-                f"{code_prefix}-disposable-cache-boundary",
-                "deleting .mylittleharness/runtime/mlhd must not change active, accepted, verified, blocked, closeable, or archived repo truth",
-                runtime_dir_rel,
-            ),
-            Finding(
-                "info",
-                f"{code_prefix}-durable-mutation-boundary",
-                "durable mutations must delegate to explicit MyLittleHarness CLI dry-run/apply rails; mlhd cache cannot write lifecycle, roadmap, archive, Git, or release authority",
-                runtime_dir_rel,
-            ),
-            Finding(
-                "info",
-                f"{code_prefix}-localhost-defaults",
-                "this cockpit starts no listener; any future mlhd serve rail must be explicit, local-only by default, and avoid provider credential storage",
-                runtime_dir_rel,
-            ),
-            Finding(
-                "info",
-                f"{code_prefix}-authority-boundary",
-                "mlhd cache, logs, notifications, process observations, and WebSocket events are adapter data only; repo-visible files remain authority",
-                runtime_dir_rel,
-            ),
-            Finding(
-                "info" if pulse["status"] in {"idle", "warmable"} else "warn",
-                f"{code_prefix}-projection-pulse",
-                (
-                    f"projection pulse status={pulse['status']}; dirty_since={pulse['dirty_since_utc'] or '<none>'}; "
-                    f"last_operation={pulse['operation'] or '<none>'}; optional warm-cache ticks cannot write lifecycle authority"
-                ),
-                ARTIFACT_DIR_REL,
-            ),
-        ]
-    )
-    return findings
-
-
-def mlhd_runtime_payload(inventory: Inventory) -> dict[str, object]:
-    runtime_dir = inventory.root / MLHD_RUNTIME_DIR_REL
-    status = _runtime_cache_status(runtime_dir)
-    cache_files = _runtime_cache_files(inventory.root, runtime_dir) if status == "present" else []
-    return {
-        "schema": MLHD_RUNTIME_SCHEMA,
-        "runtime_dir": MLHD_RUNTIME_DIR_REL,
-        "runtime_cache_status": status,
-        "runtime_dir_exists": runtime_dir.exists(),
-        "cache_file_count": len(cache_files),
-        "cache_file_examples": cache_files[:10],
-        "disposable_cache": True,
-        "network_listener_started": False,
-        "default_bind_host": "127.0.0.1",
-        "durable_mutations_delegate_to_cli": True,
-        "stores_provider_credentials": False,
-        "approves_lifecycle": False,
-        "projection_pulse": projection_pulse_payload(inventory),
-    }
-
-
-def projection_pulse_payload(inventory: Inventory) -> dict[str, object]:
-    dirty_payloads = [_read_json_marker(inventory.root, ARTIFACT_DIRTY_MARKER_NAME), _read_json_marker(inventory.root, INDEX_DIRTY_MARKER_NAME)]
-    dirty_payloads = [payload for payload in dirty_payloads if payload]
-    operation_payload = _read_json_marker(inventory.root, CACHE_OPERATION_MARKER_NAME)
-    dirty_since_values = [str(payload.get("dirty_since_utc") or "") for payload in dirty_payloads if isinstance(payload, dict)]
-    changed_paths = projection_cache_dirty_changed_paths(inventory.root)
-    status = "updating-or-interrupted" if operation_payload else "warmable" if dirty_payloads else "idle"
-    return {
-        "schema": "mylittleharness.projection-pulse.v1",
-        "status": status,
-        "dirty": bool(dirty_payloads),
-        "dirty_since_utc": sorted(value for value in dirty_since_values if value)[:1][0] if any(dirty_since_values) else "",
-        "dirty_marker_count": len(dirty_payloads),
-        "changed_path_count": len(changed_paths),
-        "changed_path_examples": list(changed_paths[:10]),
-        "quiet_period_seconds": 0,
-        "quiet_period_elapsed": not operation_payload,
-        "operation": str(operation_payload.get("operation") or "") if isinstance(operation_payload, dict) else "",
-        "operation_created_at_utc": str(operation_payload.get("created_at_utc") or "") if isinstance(operation_payload, dict) else "",
-        "warm_cache_command": "mylittleharness --root <root> projection --warm-cache --target all",
-        "authority": "watch/pulse state is disposable; source files and lifecycle routes remain authoritative",
-    }
 
 
 def _dashboard_source_refs(sections: list[tuple[str, list[Finding]]]) -> list[str]:
@@ -671,32 +827,3 @@ def _next_legal_dry_run_payload(inventory: Inventory) -> dict[str, object]:
         "approves_git": False,
         "boundary": "dashboard names a legal dry-run candidate only; it does not approve apply, closeout, archive, staging, commit, push, release, or product-diff acceptance",
     }
-
-
-def _runtime_cache_status(runtime_dir: Path) -> str:
-    if runtime_dir.is_symlink() or (runtime_dir.exists() and not runtime_dir.is_dir()):
-        return "invalid"
-    return "present" if runtime_dir.exists() else "absent"
-
-
-def _runtime_cache_files(root: Path, runtime_dir: Path) -> list[str]:
-    files: list[str] = []
-    for path in sorted(runtime_dir.rglob("*")):
-        if not path.is_file() or path.is_symlink():
-            continue
-        try:
-            files.append(path.relative_to(root).as_posix())
-        except ValueError:
-            continue
-    return files
-
-
-def _read_json_marker(root: Path, name: str) -> dict[str, object]:
-    path = artifact_dir(root) / name
-    if not path.is_file() or path.is_symlink():
-        return {}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return payload if isinstance(payload, dict) else {}

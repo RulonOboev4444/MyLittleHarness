@@ -311,6 +311,7 @@ def mcp_read_projection_sections(
         ("Projection", _projection_findings(projection)),
         ("Sources", _source_findings(projection)),
         ("Generated Inputs", _generated_input_findings(inventory, projection)),
+        ("Agent Action Packet", _agent_action_packet_findings(inventory)),
         ("Boundary", _boundary_findings()),
     ]
 
@@ -328,6 +329,11 @@ def mcp_read_projection_payload(
     projection = build_projection(inventory)
     artifact_findings = inspect_projection_artifacts(inventory, projection)
     index_findings = inspect_projection_index(inventory, projection)
+    cache_posture = projection_cache_posture_payload(artifact_findings, index_findings)
+    from .dashboard import connect_readiness_packet, dashboard_agent_packet, mlhd_freshness_payload
+
+    agent_packet = dashboard_agent_packet(inventory)
+    mlhd = mlhd_freshness_payload(inventory)
     return {
         "adapter": {
             "id": MCP_READ_PROJECTION_TARGET,
@@ -346,7 +352,14 @@ def mcp_read_projection_payload(
         "tools": list(MCP_TOOL_NAMES),
         "runtime": runtime,
         "rootSelection": root_selection,
-        "cachePosture": projection_cache_posture_payload(artifact_findings, index_findings),
+        "cachePosture": cache_posture,
+        "mlhd": mlhd,
+        "agentPacket": agent_packet,
+        "connectReadiness": connect_readiness_packet(
+            inventory,
+            cache_posture=cache_posture,
+            agent_packet=agent_packet,
+        ),
         "status": _result_for(findings),
         "sources": inventory.sources_for_report(),
         "sections": [
@@ -766,6 +779,43 @@ def _projection_findings(projection: Projection) -> list[Finding]:
             f"links={summary.link_record_count}; fan_in={summary.fan_in_record_count}",
         ),
     ]
+
+
+def _agent_action_packet_findings(inventory: Inventory) -> list[Finding]:
+    from .dashboard import connect_readiness_packet, mlhd_freshness_payload
+
+    readiness = connect_readiness_packet(inventory)
+    lifecycle = readiness.get("lifecycle", {}) if isinstance(readiness.get("lifecycle"), dict) else {}
+    writeback = readiness.get("writeback", {}) if isinstance(readiness.get("writeback"), dict) else {}
+    docs = readiness.get("docs", {}) if isinstance(readiness.get("docs"), dict) else {}
+    mlhd = mlhd_freshness_payload(inventory)
+    return [
+        Finding(
+            "info",
+            "adapter-agent-action-packet",
+            (
+                f"read_projection surfaces active_phase={_payload_value(lifecycle, 'active_phase')}; "
+                f"phase_status={_payload_value(lifecycle, 'phase_status')}; "
+                f"writeback_required={str(writeback.get('requiredWhenPlanStatusActive') is True).lower()}; "
+                f"docmap={_payload_value(docs, 'docmapStatus')}; docs_decision={_payload_value(docs, 'docsDecision')}; "
+                f"mlhd={mlhd['control_status']}; dirty_count={mlhd['dirty_count']}; next_safe={readiness.get('nextSafeCommand')}"
+            ),
+            "project/project-state.md" if inventory.state and inventory.state.exists else None,
+        ),
+        Finding(
+            "info",
+            "adapter-agent-action-boundary",
+            "MCP action packet fields are derived navigation hints only; they cannot approve lifecycle, cache truth, source mutation, VCS, release, or provider routing",
+        ),
+    ]
+
+
+def _payload_value(payload: object, key: str) -> str:
+    if isinstance(payload, dict):
+        value = payload.get(key)
+        if value is not None and value != "":
+            return str(value)
+    return "<none>"
 
 
 def _source_findings(projection: Projection) -> list[Finding]:
@@ -1267,6 +1317,9 @@ def _read_projection_tool_definition() -> dict[str, object]:
                 "runtime": {"type": "object"},
                 "rootSelection": {"type": "object"},
                 "cachePosture": {"type": "object"},
+                "mlhd": {"type": "object"},
+                "agentPacket": {"type": "object"},
+                "connectReadiness": {"type": "object"},
                 "status": {"type": "string"},
                 "sources": {"type": "array"},
                 "sections": {"type": "array"},
@@ -1280,6 +1333,9 @@ def _read_projection_tool_definition() -> dict[str, object]:
                 "runtime",
                 "rootSelection",
                 "cachePosture",
+                "mlhd",
+                "agentPacket",
+                "connectReadiness",
                 "status",
                 "sources",
                 "sections",

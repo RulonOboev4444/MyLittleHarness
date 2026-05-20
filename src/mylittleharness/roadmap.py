@@ -788,6 +788,7 @@ def roadmap_batch_slice_gate_findings(
     route: str,
     source: str,
     apply: bool = False,
+    block_apply: bool = False,
 ) -> list[Finding]:
     ids = tuple(_dedupe_nonempty(_normalized_item_id(item_id) for item_id in item_ids))
     if inventory.root_kind != "live_operating_root" or len(ids) <= 1:
@@ -807,18 +808,36 @@ def roadmap_batch_slice_gate_findings(
                 source,
             )
         ]
+    accepted_ids = _accepted_batch_item_ids(inventory, ids)
+    grouped_markers = _roadmap_grouped_slice_boundary_markers(inventory, ids)
+    should_block = apply and block_apply and len(accepted_ids) > 1 and not grouped_markers
+    severity = "error" if should_block else "warn"
+    verb = "blocked" if severity == "error" else f"{prefix}cover"
+    ids_for_message = accepted_ids if severity == "error" else ids
+    message = (
+        f"{verb} multiple roadmap items {list(ids_for_message)!r} through one {route} route without explicit "
+        "reviewed bundle or human-gate evidence; use --only-requested-item for one-slice plan work, "
+        "or record bundle_authorization/reviewed_bundle/human_gate_required before intentional batching"
+    )
+    if grouped_markers and severity != "error":
+        message += f"; grouped slice boundary marker(s) present: {', '.join(grouped_markers)}"
     return [
         Finding(
-            "warn",
+            severity,
             f"{route}-batch-slice-gate",
-            (
-                f"{prefix}cover multiple roadmap items {list(ids)!r} through one {route} route without explicit "
-                "reviewed bundle or human-gate evidence; use --only-requested-item for one-slice plan work, "
-                "or record bundle_authorization/reviewed_bundle/human_gate_required before intentional batching"
-            ),
+            message,
             source,
         )
     ]
+
+
+def _accepted_batch_item_ids(inventory: Inventory, item_ids: tuple[str, ...]) -> tuple[str, ...]:
+    accepted: list[str] = []
+    for item_id in item_ids:
+        fields = roadmap_item_fields(inventory, item_id)
+        if _normalized_status(fields.get("status")) == "accepted":
+            accepted.append(item_id)
+    return tuple(_dedupe_nonempty(accepted))
 
 
 def _roadmap_human_review_gate_findings_from_text(
@@ -1578,6 +1597,7 @@ def _roadmap_normalize_plan_from_text(
     parse_result = _parse_roadmap_items(text)
     if parse_result[1]:
         return None, parse_result[1]
+    items_start, _items_end, _items = parse_result[0]
 
     changed_fields: tuple[str, ...] = ()
     updated_text, reordered_item_ids = _normalize_physical_item_block_order(text)
@@ -1606,6 +1626,10 @@ def _roadmap_normalize_plan_from_text(
     if refreshed_text != updated_text:
         changed_fields = (*changed_fields, ROADMAP_CURRENT_POSTURE_FIELD)
         updated_text = refreshed_text
+
+    post_write_errors = _canonical_roadmap_post_write_errors(updated_text, items_start)
+    if post_write_errors:
+        return None, post_write_errors
 
     return (
         RoadmapPlan(
@@ -1778,6 +1802,10 @@ def _roadmap_plan_from_text(
     if refreshed_text != updated_text:
         changed_fields = (*changed_fields, ROADMAP_CURRENT_POSTURE_FIELD)
         updated_text = refreshed_text
+
+    post_write_errors = _canonical_roadmap_post_write_errors(updated_text, items_start)
+    if post_write_errors:
+        return None, post_write_errors
 
     return (
         RoadmapPlan(
@@ -1956,6 +1984,24 @@ def _parse_roadmap_items_for_sync(text: str) -> tuple[tuple[int, int, dict[str, 
     return legacy_result
 
 
+def _canonical_roadmap_post_write_errors(text: str, items_start: int) -> list[Finding]:
+    if items_start < 0:
+        return []
+    parse_result = _parse_roadmap_items(text)
+    if not parse_result[1]:
+        return []
+    return [
+        Finding(
+            finding.severity,
+            finding.code,
+            f"roadmap post-write validation failed: {finding.message}",
+            finding.source,
+            finding.line,
+        )
+        for finding in parse_result[1]
+    ]
+
+
 def _parse_legacy_roadmap_items(text: str) -> tuple[tuple[int, int, dict[str, RoadmapItem]], list[Finding]]:
     lines = text.splitlines(keepends=True)
     content_start = 0
@@ -2052,7 +2098,11 @@ def _refresh_archived_completed_history(text: str) -> tuple[str, tuple[str, ...]
     kept_lines = [line for index, line in enumerate(lines) if not any(start <= index < end for start, end in remove_ranges)]
     kept_lines, history_entries = _sync_compacted_history_entries(kept_lines, to_compact)
     if history_entries:
-        kept_lines = _with_archived_history_entries(kept_lines, history_entries, fallback_insert_at=items_start)
+        kept_lines = _with_archived_history_entries(
+            kept_lines,
+            history_entries,
+            fallback_insert_at=_items_section_end_index(kept_lines, fallback_insert_at=items_start),
+        )
     return "".join(kept_lines), compacted_ids
 
 
@@ -2182,6 +2232,13 @@ def _with_archived_history_entries(lines: list[str], entries: list[str], *, fall
         insertion.insert(0, "\n")
     insertion.append("\n")
     return [*lines[:end], *insertion, *lines[end:]]
+
+
+def _items_section_end_index(lines: list[str], *, fallback_insert_at: int) -> int:
+    bounds = _h2_section_bounds(lines, "Items")
+    if bounds is None:
+        return max(0, min(fallback_insert_at, len(lines)))
+    return bounds[1]
 
 
 def _h2_section_bounds(lines: list[str], title: str) -> tuple[int, int] | None:
@@ -3719,6 +3776,18 @@ def _roadmap_batch_authorization_markers(inventory: Inventory, item_ids: tuple[s
         high_blast_marker = _roadmap_high_blast_gate_marker(fields)
         if high_blast_marker:
             markers.append(f"{item_id}:{high_blast_marker}")
+    return tuple(_dedupe_nonempty(markers))
+
+
+def _roadmap_grouped_slice_boundary_markers(inventory: Inventory, item_ids: tuple[str, ...]) -> tuple[str, ...]:
+    markers: list[str] = []
+    for item_id in item_ids:
+        fields = roadmap_item_fields(inventory, item_id)
+        if not fields:
+            continue
+        boundary = str(fields.get("slice_closeout_boundary") or "").strip().casefold()
+        if any(marker in boundary for marker in ("grouped", "bundle", "batch")):
+            markers.append(f"{item_id}:slice_closeout_boundary")
     return tuple(_dedupe_nonempty(markers))
 
 

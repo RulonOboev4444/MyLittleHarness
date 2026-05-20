@@ -83,6 +83,7 @@ class PackageMetadataTests(unittest.TestCase):
 
     def test_authority_context_tiers_and_approval_packet_policy_are_documented(self) -> None:
         authority = (ROOT / "docs/specs/authority-and-memory.md").read_text(encoding="utf-8")
+        context_budget = (ROOT / "docs/specs/context-and-ceremony-budget.md").read_text(encoding="utf-8")
         metadata = (ROOT / "docs/specs/metadata-routing-and-evidence.md").read_text(encoding="utf-8")
         artifact_model = (ROOT / "project/specs/workflow/workflow-artifact-model-spec.md").read_text(
             encoding="utf-8"
@@ -97,8 +98,31 @@ class PackageMetadataTests(unittest.TestCase):
             "read when the current question needs their lane",
             "rebuildable navigation caches",
             "cold source-bound evidence recovered by pointer",
+            "Source-Bound Memory Capsules",
+            "source-bound memory capsule",
+            "stale_or_unknown",
+            "failed-attempt budget",
+            "next safe command",
+            "source refs",
+            "not a hidden memory runtime",
+            "Provider compaction items",
         ):
             self.assertIn(expected, authority)
+
+        for expected in (
+            "Long-session compaction should produce a source-bound memory capsule",
+            "failed-attempt budget",
+            "next safe command",
+            "source refs",
+            "stale_or_unknown",
+            "provider compaction, prompt caching, retrieval, SQLite/projection indexes",
+            "source-bound memory capsules include source refs, stale_or_unknown markers, failed-attempt budget, next safe command",
+            "CLI command discovery follows the same progressive-disclosure budget",
+            "Top-level `mylittleharness --help` should foreground only the primary operator commands",
+            "internal suppression sentinels such as `==SUPPRESS==` must never render as top-level help rows",
+            "top-level CLI help hides advanced command rows without suppression sentinels",
+        ):
+            self.assertIn(expected, context_budget)
 
         for expected in (
             "Approval-packet gate classes",
@@ -458,6 +482,55 @@ class PackageMetadataTests(unittest.TestCase):
         self.assertIn("Coordination substrate", layer_model)
         self.assertIn("claims, runs, handoffs, session work, worktree coordination, and route receipts", layer_model)
         self.assertIn("dashboard, daemon, hook, dispatcher, MCP, or A2A adapter", layer_model)
+
+    def test_mlhd_daemon_boundary_is_contract_only_before_control_plane(self) -> None:
+        generated_state = (ROOT / "docs/specs/generated-state-and-projections.md").read_text(encoding="utf-8")
+        sqlite_spec = (ROOT / "docs/specs/generated-state-search-and-sqlite.md").read_text(encoding="utf-8")
+        adapter = (ROOT / "docs/specs/adapter-boundary.md").read_text(encoding="utf-8")
+        cli_spec = (ROOT / "docs/specs/attach-repair-status-cli.md").read_text(encoding="utf-8")
+
+        for expected in (
+            "mlhd.projection_pulse",
+            "projection --warm-cache --target all",
+            "cannot become cache freshness or lifecycle authority",
+            "mlhd daemon contract is optional and disabled by default",
+            "runtime storage stays under `.mylittleharness/runtime/mlhd/`",
+            "The implemented `mlhd` control plane exposes `status`, `doctor`, `start`, `stop`, `run-once`, `install`, and `uninstall`",
+            "`mlhd install --apply` writes a deterministic root-local `autostart.json` manifest",
+            "No daemon process, listener, scheduler, filesystem watcher, background projection refresh loop, OS/user autostart entry, or supervision process is created by attach, repair, dashboard, check, hooks, MCP, projection, or `mlhd` control-plane commands",
+            "Daemon process autostart or supervision beyond the root-local manifest requires a later reviewed dry-run/apply rail",
+            "No hidden control plane",
+        ):
+            self.assertIn(expected, generated_state)
+        for expected in (
+            "must not auto-run it from a read-only adapter",
+            "preserves old-good projection artifacts and SQLite indexes when a publish fails",
+            "No hidden control plane, scheduler, queue, or daemon.",
+        ):
+            self.assertIn(expected, sqlite_spec)
+        for expected in (
+            "## Implemented mlhd Runtime Cockpit Slice",
+            "`mlhd` is represented as optional runtime cockpit posture under `.mylittleharness/runtime/mlhd`",
+            "The mlhd daemon contract is optional and disabled by default",
+            "runtime storage stays under `.mylittleharness/runtime/mlhd/`",
+            "the autostart manifest is readiness evidence, not worker supervision",
+            "OS startup registration, or lifecycle approval",
+            "If a later slice introduces a daemon process, OS/user autostart entry, supervision process, or serve rail beyond the root-local manifest",
+            "Any future serve rail must be explicit, local-only by default",
+            "Durable mutations stay delegated to MLH CLI rails with dry-run/apply semantics",
+            "cannot approve repair, closeout, archive, roadmap status, staging, commit, push, rollback, release, dispatcher work, or daemon truth",
+        ):
+            self.assertIn(expected, adapter)
+        for expected in (
+            "No init/attach/repair mutation of product fixtures, fallback roots, active plans, archives, user config, PATH, hooks, adapters, MCP, GitHub, generated projections, caches, logs, reports, local databases, package archives, or workflow execution surfaces.",
+            "No background daemon, scheduler, queue, or dashboard.",
+            "`mlhd status` is the read-only local control-plane inspection surface",
+            "`mlhd start`, `mlhd stop`, `mlhd run-once`, `mlhd install`, and `mlhd uninstall` require exactly one of `--dry-run` or `--apply`",
+            "No daemon process, listener, scheduler, or OS/user autostart entry is created by attach, repair, dashboard, check, hooks, MCP, projection, or mlhd commands",
+            "The implemented `mlhd install/uninstall` rail manages only a root-local `.mylittleharness/runtime/mlhd/autostart.json` manifest",
+            "daemon process autostart or supervision still requires a later reviewed dry-run/apply rail",
+        ):
+            self.assertIn(expected, cli_spec)
 
     def test_route_manifest_protocol_shape_is_package_stable(self) -> None:
         manifest = {row["route_id"]: row for row in route_manifest()}

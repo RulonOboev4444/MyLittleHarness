@@ -34,6 +34,7 @@ from .checks import (
     check_drift_findings,
     context_budget_findings,
     doctor_findings,
+    external_orchestrator_shell_preflight_findings,
     flatten_sections,
     intelligence_sections,
     intelligence_route_sections,
@@ -67,6 +68,7 @@ from .command_discovery import (
     rails_not_cognition_boundary_finding,
 )
 from .dashboard import dashboard_payload, dashboard_sections
+from .daemon import mlhd_control_payload, mlhd_control_sections
 from .evidence import (
     agent_run_record_apply_findings,
     agent_run_record_dry_run_findings,
@@ -127,14 +129,13 @@ from .planning import (
     resolve_plan_request_from_roadmap,
 )
 from .projection_artifacts import (
-    ARTIFACT_DIRTY_MARKER_NAME,
     ARTIFACT_DIR_REL,
     build_projection_artifacts,
     delete_projection_artifacts,
     inspect_projection_artifacts,
     mark_projection_cache_dirty,
-    projection_cache_dirty_quiet_period_pending,
     rebuild_projection_artifacts,
+    warm_projection_artifacts,
 )
 from .projection_index import (
     build_projection_index,
@@ -177,6 +178,7 @@ COMMANDS = (
     "suggest",
     "manifest",
     "dashboard",
+    "mlhd",
     "repair",
     "detach",
     "status",
@@ -390,6 +392,35 @@ def main(argv: list[str] | None = None) -> int:
         else:
             emit_text(render_sectioned_report("dashboard --inspect", inventory.root, result, inventory.sources_for_report(), sections, suggestions))
         return 1 if any(finding.severity == "error" for finding in findings) else 0
+    if command == "mlhd":
+        action = str(getattr(args, "mlhd_action", "") or "status")
+        dry_run = bool(getattr(args, "dry_run", False))
+        apply = bool(getattr(args, "apply", False))
+        quiet_period_seconds = float(getattr(args, "quiet_period_seconds", 1.0))
+        sections = mlhd_control_sections(
+            inventory,
+            action,
+            dry_run=dry_run,
+            apply=apply,
+            quiet_period_seconds=quiet_period_seconds,
+        )
+        findings = flatten_sections(sections)
+        result = _result_for(findings)
+        suggestions = _suggestions(command, findings)
+        if getattr(args, "json", False):
+            payload = mlhd_control_payload(
+                inventory,
+                action,
+                dry_run=dry_run,
+                apply=apply,
+                quiet_period_seconds=quiet_period_seconds,
+            )
+            payload["result"] = {"status": result}
+            payload["findings"] = [finding.to_dict() for finding in findings]
+            emit_text(json.dumps(payload, sort_keys=True, indent=2, ensure_ascii=True))
+        else:
+            emit_text(render_sectioned_report(f"mlhd {action}", inventory.root, result, inventory.sources_for_report(), sections, suggestions))
+        return 1 if any(finding.severity == "error" for finding in findings) else 0
     if command == "check":
         report_name, sections = _check_report(args, inventory)
         findings = flatten_sections(sections)
@@ -442,6 +473,12 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.orchestrator_workspace:
             sections = orchestrator_workspace_preflight_sections(inventory, args.orchestrator_workspace, args.product_root or "")
+            sections.append(
+                (
+                    "External Orchestrator Capability",
+                    external_orchestrator_shell_preflight_findings(inventory, args.orchestrator_workspace, args.product_root or ""),
+                )
+            )
             report_name = "preflight --orchestrator-workspace"
         else:
             sections = preflight_sections(inventory)
@@ -946,7 +983,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.warm_cache:
             findings = _projection_target_findings(
                 args.target,
-                lambda target_inventory: _warm_projection_artifacts(target_inventory, quiet_period_seconds=args.quiet_period_seconds),
+                lambda target_inventory: warm_projection_artifacts(target_inventory, quiet_period_seconds=args.quiet_period_seconds),
                 lambda target_inventory: warm_projection_index(target_inventory, quiet_period_seconds=args.quiet_period_seconds),
                 inventory,
             )
@@ -1873,96 +1910,6 @@ def _projection_target_findings(target: str, artifacts_fn, index_fn, inventory: 
     return artifacts_fn(inventory) + index_fn(inventory)
 
 
-def _warm_projection_artifacts(inventory: object, quiet_period_seconds: float = 0.0) -> list[Finding]:
-    try:
-        inspect_findings = inspect_projection_artifacts(inventory)
-    except Exception as exc:
-        return [
-            Finding(
-                "warn",
-                "projection-artifact-warm-cache-degraded",
-                f"optional projection artifact warm-cache watcher inspect failed; direct files remain authoritative: {exc}",
-                ARTIFACT_DIR_REL,
-            )
-        ]
-
-    blocking = [
-        finding
-        for finding in inspect_findings
-        if finding.severity in {"warn", "error"} or finding.code == "projection-artifact-missing"
-    ]
-    if not blocking:
-        return [
-            Finding(
-                "info",
-                "projection-artifact-warm-cache-current",
-                "optional projection artifact warm-cache watcher tick left current generated artifacts unchanged",
-                ARTIFACT_DIR_REL,
-            )
-        ]
-
-    reason = blocking[0]
-    if reason.code == "projection-artifact-dirty":
-        pending, quiet_until_utc = projection_cache_dirty_quiet_period_pending(
-            inventory.root,
-            (ARTIFACT_DIRTY_MARKER_NAME,),
-            quiet_period_seconds,
-        )
-        if pending:
-            return [
-                Finding(
-                    "info",
-                    "projection-artifact-warm-cache-deferred",
-                    (
-                        "optional projection artifact warm-cache daemon pulse deferred until dirty markers are quiet; "
-                        f"quiet_period_seconds={quiet_period_seconds:g}; quiet_until_utc={quiet_until_utc}; "
-                        "repo-visible source files remain authoritative"
-                    ),
-                    reason.source or ARTIFACT_DIR_REL,
-                    reason.line,
-                )
-            ]
-    try:
-        refresh_findings = rebuild_projection_artifacts(inventory)
-    except Exception as exc:
-        return [
-            Finding(
-                "warn",
-                "projection-artifact-warm-cache-degraded",
-                (
-                    f"optional projection artifact warm-cache watcher refresh failed after {reason.code}; "
-                    f"direct files remain authoritative: {exc}"
-                ),
-                reason.source or ARTIFACT_DIR_REL,
-                reason.line,
-            )
-        ]
-
-    findings = [
-        Finding(
-            "info",
-            "projection-artifact-warm-cache",
-            (
-                f"optional projection artifact warm-cache watcher refreshed generated artifacts because {reason.code}; "
-                f"watcher writes only {ARTIFACT_DIR_REL} and cannot affect lifecycle authority"
-            ),
-            reason.source or ARTIFACT_DIR_REL,
-            reason.line,
-        ),
-        *refresh_findings,
-    ]
-    if any(finding.severity in {"warn", "error"} for finding in refresh_findings):
-        findings.append(
-            Finding(
-                "info",
-                "projection-artifact-warm-cache-degraded",
-                "optional projection artifact warm-cache watcher degraded; direct files remain authoritative",
-                ARTIFACT_DIR_REL,
-            )
-        )
-    return findings
-
-
 def _projection_inspect_suggestions(findings: list[Finding]) -> list[str]:
     if any(finding.severity == "error" for finding in findings):
         return ["projection inspect was refused before reading generated cache posture; no files were written."]
@@ -2162,6 +2109,7 @@ def _repair_apply_exit_code(findings) -> int:
         "stable-spec-create-refused",
         "state-frontmatter-refused",
         "lifecycle-frontmatter-refused",
+        "spec-posture-frontmatter-refused",
     }
     if any(finding.severity == "error" and finding.code in invalid_codes for finding in findings):
         return 2
@@ -2427,6 +2375,14 @@ def _suggestions(command: str, findings) -> list[str]:
         if any(finding.severity == "warn" for finding in findings):
             return ["Use adapter findings as optional read/projection input; repo files and the generic CLI remain authoritative."]
         return ["adapter inspection completed as a terminal-only read-only report; it did not install MCP tooling, write adapter state, or approve lifecycle decisions."]
+    if command == "mlhd":
+        if any(finding.severity == "error" for finding in findings):
+            return ["mlhd control-plane command was refused before writing runtime state."]
+        if any("dry-run" in str(finding.code or "") for finding in findings):
+            return ["mlhd dry-run reported disposable runtime targets without writing files."]
+        if any(finding.code.endswith("-apply") for finding in findings):
+            return ["mlhd apply wrote disposable runtime evidence and optional generated projection cache only; lifecycle, source, archive, Git, provider, and release authority remain unchanged."]
+        return ["mlhd status inspected disposable runtime state without writing files."]
     if command == "preflight":
         if any(finding.severity in {"warn", "error"} for finding in findings):
             return ["Use preflight findings as optional warning inputs; source files, observed verification, and operator decisions remain authority."]
@@ -2468,6 +2424,7 @@ def _suggestions(command: str, findings) -> list[str]:
             "stable-spec-create-refused",
             "state-frontmatter-refused",
             "lifecycle-frontmatter-refused",
+            "spec-posture-frontmatter-refused",
         }
         for finding in errors
     ):
@@ -2484,6 +2441,8 @@ def _suggestions(command: str, findings) -> list[str]:
         return ["repair apply created a repair snapshot, prepended project-state frontmatter, and stopped before other repair classes."]
     if any(finding.code == "lifecycle-frontmatter-updated" for finding in findings):
         return ["repair apply created a repair snapshot, prepended lifecycle markdown frontmatter, and stopped before other repair classes."]
+    if any(finding.code == "spec-posture-frontmatter-updated" for finding in findings):
+        return ["repair apply created a repair snapshot, added missing spec posture frontmatter, and stopped before other repair classes."]
     if any(finding.code == "agents-contract-create-created" for finding in findings):
         return ["repair apply created the selected AGENTS.md operator contract without creating a repair snapshot and ran post-repair validation."]
     if any(finding.code == "docmap-create-created" for finding in findings):
@@ -2503,6 +2462,9 @@ def _suggestions(command: str, findings) -> list[str]:
             "lifecycle-frontmatter-plan",
             "lifecycle-frontmatter-plan-refused",
             "lifecycle-frontmatter-plan-skipped",
+            "spec-posture-frontmatter-plan",
+            "spec-posture-frontmatter-plan-refused",
+            "spec-posture-frontmatter-plan-skipped",
             "snapshot-plan",
             "snapshot-plan-refused",
             "snapshot-plan-skipped",

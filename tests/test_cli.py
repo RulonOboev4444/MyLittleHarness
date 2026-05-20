@@ -3034,6 +3034,8 @@ class CliTests(unittest.TestCase):
             self.assertIn("attach-generated-projection-build", rendered)
             self.assertIn("projection-artifact-build", rendered)
             self.assertIn("projection-index-build", rendered)
+            self.assertIn("attach-connect-readiness-action-packet", rendered)
+            self.assertIn("cache artifacts=current", rendered)
 
             intelligence_output = io.StringIO()
             with redirect_stdout(intelligence_output):
@@ -3389,6 +3391,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("Preview harness detach", rendered)
         self.assertIn("Compatibility and advanced diagnostics", rendered)
         self.assertIn("{init,check,repair,detach,...}", rendered)
+        self.assertNotIn("==SUPPRESS==", rendered)
         self.assertNotIn("tasks", rendered)
         self.assertNotIn("bootstrap", rendered)
         self.assertNotIn("adapter", rendered)
@@ -3409,6 +3412,18 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("mirror", rendered)
         self.assertNotIn("preflight", rendered)
         self.assertNotIn("attach", rendered)
+        for command in (
+            "evidence",
+            "claim",
+            "handoff",
+            "approval-packet",
+            "review-token",
+            "reconcile",
+            "research-import",
+            "research-distill",
+            "research-compare",
+        ):
+            self.assertNotIn(command, rendered)
         self.assertNotIn("Inspect operator task groups", rendered)
         self.assertNotIn("Inspect bootstrap", rendered)
 
@@ -3432,6 +3447,15 @@ class CliTests(unittest.TestCase):
             (["meta-feedback", "--help"], "Advanced mutating command: collect MLH-Fix-Candidate meta-feedback"),
             (["adapter", "--help"], "Advanced diagnostic: inspect or serve optional adapter"),
             (["attach", "--help"], "Compatibility command: preview or apply workflow scaffold attachment"),
+            (["evidence", "--help"], "Advanced evidence helper: report closeout evidence"),
+            (["claim", "--help"], "Advanced coordination helper: create, release, or inspect repo-visible"),
+            (["handoff", "--help"], "Advanced coordination helper: create repo-visible handoff packets"),
+            (["approval-packet", "--help"], "Advanced coordination helper: create repo-visible human-gate approval"),
+            (["review-token", "--help"], "Advanced diagnostic: compute or verify a deterministic fan-in review"),
+            (["reconcile", "--help"], "Advanced diagnostic: report route/source/evidence drift"),
+            (["research-import", "--help"], "Advanced mutating command: import external research output"),
+            (["research-distill", "--help"], "Advanced mutating command: distill one project/research artifact"),
+            (["research-compare", "--help"], "Advanced mutating command: compare imported/distilled research"),
         )
         for command, expected in cases:
             with self.subTest(command=command):
@@ -4883,6 +4907,8 @@ class CliTests(unittest.TestCase):
             self.assertIn("check-multi-agent-security-hooks", rendered)
             self.assertIn("check-multi-agent-security-dashboard", rendered)
             self.assertIn("check-multi-agent-security-runtime-cache", rendered)
+            self.assertIn("check-mlhd-optional-runtime", rendered)
+            self.assertIn("check-mlhd-projection-pulse", rendered)
             self.assertIn("check-multi-agent-security-dispatcher-gate", rendered)
             self.assertIn("check-multi-agent-security-adapter-boundary", rendered)
             self.assertIn("check-multi-agent-security-prompt-injection", rendered)
@@ -5006,6 +5032,8 @@ class CliTests(unittest.TestCase):
             self.assertIn("dashboard-mlhd-disposable-cache-boundary", rendered)
             self.assertIn("dashboard-mlhd-durable-mutation-boundary", rendered)
             self.assertIn("dashboard-mlhd-localhost-defaults", rendered)
+            self.assertIn("dashboard-mlhd-control-freshness", rendered)
+            self.assertIn("dashboard-mlhd-refresh-freshness", rendered)
             self.assertIn("starts no listener", rendered)
             self.assertIn("repo-visible files remain authority", rendered)
 
@@ -5017,6 +5045,9 @@ class CliTests(unittest.TestCase):
             payload = json.loads(json_output.getvalue())
             self.assertEqual("mylittleharness.mlhd-runtime.v1", payload["mlhd"]["schema"])
             self.assertEqual("present", payload["mlhd"]["runtime_cache_status"])
+            self.assertEqual("idle", payload["mlhd"]["control_status"])
+            self.assertEqual("absent", payload["mlhd"]["pid_status"])
+            self.assertEqual(0, payload["mlhd"]["dirty_count"])
             self.assertEqual(2, payload["mlhd"]["cache_file_count"])
             self.assertFalse(payload["mlhd"]["network_listener_started"])
             self.assertEqual("127.0.0.1", payload["mlhd"]["default_bind_host"])
@@ -5046,8 +5077,334 @@ class CliTests(unittest.TestCase):
             )
             absent_payload = json.loads(absent_output.getvalue())
             self.assertEqual("absent", absent_payload["mlhd"]["runtime_cache_status"])
+            self.assertEqual("absent", absent_payload["mlhd"]["control_status"])
             self.assertEqual(0, absent_payload["mlhd"]["cache_file_count"])
             self.assertTrue(absent_payload["mlhd"]["disposable_cache"])
+
+    def test_mlhd_status_and_dry_run_are_read_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            before = snapshot_tree_bytes(root)
+
+            status_output = io.StringIO()
+            with redirect_stdout(status_output):
+                self.assertEqual(main(["--root", str(root), "mlhd", "status"]), 0)
+
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            rendered = status_output.getvalue()
+            self.assertIn("mlhd Control Plane", rendered)
+            self.assertIn("mlhd-status", rendered)
+            self.assertIn("control_status=absent", rendered)
+            self.assertIn("mlhd status inspected disposable runtime state without writing files", rendered)
+
+            dry_run_output = io.StringIO()
+            with redirect_stdout(dry_run_output):
+                self.assertEqual(main(["--root", str(root), "mlhd", "start", "--dry-run"]), 0)
+
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            dry_run_rendered = dry_run_output.getvalue()
+            self.assertIn("mlhd-start-dry-run", dry_run_rendered)
+            self.assertIn(".mylittleharness/runtime/mlhd/pid.json", dry_run_rendered)
+            self.assertIn("no files were written", dry_run_rendered)
+
+    def test_mlhd_doctor_handles_absent_runtime_read_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            before = snapshot_tree_bytes(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(["--root", str(root), "mlhd", "doctor"]), 0)
+
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            rendered = output.getvalue()
+            self.assertIn("mlhd-doctor", rendered)
+            self.assertIn("runtime_cache_status=absent", rendered)
+            self.assertIn("autostart_status=absent", rendered)
+            self.assertIn("daemon fallback is clean when runtime cache is absent", rendered)
+            self.assertIn("doctor is read-only", rendered)
+
+            json_output = io.StringIO()
+            with redirect_stdout(json_output):
+                self.assertEqual(main(["--root", str(root), "mlhd", "doctor", "--json"]), 0)
+
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            payload = json.loads(json_output.getvalue())
+            self.assertEqual("doctor", payload["action"])
+            self.assertEqual("absent", payload["runtime_cache_status"])
+            self.assertEqual("absent", payload["control_status"])
+            self.assertEqual("absent", payload["autostart_status"])
+            self.assertFalse(payload["autostart_installed"])
+            self.assertFalse(payload["network_listener_started"])
+            self.assertFalse(payload["approves_lifecycle"])
+
+    def test_mlhd_install_uninstall_autostart_manifest_is_idempotent_and_root_move_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp) / "source")
+            before = snapshot_tree_bytes(root)
+
+            dry_run_output = io.StringIO()
+            with redirect_stdout(dry_run_output):
+                self.assertEqual(main(["--root", str(root), "mlhd", "install", "--dry-run"]), 0)
+
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            dry_run_rendered = dry_run_output.getvalue()
+            self.assertIn("mlhd-install-dry-run", dry_run_rendered)
+            self.assertIn(".mylittleharness/runtime/mlhd/autostart.json", dry_run_rendered)
+            self.assertIn("not an absolute root path", dry_run_rendered)
+
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                self.assertEqual(main(["--root", str(root), "mlhd", "install", "--apply"]), 0)
+
+            self.assertEqual(
+                {
+                    rel_path: content
+                    for rel_path, content in before.items()
+                    if not (rel_path == ".mylittleharness" or rel_path.startswith(".mylittleharness/"))
+                },
+                {
+                    rel_path: content
+                    for rel_path, content in snapshot_tree_bytes(root).items()
+                    if not (rel_path == ".mylittleharness" or rel_path.startswith(".mylittleharness/"))
+                },
+            )
+            self.assertIn("mlhd-install-apply", apply_output.getvalue())
+            runtime_dir = root / ".mylittleharness/runtime/mlhd"
+            manifest_path = runtime_dir / "autostart.json"
+            self.assertTrue(manifest_path.is_file())
+            manifest_text = manifest_path.read_text(encoding="utf-8")
+            manifest = json.loads(manifest_text)
+            self.assertEqual("mylittleharness.mlhd-autostart.v1", manifest["schema"])
+            self.assertEqual("<root>", manifest["root"])
+            self.assertIn("<root>", manifest["command_template"])
+            self.assertNotIn(str(root), manifest_text)
+            self.assertFalse(manifest["os_autostart_entry_created"])
+            self.assertFalse(manifest["network_listener_started"])
+            self.assertFalse(manifest["approves_lifecycle"])
+
+            after_install = snapshot_tree_bytes(root)
+            repeat_output = io.StringIO()
+            with redirect_stdout(repeat_output):
+                self.assertEqual(main(["--root", str(root), "mlhd", "install", "--apply"]), 0)
+
+            self.assertEqual(after_install, snapshot_tree_bytes(root))
+            self.assertIn("mlhd-install-apply", repeat_output.getvalue())
+
+            status_json = io.StringIO()
+            with redirect_stdout(status_json):
+                self.assertEqual(main(["--root", str(root), "mlhd", "status", "--json"]), 0)
+
+            payload = json.loads(status_json.getvalue())
+            self.assertTrue(payload["autostart_installed"])
+            self.assertEqual("installed", payload["autostart_status"])
+            self.assertEqual(manifest, payload["autostart_manifest"])
+
+            doctor_before = snapshot_tree_bytes(root)
+            doctor_output = io.StringIO()
+            with redirect_stdout(doctor_output):
+                self.assertEqual(main(["--root", str(root), "mlhd", "doctor"]), 0)
+
+            self.assertEqual(doctor_before, snapshot_tree_bytes(root))
+            self.assertIn("autostart_status=installed", doctor_output.getvalue())
+            self.assertIn("moving the repository does not require rewriting the manifest", doctor_output.getvalue())
+
+            moved = Path(tmp) / "moved"
+            shutil.copytree(root, moved)
+            moved_output = io.StringIO()
+            with redirect_stdout(moved_output):
+                self.assertEqual(main(["--root", str(moved), "mlhd", "doctor"]), 0)
+
+            self.assertIn("autostart_status=installed", moved_output.getvalue())
+            self.assertNotIn(str(root), (moved / ".mylittleharness/runtime/mlhd/autostart.json").read_text(encoding="utf-8"))
+
+            before_uninstall = snapshot_tree_bytes(root)
+            uninstall_dry_run_output = io.StringIO()
+            with redirect_stdout(uninstall_dry_run_output):
+                self.assertEqual(main(["--root", str(root), "mlhd", "uninstall", "--dry-run"]), 0)
+
+            self.assertEqual(before_uninstall, snapshot_tree_bytes(root))
+            self.assertIn("mlhd-uninstall-dry-run", uninstall_dry_run_output.getvalue())
+
+            uninstall_output = io.StringIO()
+            with redirect_stdout(uninstall_output):
+                self.assertEqual(main(["--root", str(root), "mlhd", "uninstall", "--apply"]), 0)
+
+            self.assertFalse(manifest_path.exists())
+            self.assertIn("mlhd-uninstall-apply", uninstall_output.getvalue())
+            after_uninstall = snapshot_tree_bytes(root)
+            repeat_uninstall_output = io.StringIO()
+            with redirect_stdout(repeat_uninstall_output):
+                self.assertEqual(main(["--root", str(root), "mlhd", "uninstall", "--apply"]), 0)
+
+            self.assertEqual(after_uninstall, snapshot_tree_bytes(root))
+            self.assertIn("was_installed=false", repeat_uninstall_output.getvalue())
+
+            final_status_json = io.StringIO()
+            with redirect_stdout(final_status_json):
+                self.assertEqual(main(["--root", str(root), "mlhd", "status", "--json"]), 0)
+
+            final_payload = json.loads(final_status_json.getvalue())
+            self.assertFalse(final_payload["autostart_installed"])
+            self.assertEqual("absent", final_payload["autostart_status"])
+
+    def test_mlhd_start_stop_and_run_once_apply_write_runtime_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            before = snapshot_tree_bytes(root)
+
+            start_output = io.StringIO()
+            with redirect_stdout(start_output):
+                self.assertEqual(main(["--root", str(root), "mlhd", "start", "--apply"]), 0)
+
+            after_start = snapshot_tree_bytes(root)
+            self.assertEqual(
+                {
+                    rel_path: content
+                    for rel_path, content in before.items()
+                    if not (rel_path == ".mylittleharness" or rel_path.startswith(".mylittleharness/"))
+                },
+                {
+                    rel_path: content
+                    for rel_path, content in after_start.items()
+                    if not (rel_path == ".mylittleharness" or rel_path.startswith(".mylittleharness/"))
+                },
+            )
+            rendered = start_output.getvalue()
+            self.assertIn("mlhd-start-apply", rendered)
+            self.assertIn("pid, lock, heartbeat, state, and event log files", rendered)
+
+            runtime_dir = root / ".mylittleharness/runtime/mlhd"
+            self.assertTrue((runtime_dir / "pid.json").is_file())
+            self.assertTrue((runtime_dir / "lock.json").is_file())
+            self.assertTrue((runtime_dir / "heartbeat.json").is_file())
+            self.assertTrue((runtime_dir / "state.json").is_file())
+            self.assertTrue((runtime_dir / "events.jsonl").is_file())
+
+            status_json = io.StringIO()
+            with redirect_stdout(status_json):
+                self.assertEqual(main(["--root", str(root), "mlhd", "status", "--json"]), 0)
+
+            payload = json.loads(status_json.getvalue())
+            self.assertEqual("mylittleharness.mlhd-control-plane.v1", payload["schema"])
+            self.assertEqual(".mylittleharness/runtime/mlhd", payload["runtime_dir"])
+            self.assertIn(payload["control_status"], {"running", "stale"})
+            self.assertFalse(payload["network_listener_started"])
+            self.assertFalse(payload["autostart_installed"])
+            self.assertFalse(payload["filesystem_watcher_started"])
+            self.assertFalse(payload["approves_lifecycle"])
+
+            stop_output = io.StringIO()
+            with redirect_stdout(stop_output):
+                self.assertEqual(main(["--root", str(root), "mlhd", "stop", "--apply"]), 0)
+
+            self.assertFalse((runtime_dir / "pid.json").exists())
+            self.assertFalse((runtime_dir / "lock.json").exists())
+            self.assertIn("mlhd-stop-apply", stop_output.getvalue())
+            state_payload = json.loads((runtime_dir / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual("stopped", state_payload["status"])
+
+            run_once_output = io.StringIO()
+            with redirect_stdout(run_once_output):
+                self.assertEqual(main(["--root", str(root), "mlhd", "run-once", "--apply"]), 0)
+
+            self.assertTrue((runtime_dir / "last-run-once.json").is_file())
+            self.assertIn("mlhd-run-once-apply", run_once_output.getvalue())
+            run_once_payload = json.loads((runtime_dir / "last-run-once.json").read_text(encoding="utf-8"))
+            self.assertEqual("run-once", run_once_payload["last_action"])
+
+    def test_mlhd_run_once_warms_dirty_projection_cache_after_quiet_period(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=False)
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--root", str(root), "projection", "--build", "--target", "all"]), 0)
+
+            readme = root / "README.md"
+            readme.write_text(readme.read_text(encoding="utf-8") + "\nmlhd autorefresh probe\n", encoding="utf-8")
+            mark_projection_cache_dirty(load_inventory(root), ["README.md"], "test")
+            before_dry_run = snapshot_tree_bytes(root)
+
+            dry_run_output = io.StringIO()
+            with redirect_stdout(dry_run_output):
+                self.assertEqual(
+                    main(["--root", str(root), "mlhd", "run-once", "--dry-run", "--quiet-period-seconds", "3600"]),
+                    0,
+                )
+
+            self.assertEqual(before_dry_run, snapshot_tree_bytes(root))
+            dry_run_rendered = dry_run_output.getvalue()
+            self.assertIn("mlhd-projection-autorefresh-preview", dry_run_rendered)
+            self.assertIn("would defer projection warm-cache until dirty markers are quiet", dry_run_rendered)
+
+            before_authority = {
+                rel_path: content
+                for rel_path, content in snapshot_tree_bytes(root).items()
+                if rel_path != ".mylittleharness" and not rel_path.startswith(".mylittleharness/")
+            }
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                self.assertEqual(
+                    main(["--root", str(root), "mlhd", "run-once", "--apply", "--quiet-period-seconds", "0"]),
+                    0,
+                )
+
+            after_authority = {
+                rel_path: content
+                for rel_path, content in snapshot_tree_bytes(root).items()
+                if rel_path != ".mylittleharness" and not rel_path.startswith(".mylittleharness/")
+            }
+            self.assertEqual(before_authority, after_authority)
+            self.assertFalse((root / ARTIFACT_DIR_REL / ARTIFACT_DIRTY_MARKER_NAME).exists())
+            self.assertFalse((root / ARTIFACT_DIR_REL / INDEX_DIRTY_MARKER_NAME).exists())
+            runtime_dir = root / ".mylittleharness/runtime/mlhd"
+            refresh_payload = json.loads((runtime_dir / "projection-refresh.json").read_text(encoding="utf-8"))
+            self.assertEqual("refreshed", refresh_payload["status"])
+            self.assertTrue(refresh_payload["last_successful_refresh_utc"])
+
+            rendered = apply_output.getvalue()
+            self.assertIn("mlhd-projection-autorefresh-refreshed", rendered)
+            self.assertIn("projection-artifact-warm-cache", rendered)
+            self.assertIn("projection-index-warm-cache", rendered)
+            self.assertIn("generated cache only", rendered)
+            self.assertIn("lifecycle, roadmap, source, archive, Git, provider, and release authority remain unchanged", rendered)
+
+            status_json = io.StringIO()
+            with redirect_stdout(status_json):
+                self.assertEqual(main(["--root", str(root), "mlhd", "status", "--json"]), 0)
+            payload = json.loads(status_json.getvalue())
+            self.assertEqual("refreshed", payload["projection_pulse"]["last_refresh_status"])
+            self.assertFalse(payload["projection_pulse"]["dirty"])
+
+    def test_mlhd_start_apply_recovers_stale_pid_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            runtime_dir = root / ".mylittleharness/runtime/mlhd"
+            runtime_dir.mkdir(parents=True)
+            (runtime_dir / "pid.json").write_text('{"pid": 999999999, "schema": "test"}\n', encoding="utf-8")
+            (runtime_dir / "lock.json").write_text('{"pid": 999999999, "schema": "test"}\n', encoding="utf-8")
+            before = snapshot_tree_bytes(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(["--root", str(root), "mlhd", "start", "--apply"]), 0)
+
+            after = snapshot_tree_bytes(root)
+            self.assertEqual(
+                {
+                    rel_path: content
+                    for rel_path, content in before.items()
+                    if not (rel_path == ".mylittleharness" or rel_path.startswith(".mylittleharness/"))
+                },
+                {
+                    rel_path: content
+                    for rel_path, content in after.items()
+                    if not (rel_path == ".mylittleharness" or rel_path.startswith(".mylittleharness/"))
+                },
+            )
+            self.assertIn("mlhd-start-stale-pid-recovered", output.getvalue())
+            pid_payload = json.loads((runtime_dir / "pid.json").read_text(encoding="utf-8"))
+            self.assertNotEqual(999999999, pid_payload["pid"])
+            self.assertEqual(os.getpid(), pid_payload["pid"])
 
     def test_claim_apply_writes_repo_visible_claim_and_refuses_overlap(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -5190,9 +5547,52 @@ class CliTests(unittest.TestCase):
                         ]
                     ),
                     0,
-                )
+            )
             self.assertIn("work-claim-released", release_output.getvalue())
+            self.assertIn("work-claim-completion-policy", release_output.getvalue())
             self.assertEqual("released", json.loads(claim_path.read_text(encoding="utf-8"))["status"])
+
+    def test_claim_release_requires_reviewed_evidence_note_without_writing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            claim_dir = root / "project/verification/work-claims"
+            claim_dir.mkdir(parents=True)
+            claim_path = claim_dir / "claim-1.json"
+            claim_path.write_text(
+                json.dumps(
+                    {
+                        "schema": "mylittleharness.work-claim.v1",
+                        "record_type": "work-claim",
+                        "claim_id": "claim-1",
+                        "claim_kind": "write",
+                        "owner_role": "coder",
+                        "owner_actor": "worker-a",
+                        "execution_slice": "slice-a",
+                        "claimed_paths": ["src/mylittleharness/claims.py"],
+                        "claimed_routes": [],
+                        "claimed_resources": [],
+                        "lease_expires_at": "2999-01-01T00:00:00Z",
+                        "status": "active",
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree_bytes(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "claim", "--action", "release", "--claim-id", "claim-1", "--apply"])
+
+            self.assertEqual(code, 2)
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            rendered = output.getvalue()
+            self.assertIn("work-claim-completion-policy", rendered)
+            self.assertIn("release requires --release-condition", rendered)
+            self.assertIn("external completion claims without evidence are refused", rendered)
+            self.assertEqual("active", json.loads(claim_path.read_text(encoding="utf-8"))["status"])
 
     def test_claim_extend_refuses_stale_claim_without_writing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -5610,6 +6010,8 @@ class CliTests(unittest.TestCase):
             self.assertIn("dispatcher-launch-refused", empty_rendered)
             self.assertIn("no repo-visible handoff packet is launchable", empty_rendered)
             self.assertIn("compatible active claim", empty_rendered)
+            self.assertIn("dispatcher-launch-completion-claim-policy", empty_rendered)
+            self.assertIn("Linear/Symphony status alone is not launch or closeout evidence", empty_rendered)
 
             claim_dir = root / "project/verification/work-claims"
             handoff_dir = root / "project/verification/handoffs"
@@ -11743,6 +12145,45 @@ class CliTests(unittest.TestCase):
             self.assertIn("- `occurrence_count`: `2`", note_text)
             self.assertIn('"Dry run wording hesitation"', note_text)
 
+    def test_meta_feedback_apply_uses_roadmap_item_as_canonical_note_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_central_mlh_dev_root(Path(tmp))
+            write_sample_roadmap(root)
+            before_roadmap = (root / "project/roadmap.md").read_text(encoding="utf-8")
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "meta-feedback",
+                        "--apply",
+                        "--from-root",
+                        str(root / "serviced"),
+                        "--roadmap-item",
+                        "explicit-canonical-cluster",
+                        "--topic",
+                        "Human readable mismatch",
+                        "--note",
+                        "Explicit roadmap item should be the canonical cluster path before any note write.",
+                        "--signal-type",
+                        "agent-operability",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertNotIn("meta-feedback-cluster-refused", rendered)
+            self.assertIn("slug: explicit-canonical-cluster", rendered)
+            self.assertTrue((root / "project/plan-incubation/explicit-canonical-cluster.md").is_file())
+            self.assertFalse((root / "project/plan-incubation/human-readable-mismatch.md").exists())
+            note_text = (root / "project/plan-incubation/explicit-canonical-cluster.md").read_text(encoding="utf-8")
+            self.assertIn("- `canonical_id`: `explicit-canonical-cluster`", note_text)
+            self.assertIn("- duplicate_topic: Human readable mismatch", note_text)
+            self.assertIn('"Human readable mismatch"', note_text)
+            self.assertEqual(before_roadmap, (root / "project/roadmap.md").read_text(encoding="utf-8"))
+
     def test_meta_feedback_apply_leaves_existing_terminal_roadmap_item_without_requeue(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_central_mlh_dev_root(Path(tmp))
@@ -13417,6 +13858,42 @@ class CliTests(unittest.TestCase):
             self.assertIn("0 target artifacts across 2 roadmap items; report-only sizing signal, not a hard gate", rendered)
             self.assertIn("plan synthesis rationale is advisory evidence only", rendered)
 
+    def test_plan_apply_refuses_unreviewed_multi_item_slice_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            write_sample_roadmap(root)
+            roadmap_path = root / "project/roadmap.md"
+            roadmap_path.write_text(
+                roadmap_path.read_text(encoding="utf-8").replace("- `status`: `active`", "- `status`: `accepted`", 1),
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "plan",
+                        "--apply",
+                        "--title",
+                        "Roadmap Linked Plan",
+                        "--objective",
+                        "Refuse unreviewed multi-item batching.",
+                        "--roadmap-item",
+                        "roadmap-operationalization-rail",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 2)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertFalse((root / "project" / "implementation-plan.md").exists())
+            self.assertIn("plan-batch-slice-gate", rendered)
+            self.assertIn("blocked multiple roadmap items", rendered)
+            self.assertIn("--only-requested-item", rendered)
+
     def test_plan_apply_refuses_missing_roadmap_item_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp))
@@ -14159,6 +14636,82 @@ class CliTests(unittest.TestCase):
             self.assertEqual(rerun_code, 2)
             self.assertEqual(before_rerun, snapshot_tree(root))
             self.assertIn("archive-active-plan requires plan_status active", rerun_output.getvalue())
+
+    def test_writeback_archive_active_plan_keeps_compacted_history_outside_items_section(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="complete")
+            plan_path = root / "project/implementation-plan.md"
+            plan_path.write_text(
+                "---\n"
+                'plan_id: "live-tail-close"\n'
+                'title: "Live Tail Close"\n'
+                'primary_roadmap_item: "next-live-work"\n'
+                "covered_roadmap_items:\n"
+                '  - "next-live-work"\n'
+                "---\n"
+                "# Live Tail Close\n",
+                encoding="utf-8",
+            )
+            write_roadmap_with_done_tail(root)
+            roadmap_path = root / "project/roadmap.md"
+            roadmap_path.write_text(
+                roadmap_path.read_text(encoding="utf-8").replace(
+                    "## Archived Completed History\n\n"
+                    "Durable history remains in archived plans.\n\n",
+                    "",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "writeback",
+                        "--apply",
+                        "--archive-active-plan",
+                        "--roadmap-item",
+                        "next-live-work",
+                        "--roadmap-status",
+                        "done",
+                        "--docs-decision",
+                        "not-needed",
+                        "--state-writeback",
+                        "archived active plan and compacted roadmap history",
+                        "--verification",
+                        "archive writeback kept roadmap parse-safe",
+                        "--residual-risk",
+                        "none",
+                        "--commit-decision",
+                        "manual commit policy",
+                    ]
+                )
+            rendered = output.getvalue()
+
+            self.assertEqual(code, 0)
+            self.assertIn("writeback-active-plan-archived", rendered)
+            self.assertIn("field: archived_completed_history", rendered)
+            roadmap_text = roadmap_path.read_text(encoding="utf-8")
+            items_index = roadmap_text.index("## Items")
+            done_4_index = roadmap_text.index("### Done 4")
+            next_live_index = roadmap_text.index("### Next Live Work")
+            history_index = roadmap_text.index("## Archived Completed History")
+            self.assertGreater(history_index, items_index)
+            self.assertGreater(history_index, done_4_index)
+            self.assertGreater(history_index, next_live_index)
+            items_section = roadmap_text.split("## Items", 1)[1].split("## Archived Completed History", 1)[0]
+            self.assertIn("### Done 4", items_section)
+            self.assertIn("### Next Live Work", items_section)
+            self.assertIn("- Compacted done roadmap item `done-1`: archived plan `project/archive/plans/done-1.md`.", roadmap_text)
+
+            check_output = io.StringIO()
+            with redirect_stdout(check_output):
+                check_code = main(["--root", str(root), "check"])
+            self.assertEqual(check_code, 0)
+            self.assertNotIn("## Items section has no managed item blocks", check_output.getvalue())
 
     def test_writeback_archive_active_plan_retires_phase_writeback_tail(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -16421,6 +16974,72 @@ class CliTests(unittest.TestCase):
             self.assertNotIn('status: "implemented"', source_text)
             self.assertIn('verification_summary: "shared source incubation archive guard regression passed"', source_text)
 
+    def test_writeback_archive_active_plan_reports_mixed_source_entry_coverage_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_active_live_root(Path(tmp), phase_status="complete")
+            write_sample_roadmap(root)
+            source_rel = "project/plan-incubation/mixed-source.md"
+            source_path = root / source_rel
+            source_path.parent.mkdir(parents=True, exist_ok=True)
+            source_path.write_text(
+                "---\n"
+                'topic: "Mixed Source"\n'
+                'status: "incubating"\n'
+                'related_plan: "project/implementation-plan.md"\n'
+                'related_roadmap: "project/roadmap.md"\n'
+                'related_roadmap_item: "minimal-roadmap-mutation-rail"\n'
+                "---\n"
+                "# Mixed Source\n\n"
+                "## Entries\n\n"
+                "### 2026-05-05\n\n"
+                "[MLH-Fix-Candidate] Current slice should close this entry.\n\n"
+                "### 2026-05-06\n\n"
+                "[MLH-Fix-Candidate] Separate follow-up needs explicit coverage before whole-note archive.\n",
+                encoding="utf-8",
+            )
+            roadmap_path = root / "project/roadmap.md"
+            before_block, after_block = roadmap_path.read_text(encoding="utf-8").split("### Minimal Roadmap Mutation Rail", 1)
+            after_block = after_block.replace("- `source_incubation`: ``", f"- `source_incubation`: `{source_rel}`", 1)
+            roadmap_path.write_text(before_block + "### Minimal Roadmap Mutation Rail" + after_block, encoding="utf-8")
+
+            before = snapshot_tree(root)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "writeback",
+                        "--dry-run",
+                        "--archive-active-plan",
+                        "--roadmap-item",
+                        "minimal-roadmap-mutation-rail",
+                        "--docs-decision",
+                        "updated",
+                        "--state-writeback",
+                        "archived current item while preserving mixed source incubation",
+                        "--verification",
+                        "mixed source incubation entry coverage retry regression passed",
+                        "--commit-decision",
+                        "manual commit policy",
+                    ]
+                )
+            rendered = output.getvalue()
+
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("writeback-incubation-archive-blocked", rendered)
+            self.assertIn("writeback-incubation-archive-evaluation", rendered)
+            self.assertIn("same-request closeout facts", rendered)
+            self.assertIn("writeback-incubation-entry-coverage-report", rendered)
+            self.assertIn("valid entry ids: 2026-05-05, 2026-05-06", rendered)
+            self.assertIn("missing entry ids: 2026-05-05, 2026-05-06", rendered)
+            self.assertIn("writeback-incubation-archive-retry", rendered)
+            self.assertIn(f"memory-hygiene --dry-run --source {source_rel} --archive-covered --repair-links", rendered)
+            self.assertIn('--entry-coverage "2026-05-05: implemented via project/archive/plans/', rendered)
+            self.assertIn('--entry-coverage "2026-05-06: implemented via project/archive/plans/', rendered)
+            self.assertTrue(source_path.exists())
+
     def test_transition_apply_reports_shared_source_incubation_archive_blocker_as_nonblocking_hygiene(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_active_live_root(Path(tmp), phase_status="complete")
@@ -17645,6 +18264,14 @@ class CliTests(unittest.TestCase):
             self.assertTrue(payload["acceleratorAdoption"]["dashboardPacketAvailable"])
             self.assertIn(payload["acceleratorAdoption"]["mcp"]["status"], {"missing", "missing-server", "mounted", "legacy-root-bound", "conflict", "invalid-toml", "blocked", "unreadable"})
             self.assertTrue(payload["acceleratorAdoption"]["rgVerificationRequired"])
+            self.assertEqual("mylittleharness.connect-readiness-action-packet.v1", payload["agentPacket"]["connectReadiness"]["schema"])
+            self.assertTrue(payload["agentPacket"]["connectReadiness"]["writeback"]["requiredWhenPlanStatusActive"])
+            self.assertIn("docmapStatus", payload["agentPacket"]["connectReadiness"]["docs"])
+            self.assertEqual("mylittleharness.connect-readiness-action-packet.v1", payload["connectReadiness"]["schema"])
+            self.assertEqual("absent", payload["connectReadiness"]["mlhd"]["controlStatus"])
+            self.assertGreaterEqual(payload["connectReadiness"]["mlhd"]["dirtyCount"], 1)
+            self.assertTrue(payload["connectReadiness"]["writeback"]["requiredWhenPlanStatusActive"])
+            self.assertEqual("absent", payload["mlhd"]["control_status"])
             self.assertEqual("mylittleharness --root <root> hooks --run session-start --json", payload["acceleratorAdoption"]["firstContactHookCommand"])
             self.assertEqual("mylittleharness --root <root> hooks adapter --client codex --dry-run --scope project", payload["acceleratorAdoption"]["codexHookAdapterCommand"])
             self.assertFalse(payload["boundary"]["refreshesGeneratedCache"])
@@ -17657,6 +18284,8 @@ class CliTests(unittest.TestCase):
             self.assertEqual("SessionStart", payload["hookSpecificOutput"]["hookEventName"])
             self.assertIn("dashboard_packet=available", payload["hookSpecificOutput"]["additionalContext"])
             self.assertIn("accelerators: dashboard_packet=available", payload["additional_context"])
+            self.assertIn("mlhd: control_status=absent", payload["additional_context"])
+            self.assertIn("connect readiness: writeback_required=true", payload["additional_context"])
             self.assertIn("mcp coverage: read_projection=current posture", payload["additional_context"])
             self.assertIn("exact verification: use `rg` or `mylittleharness.read_source`", payload["additional_context"])
             self.assertIn("rg_verification=required", payload["additional_context"])
@@ -18024,6 +18653,78 @@ class CliTests(unittest.TestCase):
             self.assertNotIn(
                 "hooks-policy-block-mlh-mutation-without-mode",
                 {finding["code"] for finding in warm_cache_payload["findings"]},
+            )
+
+            intelligence_input = root / "pre_tool_intelligence_input.json"
+            intelligence_input.write_text(
+                json.dumps(
+                    {
+                        "toolName": "shell_command",
+                        "command": "my" + "littleharness --root . intelligence --query \"plan roadmap hooks writeback route-loop\"",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            before_intelligence = snapshot_tree_bytes(root)
+            intelligence_output = io.StringIO()
+            with redirect_stdout(intelligence_output):
+                code = main(["--root", str(root), "hooks", "--run", "pre-tool-use", "--input-file", str(intelligence_input), "--json"])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(before_intelligence, snapshot_tree_bytes(root))
+            intelligence_payload = json.loads(intelligence_output.getvalue())
+            self.assertFalse(intelligence_payload["block"])
+            self.assertNotIn(
+                "hooks-policy-block-mlh-mutation-without-mode",
+                {finding["code"] for finding in intelligence_payload["findings"]},
+            )
+
+            mcp_search_input = root / "pre_tool_mcp_search_input.json"
+            mcp_search_input.write_text(
+                json.dumps(
+                    {
+                        "toolName": "mcp__my" + "littleharness__mylittleharness_search",
+                        "parameters": {"query": "plan roadmap writeback batching"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            before_mcp_search = snapshot_tree_bytes(root)
+            mcp_search_output = io.StringIO()
+            with redirect_stdout(mcp_search_output):
+                code = main(["--root", str(root), "hooks", "--run", "pre-tool-use", "--input-file", str(mcp_search_input), "--json"])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(before_mcp_search, snapshot_tree_bytes(root))
+            mcp_search_payload = json.loads(mcp_search_output.getvalue())
+            self.assertFalse(mcp_search_payload["block"])
+            self.assertNotIn(
+                "hooks-policy-block-mlh-mutation-without-mode",
+                {finding["code"] for finding in mcp_search_payload["findings"]},
+            )
+
+            writeback_input = root / "pre_tool_writeback_apply_input.json"
+            writeback_input.write_text(
+                json.dumps(
+                    {
+                        "toolName": "shell_command",
+                        "command": "my" + "littleharness --root . writeback --apply --state-writeback \"reviewed plan apply phrase\"",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            before_writeback = snapshot_tree_bytes(root)
+            writeback_output = io.StringIO()
+            with redirect_stdout(writeback_output):
+                code = main(["--root", str(root), "hooks", "--run", "pre-tool-use", "--input-file", str(writeback_input), "--json"])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(before_writeback, snapshot_tree_bytes(root))
+            writeback_payload = json.loads(writeback_output.getvalue())
+            self.assertFalse(writeback_payload["block"])
+            self.assertNotIn(
+                "hooks-policy-block-next-plan-while-active",
+                {finding["code"] for finding in writeback_payload["findings"]},
             )
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -18702,7 +19403,7 @@ class CliTests(unittest.TestCase):
             )
             self.assertIn("tool calls reload the selected root inventory", structured["boundary"]["refreshPolicy"])
             section_names = [section["name"] for section in structured["sections"]]
-            self.assertEqual(["Adapter", "Projection", "Sources", "Generated Inputs", "Boundary"], section_names)
+            self.assertEqual(["Adapter", "Projection", "Sources", "Generated Inputs", "Agent Action Packet", "Boundary"], section_names)
             finding_codes = [finding["code"] for section in structured["sections"] for finding in section["findings"]]
             self.assertIn("adapter-source-record", finding_codes)
             self.assertIn("adapter-generated-index", finding_codes)
@@ -19570,6 +20271,8 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertIn("product-debris", rendered)
             self.assertIn("product-hygiene-summary", rendered)
+            self.assertIn("doctor-connect-readiness-action-packet", rendered)
+            self.assertIn("required_repair_targets=", rendered)
 
     def test_missing_root_returns_usage_failure_code(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -20490,6 +21193,143 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("research artifact has no frontmatter", check_rendered)
             self.assertNotIn("lifecycle markdown artifact has no frontmatter", check_rendered)
 
+    def test_check_reports_product_docs_as_lightweight_and_plan_facing_docs_specs_as_strict(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            add_complete_scaffold(root)
+            (root / ".agents/docmap.yaml").write_text(
+                "version: 2\nrepo_summary:\n  product_docs_entrypoints:\n    - \"README.md\"\n",
+                encoding="utf-8",
+            )
+            (root / "docs/runbooks").mkdir(parents=True)
+            (root / "docs/runbooks/operator-guide.md").write_text("# Operator Guide\n\nNo frontmatter required.\n", encoding="utf-8")
+            (root / "docs").mkdir(exist_ok=True)
+            (root / "docs/README.md").write_text("# Docs\n\nIndex.\n", encoding="utf-8")
+            (root / "docs/specs").mkdir(parents=True, exist_ok=True)
+            (root / "docs/specs/product-contract.md").write_text("# Product Contract\n\nContract text.\n", encoding="utf-8")
+            (root / "project/implementation-plan.md").write_text(
+                "---\n"
+                "related_specs:\n"
+                '  - "docs/specs/product-contract.md"\n'
+                "---\n"
+                "# Plan\n",
+                encoding="utf-8",
+            )
+            state_path = root / "project/project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    'operating_mode: "ad_hoc"\nplan_status: "none"\nactive_plan: ""',
+                    'operating_mode: "plan"\nplan_status: "active"\nactive_plan: "project/implementation-plan.md"',
+                ),
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            validation_output = io.StringIO()
+            with redirect_stdout(validation_output):
+                validation_code = main(["--root", str(root), "check", "--focus", "validation"])
+            validation_rendered = validation_output.getvalue()
+
+            links_output = io.StringIO()
+            with redirect_stdout(links_output):
+                links_code = main(["--root", str(root), "check", "--focus", "links"])
+            links_rendered = links_output.getvalue()
+
+            self.assertEqual(validation_code, 0)
+            self.assertEqual(links_code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("spec-posture-missing", validation_rendered)
+            self.assertIn("docs/specs/product-contract.md is plan-facing", validation_rendered)
+            self.assertNotIn("docs/runbooks/operator-guide.md is plan-facing", validation_rendered)
+            self.assertIn("product-doc-frontmatter-optional", links_rendered)
+            self.assertIn("suggested route class: product-docs", links_rendered)
+            self.assertIn("candidate-docmap-gap", links_rendered)
+            self.assertIn("candidate route missing from docmap: docs/README.md", links_rendered)
+            self.assertIn("project/archive/** and project/archive/reference/** remain historical routes", links_rendered)
+
+    def test_repair_apply_adds_only_missing_spec_posture_frontmatter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            spec_rel = "project/specs/workflow/workflow-artifact-model-spec.md"
+            docs_spec_rel = "docs/specs/product-contract.md"
+            (root / spec_rel).write_text(
+                "---\n"
+                'title: "Artifact Model"\n'
+                "---\n"
+                "# Artifact Model\n\nStable spec body.\n",
+                encoding="utf-8",
+            )
+            (root / "docs/specs").mkdir(parents=True, exist_ok=True)
+            (root / docs_spec_rel).write_text("# Product Contract\n\nContract text.\n", encoding="utf-8")
+            (root / "project/implementation-plan.md").write_text(
+                "---\n"
+                "related_specs:\n"
+                f'  - "{spec_rel}"\n'
+                f'  - "{docs_spec_rel}"\n'
+                "---\n"
+                "# Plan\n",
+                encoding="utf-8",
+            )
+            state_path = root / "project/project-state.md"
+            state_before = state_path.read_text(encoding="utf-8")
+            state_path.write_text(
+                state_before.replace(
+                    'operating_mode: "ad_hoc"\nplan_status: "none"\nactive_plan: ""',
+                    'operating_mode: "plan"\nplan_status: "active"\nactive_plan: "project/implementation-plan.md"',
+                ),
+                encoding="utf-8",
+            )
+            state_after_open = state_path.read_text(encoding="utf-8")
+            before_dry_run = snapshot_tree(root)
+            dry_output = io.StringIO()
+            with redirect_stdout(dry_output):
+                dry_code = main(["--root", str(root), "repair", "--dry-run"])
+            dry_rendered = dry_output.getvalue()
+
+            self.assertEqual(dry_code, 0)
+            self.assertEqual(before_dry_run, snapshot_tree(root))
+            self.assertIn("spec-posture-frontmatter-plan", dry_rendered)
+            self.assertIn("selected repair class: spec-posture-frontmatter-repair", dry_rendered)
+            self.assertIn(spec_rel, dry_rendered)
+            self.assertIn(docs_spec_rel, dry_rendered)
+            self.assertIn("planned frontmatter keys for project/specs/workflow/workflow-artifact-model-spec.md: spec_status, implementation_posture", dry_rendered)
+            self.assertIn("no blanket all-*.md rewrite", dry_rendered)
+
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--root", str(root), "projection", "--build", "--target", "all"]), 0)
+
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                apply_code = main(["--root", str(root), "repair", "--apply"])
+            apply_rendered = apply_output.getvalue()
+
+            self.assertEqual(apply_code, 0)
+            self.assertEqual(state_after_open, state_path.read_text(encoding="utf-8"))
+            self.assertIn("spec-posture-frontmatter-updated", apply_rendered)
+            self.assertIn("spec-posture-frontmatter-route-write", apply_rendered)
+            self.assertIn("spec-posture-frontmatter-rerun", apply_rendered)
+            self.assertIn("projection-cache-dirty", apply_rendered)
+
+            spec_text = (root / spec_rel).read_text(encoding="utf-8")
+            docs_spec_text = (root / docs_spec_rel).read_text(encoding="utf-8")
+            self.assertTrue(spec_text.startswith("---\n"))
+            self.assertIn('title: "Artifact Model"\n', spec_text)
+            self.assertIn('spec_status: "draft"\n', spec_text)
+            self.assertIn('implementation_posture: "target-only"\n', spec_text)
+            self.assertIn("Stable spec body.", spec_text)
+            self.assertTrue(docs_spec_text.startswith("---\n"))
+            self.assertIn('spec_status: "draft"\n', docs_spec_text)
+            self.assertIn('implementation_posture: "target-only"\n', docs_spec_text)
+            self.assertNotIn('title: "Product Contract"', docs_spec_text)
+            self.assertIn("Contract text.", docs_spec_text)
+
+            snapshot_dirs = list((root / ".mylittleharness/snapshots/repair").iterdir())
+            self.assertEqual(1, len(snapshot_dirs))
+            metadata = json.loads((snapshot_dirs[0] / "snapshot.json").read_text(encoding="utf-8"))
+            self.assertEqual("spec-posture-frontmatter-repair", metadata["repair_class"])
+            self.assertEqual(["spec_status", "implementation_posture"], metadata["planned_frontmatter_keys_by_path"][spec_rel])
+            self.assertEqual(["spec_status", "implementation_posture"], metadata["planned_frontmatter_keys_by_path"][docs_spec_rel])
+
     def test_repair_dry_run_reports_docmap_snapshot_plan_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp))
@@ -21350,9 +22190,21 @@ class CliTests(unittest.TestCase):
             self.assertTrue(payload["acceleratorAdoption"]["rgVerificationRequired"])
             self.assertIn("writeback --dry-run --phase-status complete", payload["agentPacket"]["nextLegalDryRun"]["command"])
             self.assertFalse(payload["agentPacket"]["nextLegalDryRun"]["approves_git"])
+            self.assertEqual("mylittleharness.connect-readiness-action-packet.v1", payload["connectReadiness"]["schema"])
+            self.assertEqual("Phase 1", payload["connectReadiness"]["lifecycle"]["active_phase"])
+            self.assertTrue(payload["connectReadiness"]["writeback"]["requiredWhenPlanStatusActive"])
+            self.assertIn("projection --warm-cache --target all", payload["connectReadiness"]["nextSafeCommand"])
+            self.assertIn("docmapStatus", payload["connectReadiness"]["docs"])
+            self.assertTrue(payload["connectReadiness"]["docs"]["roleMetadata"]["docmapIsRoutingAid"])
+            self.assertIn("spec_status", payload["connectReadiness"]["docs"]["roleMetadata"]["strictSpecPostureFields"])
+            self.assertEqual("absent", payload["connectReadiness"]["mlhd"]["controlStatus"])
+            self.assertEqual(0, payload["connectReadiness"]["mlhd"]["dirtyCount"])
+            self.assertIn("connectReadiness", payload["agentPacket"])
+            self.assertEqual("absent", payload["mlhd"]["control_status"])
             self.assertEqual("mylittleharness.projection-cache-posture.v1", payload["cachePosture"]["schema"])
             self.assertEqual("mylittleharness --root <root> projection --warm-cache --target all", payload["cachePosture"]["self_heal_command"])
             section_names = [section["name"] for section in payload["sections"]]
+            self.assertIn("Connect Readiness", section_names)
             self.assertIn("Lifecycle Provenance", section_names)
 
     def test_adapter_mcp_payload_exposes_cache_posture_without_refresh_authority(self) -> None:
@@ -21374,6 +22226,10 @@ class CliTests(unittest.TestCase):
             self.assertFalse(structured["cachePosture"]["refreshable_by_adapter"])
             self.assertTrue(structured["cachePosture"]["self_healable_by_command"])
             self.assertIn("recommended_refresh_commands", structured["cachePosture"])
+            self.assertEqual("absent", structured["mlhd"]["control_status"])
+            self.assertEqual("mylittleharness.dashboard-agent-packet.v1", structured["agentPacket"]["schema"])
+            self.assertEqual("mylittleharness.connect-readiness-action-packet.v1", structured["connectReadiness"]["schema"])
+            self.assertIn("mlhd", structured["connectReadiness"])
             self.assertIn("bounded source", structured["activation"]["adoption"]["toolCoverage"]["mylittleharness.read_source"])
             self.assertTrue(structured["activation"]["adoption"]["exactVerification"]["required"])
 
@@ -21593,6 +22449,59 @@ class CliTests(unittest.TestCase):
                 )
             self.assertEqual(product_code, 0)
             self.assertIn("inside the configured product source root", product_output.getvalue())
+
+    def test_preflight_orchestrator_workspace_probes_capabilities_and_completion_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp) / "coordination")
+            workspace = Path(tmp) / "worker"
+            workspace.mkdir()
+            before = snapshot_tree_bytes(root)
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], cwd: Path, **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(list(command))
+                if command[:2] == [sys.executable, "-c"]:
+                    return subprocess.CompletedProcess(command, 0, stdout="mlh-process-spawn-ok\n", stderr="")
+                if command[0] == "git":
+                    return subprocess.CompletedProcess(command, 1, stdout="", stderr="fatal: not a git repo\n")
+                if command[0] == "mylittleharness" and command[-1] == "check":
+                    return subprocess.CompletedProcess(command, 1, stdout="", stderr="check failed\n")
+                if command[0] == "mylittleharness" and "adapter" in command:
+                    return subprocess.CompletedProcess(command, 0, stdout="mcp-read-projection\n", stderr="")
+                raise AssertionError(f"unexpected probe command: {command} in {cwd}")
+
+            output = io.StringIO()
+            with patch("mylittleharness.checks.shutil.which", return_value="tool"):
+                with patch("mylittleharness.checks.subprocess.run", side_effect=fake_run):
+                    with redirect_stdout(output):
+                        code = main(
+                            [
+                                "--root",
+                                str(root),
+                                "preflight",
+                                "--orchestrator-workspace",
+                                str(workspace),
+                                "--product-root",
+                                str(root / "product-source"),
+                            ]
+                        )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            self.assertIn("External Orchestrator Capability", rendered)
+            self.assertIn("orchestrator-shell-preflight-profile", rendered)
+            self.assertIn("orchestrator-shell-capability-ok", rendered)
+            self.assertIn("orchestrator-git-status-refused", rendered)
+            self.assertIn("orchestrator-mlh-check-refused", rendered)
+            self.assertIn("orchestrator-mcp-read-path-ok", rendered)
+            self.assertIn("orchestrator-completion-claim-policy", rendered)
+            self.assertIn("orchestrator-shell-preflight-refused", rendered)
+            self.assertIn("completion claims require repo-visible handoff", rendered)
+            self.assertTrue(any(call[:2] == [sys.executable, "-c"] for call in calls))
+            self.assertTrue(any(call[:1] == ["git"] for call in calls))
+            self.assertTrue(any(call[:1] == ["mylittleharness"] and call[-1:] == ["check"] for call in calls))
+            self.assertTrue(any(call[:1] == ["mylittleharness"] and "adapter" in call for call in calls))
 
     def test_research_generated_metadata_omits_empty_optional_relationship_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

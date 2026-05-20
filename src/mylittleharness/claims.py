@@ -109,6 +109,7 @@ def work_claim_dry_run_findings(inventory: Inventory, request: WorkClaimRequest)
         Finding("info", "work-claim-dry-run", "work claim proposal only; no files were written"),
         Finding("info", "work-claim-root-posture", f"root kind: {inventory.root_kind}"),
     ]
+    findings.extend(_completion_policy_findings(request))
     findings.extend(_request_findings(inventory, request, apply=False))
     if any(finding.severity in {"warn", "error"} for finding in findings if finding.code == "work-claim-refused"):
         findings.append(Finding("info", "work-claim-validation-posture", "dry-run refused before apply; fix explicit claim fields before writing claim evidence"))
@@ -151,6 +152,7 @@ def work_claim_apply_findings(inventory: Inventory, request: WorkClaimRequest) -
         Finding("info", "work-claim-apply", "work claim apply started"),
         Finding("info", "work-claim-root-posture", f"root kind: {inventory.root_kind}"),
     ]
+    findings.extend(_completion_policy_findings(request))
     request_findings = _request_findings(inventory, request, apply=True)
     findings.extend(request_findings)
     if any(finding.severity == "error" for finding in request_findings):
@@ -359,6 +361,19 @@ def _request_findings(inventory: Inventory, request: WorkClaimRequest, *, apply:
     findings.extend(lease_findings)
     if request.action == "release":
         target = inventory.root / _claim_rel_path(request.claim_id)
+        if not request.release_condition:
+            source = _claim_rel_path(request.claim_id) if request.claim_id else WORK_CLAIMS_DIR_REL
+            findings.append(
+                Finding(
+                    severity,
+                    "work-claim-refused",
+                    (
+                        "release requires --release-condition citing repo-visible evidence or reviewed abandonment; "
+                        "external completion claims without evidence are refused"
+                    ),
+                    source,
+                )
+            )
         if request.claim_id and not target.exists():
             findings.append(Finding(severity, "work-claim-refused", "cannot release a missing work claim", _claim_rel_path(request.claim_id)))
         return findings
@@ -543,8 +558,25 @@ def _release_fields(request: WorkClaimRequest) -> dict[str, object]:
     return {
         "status": "released",
         "released_at_utc": _utc_timestamp(),
-        "release_condition": request.release_condition or "explicit release command",
+        "release_condition": request.release_condition,
     }
+
+
+def _completion_policy_findings(request: WorkClaimRequest) -> list[Finding]:
+    if request.action != "release":
+        return []
+    source = _claim_rel_path(request.claim_id) if request.claim_id else WORK_CLAIMS_DIR_REL
+    return [
+        Finding(
+            "info",
+            "work-claim-completion-policy",
+            (
+                "work claim release records reviewed evidence only; external completion claims require repo-visible "
+                "handoff, work-claim, and agent-run evidence and do not approve MLH closeout"
+            ),
+            source,
+        )
+    ]
 
 
 def _extend_fields(request: WorkClaimRequest) -> dict[str, object]:

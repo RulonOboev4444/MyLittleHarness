@@ -3193,6 +3193,7 @@ def _writeback_incubation_findings(plan: RelationshipUpdatePlan, apply: bool) ->
                 plan.source_rel,
             )
         )
+        findings.extend(_writeback_incubation_archive_retry_findings(plan))
     elif plan.archive_rel:
         findings.append(Finding("info", "writeback-incubation-auto-archive", f"{prefix}archive fully covered source incubation to {plan.archive_rel}", plan.archive_rel))
     if plan.link_repairs:
@@ -3206,6 +3207,89 @@ def _writeback_incubation_findings(plan: RelationshipUpdatePlan, apply: bool) ->
         )
     )
     return findings
+
+
+def _writeback_incubation_archive_retry_findings(plan: RelationshipUpdatePlan) -> list[Finding]:
+    findings = [
+        Finding(
+            "info",
+            "writeback-incubation-archive-evaluation",
+            (
+                "source-incubation archive eligibility was evaluated against same-request closeout facts after planned "
+                "relationship metadata sync; remaining blockers are operating-memory hygiene, not lifecycle refusal"
+            ),
+            plan.source_rel,
+        )
+    ]
+    report = incubation_entry_coverage_report(plan.updated_text)
+    if report.entries:
+        entry_ids = tuple(entry.entry_id for entry in report.entries)
+        coverage_by_id = {record.entry_id: record for record in report.coverage}
+        terminal_ids = tuple(
+            record.entry_id
+            for record in report.coverage
+            if record.entry_id in entry_ids and record.status in {"implemented", "rejected", "superseded", "merged", "split", "archived"} and record.detail
+        )
+        missing_ids = tuple(entry_id for entry_id in entry_ids if entry_id not in coverage_by_id)
+        open_ids = tuple(
+            record.entry_id
+            for record in report.coverage
+            if record.entry_id in entry_ids and record.entry_id not in terminal_ids
+        )
+        parts = [f"valid entry ids: {', '.join(entry_ids)}"]
+        if terminal_ids:
+            parts.append(f"terminal entry ids: {', '.join(terminal_ids)}")
+        if missing_ids:
+            parts.append(f"missing entry ids: {', '.join(missing_ids)}")
+        if open_ids:
+            parts.append(f"non-terminal entry ids: {', '.join(open_ids)}")
+        if report.errors:
+            parts.append(f"malformed entry coverage: {'; '.join(report.errors)}")
+        findings.append(
+            Finding(
+                "info",
+                "writeback-incubation-entry-coverage-report",
+                "; ".join(parts),
+                plan.source_rel,
+            )
+        )
+    if plan.source_rel.startswith("project/plan-incubation/"):
+        retry_command = _writeback_incubation_archive_retry_command(plan, report)
+        findings.append(
+            Finding(
+                "info",
+                "writeback-incubation-archive-retry",
+                (
+                    "review retry after adding terminal Entry Coverage where needed: "
+                    f"{retry_command}"
+                ),
+                plan.source_rel,
+            )
+        )
+    return findings
+
+
+def _writeback_incubation_archive_retry_command(plan: RelationshipUpdatePlan, report) -> str:
+    command = (
+        f"mylittleharness --root <root> memory-hygiene --dry-run --source {plan.source_rel} "
+        "--archive-covered --repair-links"
+    )
+    entry_ids = tuple(entry.entry_id for entry in report.entries)
+    if not entry_ids:
+        return command
+    covered_ids = {record.entry_id for record in report.coverage}
+    destination = _writeback_incubation_retry_destination(plan)
+    for entry_id in entry_ids:
+        if entry_id in covered_ids:
+            continue
+        command += f' --entry-coverage "{entry_id}: implemented via {destination}"'
+    return command
+
+
+def _writeback_incubation_retry_destination(plan: RelationshipUpdatePlan) -> str:
+    frontmatter = parse_frontmatter(plan.updated_text)
+    archived_plan = _normalize_rel(str(frontmatter.data.get("archived_plan") or ""))
+    return archived_plan or "<destination>"
 
 
 def _incubation_writeback_tmp(plan: RelationshipUpdatePlan | None) -> Path | None:

@@ -7,7 +7,7 @@ import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
-from .dashboard import dashboard_agent_packet, dashboard_payload
+from .dashboard import dashboard_agent_packet, dashboard_payload, mlhd_freshness_payload
 from .inventory import Inventory
 from .models import Finding
 from .preflight import preflight_sections
@@ -382,6 +382,10 @@ def hook_event_payload(inventory: Inventory, hook_id: str, hook_args: list[str],
     dashboard = dashboard_payload(inventory) if hook_id in FIRST_CONTACT_HOOKS else {}
     agent_packet = dashboard.get("agentPacket") if isinstance(dashboard.get("agentPacket"), dict) else dashboard_agent_packet(inventory)
     cache_posture = dashboard.get("cachePosture") if isinstance(dashboard.get("cachePosture"), dict) else {}
+    connect_readiness = dashboard.get("connectReadiness") if isinstance(dashboard.get("connectReadiness"), dict) else {}
+    if not connect_readiness and isinstance(agent_packet.get("connectReadiness"), dict):
+        connect_readiness = agent_packet["connectReadiness"]
+    mlhd = dashboard.get("mlhd") if isinstance(dashboard.get("mlhd"), dict) else mlhd_freshness_payload(inventory)
     accelerator_adoption = (
         agent_packet.get("acceleratorAdoption") if isinstance(agent_packet.get("acceleratorAdoption"), dict) else dashboard.get("acceleratorAdoption")
     )
@@ -391,7 +395,11 @@ def hook_event_payload(inventory: Inventory, hook_id: str, hook_args: list[str],
     blocked = _hook_blocked(findings)
     status = "block" if blocked else _hook_status(findings)
     status_message = _hook_status_message(hook_id, lifecycle, cache_posture)
-    additional_context = _hook_additional_context(agent_packet, cache_posture, accelerator_adoption) if hook_id in FIRST_CONTACT_HOOKS else _hook_event_context(inventory, hook_id)
+    additional_context = (
+        _hook_additional_context(agent_packet, cache_posture, accelerator_adoption, connect_readiness, mlhd)
+        if hook_id in FIRST_CONTACT_HOOKS
+        else _hook_event_context(inventory, hook_id)
+    )
     system_message = _hook_system_message(findings)
     codex_specific_output = _codex_hook_specific_output(hook_id, additional_context, blocked, system_message)
     return {
@@ -411,6 +419,8 @@ def hook_event_payload(inventory: Inventory, hook_id: str, hook_args: list[str],
         "root": {"path": str(inventory.root), "kind": inventory.root_kind},
         "agentPacket": agent_packet,
         "cachePosture": cache_posture,
+        "connectReadiness": connect_readiness,
+        "mlhd": mlhd,
         "acceleratorAdoption": accelerator_adoption,
         "findings": [finding.to_dict() for finding in findings],
         "client_hints": {
@@ -1148,7 +1158,13 @@ def _stop_policy_findings(inventory: Inventory) -> list[Finding]:
     return findings
 
 
-def _hook_additional_context(agent_packet: object, cache_posture: object, accelerator_adoption: object) -> str:
+def _hook_additional_context(
+    agent_packet: object,
+    cache_posture: object,
+    accelerator_adoption: object,
+    connect_readiness: object,
+    mlhd: object,
+) -> str:
     if not isinstance(agent_packet, dict):
         return ""
     lifecycle = agent_packet.get("lifecycle", {})
@@ -1157,11 +1173,17 @@ def _hook_additional_context(agent_packet: object, cache_posture: object, accele
     components = cache_posture.get("components", {}) if isinstance(cache_posture, dict) else {}
     adoption = accelerator_adoption if isinstance(accelerator_adoption, dict) else {}
     mcp = adoption.get("mcp", {}) if isinstance(adoption.get("mcp"), dict) else {}
+    readiness = connect_readiness if isinstance(connect_readiness, dict) else {}
+    docs = readiness.get("docs", {}) if isinstance(readiness.get("docs"), dict) else {}
+    writeback = readiness.get("writeback", {}) if isinstance(readiness.get("writeback"), dict) else {}
+    mlhd_payload = mlhd if isinstance(mlhd, dict) else {}
     return "\n".join(
         [
             "MyLittleHarness first-contact context:",
             f"- lifecycle: plan_status={_payload_value(lifecycle, 'plan_status')}; active_plan={_payload_value(lifecycle, 'active_plan')}; active_phase={_payload_value(lifecycle, 'active_phase')}; phase_status={_payload_value(lifecycle, 'phase_status')}",
             f"- cache: artifacts={_component_status(components, 'artifacts')}; sqlite_index={_component_status(components, 'sqlite_index')}",
+            f"- mlhd: control_status={_payload_value(mlhd_payload, 'control_status')}; runtime_cache={_payload_value(mlhd_payload, 'runtime_cache_status')}; dirty_count={_payload_value(mlhd_payload, 'dirty_count')}; last_tick={_payload_value(mlhd_payload, 'last_tick_utc')}; last_failure={_payload_value(mlhd_payload, 'last_failed_refresh_utc')}",
+            f"- connect readiness: writeback_required={str(writeback.get('requiredWhenPlanStatusActive') is True).lower()}; docs_decision={_payload_value(docs, 'docsDecision')}; docmap={_payload_value(docs, 'docmapStatus')}; next_safe={_payload_value(readiness, 'nextSafeCommand')}",
             f"- accelerators: dashboard_packet=available; mcp={_payload_value(mcp, 'status')}; mounted={str(mcp.get('mounted') is True).lower()}; warm_cache=mylittleharness --root <root> projection --warm-cache --target all; rg_verification=required",
             "- mcp coverage: read_projection=current posture; read_source=bounded source slices; search=source-verified exact/path/full-text; related_or_bundle=links/fan-in/relationship bundle",
             f"- next legal dry-run: {_payload_value(next_legal, 'command')}",
@@ -1359,26 +1381,83 @@ def _looks_like_next_plan_apply(lowered_command: str) -> bool:
     padded = f" {lowered_command} "
     if " --update-active" in padded:
         return False
-    return "mylittleharness" in padded and " plan " in padded and " --apply" in padded
+    return _mlh_cli_subcommand(lowered_command) == "plan" and " --apply" in padded
 
 
 def _looks_like_unsafe_mlh_mutation(lowered_command: str) -> bool:
-    if not any(token in lowered_command for token in MLH_MUTATION_COMMANDS):
+    subcommand = _mlh_cli_subcommand(lowered_command)
+    if not subcommand:
         return False
-    mutating_terms = (
-        " repair ",
-        " plan ",
-        " writeback ",
-        " transition ",
-        " roadmap ",
-        " meta-feedback ",
-        " projection ",
-        " memory-hygiene ",
-        " hooks ",
-        " adapter --install-client-config ",
-    )
     padded = f" {lowered_command} "
-    return any(term in padded for term in mutating_terms)
+    if subcommand == "adapter":
+        return " --install-client-config " in padded
+    return subcommand in {
+        "repair",
+        "plan",
+        "writeback",
+        "transition",
+        "roadmap",
+        "meta-feedback",
+        "projection",
+        "memory-hygiene",
+        "hooks",
+    }
+
+
+def _mlh_cli_subcommand(command: str) -> str:
+    tokens = _shell_tokens(command)
+    for index, token in enumerate(tokens):
+        if _is_mlh_executable_token(token):
+            return _next_mlh_subcommand(tokens, index + 1)
+        if _is_python_executable_token(token) and index + 2 < len(tokens):
+            if _clean_token(tokens[index + 1]) == "-m" and _clean_token(tokens[index + 2]) == "my" + "littleharness":
+                return _next_mlh_subcommand(tokens, index + 3)
+    return ""
+
+
+def _shell_tokens(command: str) -> list[str]:
+    try:
+        return shlex.split(command or "", posix=False)
+    except ValueError:
+        return str(command or "").split()
+
+
+def _next_mlh_subcommand(tokens: list[str], start: int) -> str:
+    options_with_values = {"--root", "--config", "--config-path"}
+    index = start
+    while index < len(tokens):
+        token = _clean_token(tokens[index])
+        if not token:
+            index += 1
+            continue
+        if token in options_with_values:
+            index += 2
+            continue
+        if token.startswith("--root=") or token.startswith("--config=") or token.startswith("--config-path="):
+            index += 1
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        return token
+    return ""
+
+
+def _is_mlh_executable_token(token: str) -> bool:
+    clean = _clean_token(token)
+    if clean in {"my" + "littleharness", "my" + "littleharness.exe"}:
+        return True
+    return Path(clean).name in {"my" + "littleharness", "my" + "littleharness.exe"}
+
+
+def _is_python_executable_token(token: str) -> bool:
+    clean = _clean_token(token)
+    name = Path(clean).name
+    return name in {"python", "python.exe", "py", "py.exe"}
+
+
+def _clean_token(token: str) -> str:
+    return str(token or "").strip(" \t\r\n\"'`{}[](),;").casefold()
 
 
 def _has_explicit_mlh_review_mode(lowered_command: str) -> bool:

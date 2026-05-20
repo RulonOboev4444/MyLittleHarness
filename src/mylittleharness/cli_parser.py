@@ -26,6 +26,10 @@ def _nonnegative_float(value: str) -> float:
     return parsed
 
 
+def _hide_suppressed_top_level_commands(subparsers: argparse._SubParsersAction) -> None:
+    subparsers._choices_actions = [action for action in subparsers._choices_actions if action.help != argparse.SUPPRESS]
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="mylittleharness",
@@ -62,6 +66,33 @@ def build_parser() -> argparse.ArgumentParser:
     )
     dashboard.add_argument("--inspect", action="store_true", required=True, help="Inspect dashboard data without writing files or starting a server.")
     dashboard.add_argument("--json", action="store_true", help="Emit the dashboard cockpit payload as structured JSON.")
+    mlhd = subparsers.add_parser(
+        "mlhd",
+        help=argparse.SUPPRESS,
+        description="Advanced control plane: explicit root-local mlhd runtime commands.",
+    )
+    mlhd_actions = mlhd.add_subparsers(dest="mlhd_action", required=True, metavar="{status,doctor,start,stop,run-once,install,uninstall}")
+    mlhd_status = mlhd_actions.add_parser("status", help="Inspect disposable mlhd runtime control-plane state without writing files.")
+    mlhd_status.add_argument("--json", action="store_true", help="Emit the mlhd control-plane payload as structured JSON.")
+    mlhd_doctor = mlhd_actions.add_parser("doctor", help="Inspect mlhd runtime, autostart, and authority boundaries without writing files.")
+    mlhd_doctor.add_argument("--json", action="store_true", help="Emit the mlhd control-plane payload as structured JSON.")
+    for action in ("start", "stop", "run-once", "install", "uninstall"):
+        control = mlhd_actions.add_parser(action, help=f"Preview or apply the explicit mlhd {action} control-plane operation.")
+        control_mode = control.add_mutually_exclusive_group(required=True)
+        control_mode.add_argument("--dry-run", action="store_true", help="Preview disposable runtime writes without changing files.")
+        control_mode.add_argument(
+            "--apply",
+            action="store_true",
+            help="Write explicit disposable runtime control-plane files; run-once may also warm generated projection cache.",
+        )
+        control.add_argument("--json", action="store_true", help="Emit the mlhd control-plane payload as structured JSON.")
+        if action == "run-once":
+            control.add_argument(
+                "--quiet-period-seconds",
+                type=_nonnegative_float,
+                default=1.0,
+                help="Defer generated projection warm-cache until dirty markers have been quiet for this many seconds.",
+            )
     suggest = subparsers.add_parser(
         "suggest",
         help=argparse.SUPPRESS,
@@ -595,31 +626,5 @@ def build_parser() -> argparse.ArgumentParser:
     attach_mode.add_argument("--dry-run", action="store_true", help="Report the attach proposal without writing files.")
     attach_mode.add_argument("--apply", action="store_true", help="Create only allowed missing scaffold/template paths.")
     attach.add_argument("--project", help="Project name to use when creating project/project-state.md.")
-    hidden_top_level = {
-        "tasks",
-        "bootstrap",
-        "preflight",
-        "hooks",
-        "semantic",
-        "intelligence",
-        "suggest",
-        "manifest",
-        "dashboard",
-        "intake",
-        "incubate",
-        "incubation-reconcile",
-        "plan",
-        "plan-cancel",
-        "writeback",
-        "transition",
-        "memory-hygiene",
-        "relationship-drift",
-        "roadmap",
-        "meta-feedback",
-        "projection",
-        "snapshot",
-        "adapter",
-        "attach",
-    }
-    subparsers._choices_actions = [action for action in subparsers._choices_actions if action.dest not in hidden_top_level]
+    _hide_suppressed_top_level_commands(subparsers)
     return parser

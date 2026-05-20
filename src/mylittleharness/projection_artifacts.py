@@ -400,6 +400,96 @@ def projection_cache_dirty_changed_paths(root: Path, marker_names: Iterable[str]
     return tuple(sorted(paths))
 
 
+def warm_projection_artifacts(inventory: Inventory, quiet_period_seconds: float = 0.0) -> list[Finding]:
+    try:
+        inspect_findings = inspect_projection_artifacts(inventory)
+    except Exception as exc:
+        return [
+            Finding(
+                "warn",
+                "projection-artifact-warm-cache-degraded",
+                f"optional projection artifact warm-cache watcher inspect failed; direct files remain authoritative: {exc}",
+                ARTIFACT_DIR_REL,
+            )
+        ]
+
+    blocking = [
+        finding
+        for finding in inspect_findings
+        if finding.severity in {"warn", "error"} or finding.code == "projection-artifact-missing"
+    ]
+    if not blocking:
+        return [
+            Finding(
+                "info",
+                "projection-artifact-warm-cache-current",
+                "optional projection artifact warm-cache watcher tick left current generated artifacts unchanged",
+                ARTIFACT_DIR_REL,
+            )
+        ]
+
+    reason = blocking[0]
+    if reason.code == "projection-artifact-dirty":
+        pending, quiet_until_utc = projection_cache_dirty_quiet_period_pending(
+            inventory.root,
+            (ARTIFACT_DIRTY_MARKER_NAME,),
+            quiet_period_seconds,
+        )
+        if pending:
+            return [
+                Finding(
+                    "info",
+                    "projection-artifact-warm-cache-deferred",
+                    (
+                        "optional projection artifact warm-cache daemon pulse deferred until dirty markers are quiet; "
+                        f"quiet_period_seconds={quiet_period_seconds:g}; quiet_until_utc={quiet_until_utc}; "
+                        "repo-visible source files remain authoritative"
+                    ),
+                    reason.source or ARTIFACT_DIR_REL,
+                    reason.line,
+                )
+            ]
+    try:
+        refresh_findings = rebuild_projection_artifacts(inventory)
+    except Exception as exc:
+        return [
+            Finding(
+                "warn",
+                "projection-artifact-warm-cache-degraded",
+                (
+                    f"optional projection artifact warm-cache watcher refresh failed after {reason.code}; "
+                    f"direct files remain authoritative: {exc}"
+                ),
+                reason.source or ARTIFACT_DIR_REL,
+                reason.line,
+            )
+        ]
+
+    findings = [
+        Finding(
+            "info",
+            "projection-artifact-warm-cache",
+            (
+                f"optional projection artifact warm-cache watcher refreshed generated artifacts because {reason.code}; "
+                f"watcher writes only {ARTIFACT_DIR_REL} and cannot affect lifecycle authority"
+            ),
+            reason.source or ARTIFACT_DIR_REL,
+            reason.line,
+        ),
+        *refresh_findings,
+    ]
+    if any(finding.severity in {"warn", "error"} for finding in refresh_findings):
+        findings.append(
+            Finding(
+                "info",
+                "projection-artifact-warm-cache-degraded",
+                "optional projection artifact warm-cache watcher degraded; direct files remain authoritative",
+                ARTIFACT_DIR_REL,
+            )
+        )
+    return findings
+
+
 def projection_cache_dirty_quiet_period_pending(
     root: Path,
     marker_names: Iterable[str],

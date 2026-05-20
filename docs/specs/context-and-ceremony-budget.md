@@ -41,6 +41,8 @@ Every rendered report includes an adaptive ceremony capsule in `Work Result`: th
 
 When a plan phase reaches `phase_status = complete`, the handoff must be recoverable from repo-visible phase evidence instead of chat memory. The minimum phase evidence capsule is the current-plan closeout/writeback identity plus `docs_decision`, `state_writeback`, `verification`, and `work_result`; `docs_decision = uncertain` is allowed for a provisional same-plan phase handoff, but it cannot support confident final closeout. `work_result` check labels accept the canonical `How it was checked:` plus semantic aliases such as `How checked:` and `Verification:`; unrelated mentions of verification elsewhere in the capsule do not count as a check label. A phase-only `writeback` may replace stale closeout facts with same-request provisional phase evidence when advancing to the next pending phase, but that still does not approve archive, roadmap done-status, staging, commit, push, or next-plan opening.
 
+Long-session compaction should produce a source-bound memory capsule instead of a raw transcript carry-forward. The capsule should keep hot context small: objective, lifecycle pointers, active phase, stop conditions, write scope, docs_decision posture, decisions, blockers, failed-attempt budget, next safe command, validation posture, and source refs. It should mark unknown or stale facts with stale_or_unknown rather than smoothing over gaps. The capsule is a recovery shortcut only; provider compaction, prompt caching, retrieval, SQLite/projection indexes, dashboard packets, hooks, MCP output, old chat summaries, and model memory cannot become lifecycle authority, closeout evidence, roadmap movement, or commit authority.
+
 Context budgets should favor:
 
 - source-set discipline over broad archaeology
@@ -61,6 +63,8 @@ The agent-navigation reflex is budgeted and trigger-based. For fuzzy route disco
 Native hook first-contact uses the same cheap-start posture. `hooks --run session-start` and `hooks --run session-start --json` may surface the dashboard agent packet, next legal dry-run candidate, MCP adoption posture, and projection/SQLite cache posture for CLI diagnostics. `hooks adapter --client codex --dry-run|--apply --scope project` is the explicit project-local Codex activation rail: dry-run writes nothing, and apply may write only `.codex/hooks.json` plus `.codex/hooks/mylittleharness_session_start.py` to register a `SessionStart` command hook. The generated helper adapts the full MLH payload to Codex's stricter `SessionStart` stdout schema by emitting only top-level `continue`, optional `systemMessage`, and `hookSpecificOutput.additionalContext` with `hookEventName=SessionStart`; the full diagnostic payload stays available through the CLI and is not streamed raw to Codex. `hooks --doctor` reports this native Codex adapter separately from the optional Git pre-commit shim because Git hook installation does not make a native client call session-start. That is a context shortcut, not an authority shortcut: the hook adapter must not write user-global client config, start a listener, refresh generated cache, skip canonical route reads when exact authority is needed, approve auto-continuation, or decide lifecycle, Git, dispatcher, provider, product-diff, archive, staging, commit, push, or release actions.
 
 Local product-source test discovery is part of that low-ceremony route guidance: `suggest --intent "run product tests"` may surface `python -m unittest discover -s tests`, focused unittest gates, product `check`, and `git diff --check` when those commands are visible in the repo. It remains advisory verification guidance and does not install pytest, infer package-manager fallbacks, approve release, or satisfy lifecycle closeout by itself.
+
+CLI command discovery follows the same progressive-disclosure budget. Top-level `mylittleharness --help` should foreground only the primary operator commands `init`, `check`, `repair`, and `detach`. Advanced, lifecycle, evidence, recovery, and compatibility commands may remain directly invokable and must keep explicit command-specific `command --help` output, but internal suppression sentinels such as `==SUPPRESS==` must never render as top-level help rows.
 
 ## Future Product Gates
 
@@ -87,6 +91,8 @@ A valid implementation should prove that:
 - unrelated historical context is excluded by default
 - generated summaries point back to source files or explicit observations
 - background work cannot become hidden authority
+- source-bound memory capsules include source refs, stale_or_unknown markers, failed-attempt budget, next safe command, and non-authority wording for provider memory
+- top-level CLI help hides advanced command rows without suppression sentinels while explicit command-specific help remains available
 - closeout cannot be declared without observed verification or explicit verified skip
 
 Validation may include smoke scenarios for read-only explanation, small mutation, multi-session planning, and closeout.
