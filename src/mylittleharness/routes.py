@@ -205,8 +205,30 @@ INTAKE_ROUTE_DEFAULT_STATUS = {
     "verification": "passed",
 }
 INTAKE_ROUTE_CUES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("adrs", ("adr:", "adr ", "architecture decision record", "architecture decision")),
-    ("decisions", ("decision:", "decided:", "do-not-revisit", "do not revisit", "we decided", "accepted decision")),
+    (
+        "adrs",
+        (
+            "adr:",
+            "adr ",
+            "architecture decision record",
+            "architecture decision",
+            "architecture markdown",
+            "architecture route",
+            "target architecture",
+        ),
+    ),
+    (
+        "decisions",
+        (
+            "decision:",
+            "decision record",
+            "decided:",
+            "do-not-revisit",
+            "do not revisit",
+            "we decided",
+            "accepted decision",
+        ),
+    ),
     ("verification", ("verification:", "verified:", "pytest", "tests passed", "smoke passed", "validation passed", "evidence:")),
     ("product-docs", ("docs impact:", "doc impact:", "documentation:", "readme", "docs update", "documentation update")),
     ("archive", ("archive reference:", "archived reference", "historical reference", "legacy reference", "for reference only")),
@@ -635,9 +657,9 @@ def _normalized_intake_text(text: str) -> str:
 
 def _intake_next_action(route_id: str) -> str:
     actions = {
-        "adrs": "write an ADR under project/adrs/ only when an architecture decision is accepted",
+        "adrs": "draft a reviewed ADR under project/adrs/; intake never marks an architecture decision accepted by itself",
         "archive": "write under project/archive/reference/** only for explicit historical reference material",
-        "decisions": "write a decision record under project/decisions/ when rationale should not be rediscovered",
+        "decisions": "draft a reviewed decision record under project/decisions/; intake never marks rationale accepted by itself",
         "incubation": "use project/plan-incubation/*.md for future ideas that are not yet accepted work; safest write rail: `mylittleharness --root <root> incubate --dry-run --topic \"<topic>\" --note \"<note>\"` before the matching apply",
         "product-docs": "route docs impact to the relevant docs/**/*.md product contract or README surface",
         "research": "write imported or distilled research under project/research/*.md before promotion",

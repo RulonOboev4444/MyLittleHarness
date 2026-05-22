@@ -138,7 +138,14 @@ class MemoryHygieneTests(unittest.TestCase):
                 "workflow-rollout-slices-spec.md",
                 "workflow-verification-and-closeout-spec.md",
             ):
-                (root / f"project/specs/workflow/{spec_name}").write_text(f"# {spec_name}\n", encoding="utf-8")
+                (root / f"project/specs/workflow/{spec_name}").write_text(
+                    "---\n"
+                    'spec_status: "draft"\n'
+                    'implementation_posture: "target-only"\n'
+                    "---\n"
+                    f"# {spec_name}\n",
+                    encoding="utf-8",
+                )
             ledger_rel = "project/verification/autonomous-mlh-swim-ledger.md"
             source_text = "# Autonomous MLH Swim Ledger\n\nOld verification history.\n"
             ledger = root / ledger_rel
@@ -1187,6 +1194,15 @@ def make_live_root(root: Path) -> Path:
     (root / "AGENTS.md").write_text("# Agents\n", encoding="utf-8")
     (root / "README.md").write_text("# Sample\n", encoding="utf-8")
     (root / "project/specs/workflow/workflow-memory-routing-spec.md").write_text("# Routing Spec\n", encoding="utf-8")
+    workflow_dir = root / "project" / "specs" / "workflow"
+    (workflow_dir / "workflow-memory-routing-spec.md").write_text(
+        "---\n"
+        'spec_status: "draft"\n'
+        'implementation_posture: "target-only"\n'
+        "---\n"
+        "# Routing Spec\n",
+        encoding="utf-8",
+    )
     return root
 
 

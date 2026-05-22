@@ -1046,8 +1046,8 @@ class PackageMetadataTests(unittest.TestCase):
         self.assertIn("Use MLH lifecycle routes instead of ad hoc memory pockets", template)
         self.assertIn("meta-feedback capture is opt-in, not a default start-pass requirement", template)
         self.assertNotIn("agent-operability micro-friction", template)
-        self.assertIn("opt-in `meta-feedback`", readme)
-        self.assertIn("`meta-feedback` is opt-in and is not part of the default start pass", readme)
+        self.assertNotIn("meta-feedback", readme)
+        self.assertNotIn("MYLITTLEHARNESS_META_FEEDBACK_ROOT", readme)
         self.assertNotIn("future-optional", template)
         for expected in (
             "`status`, `check`, and `intelligence --focus routes`",

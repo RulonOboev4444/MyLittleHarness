@@ -907,6 +907,18 @@ def main(argv: list[str] | None = None) -> int:
             destination_source=_meta_feedback_destination_source(args.to_root, env_destination_root),
             env_destination_root=env_destination_root,
             to_root=args.to_root,
+            hook_event=args.hook_event,
+            tool_name=args.tool_name,
+            blocked_surface=args.blocked_surface,
+            intended_route=args.intended_route,
+            legal_route_available=args.legal_route_available,
+            next_safe_command=args.next_safe_command,
+            hook_classification=args.hook_classification,
+            false_positive_shape=args.false_positive_shape,
+            false_negative_shape=args.false_negative_shape,
+            output_suppression=args.output_suppression,
+            partial_execution_risk=args.partial_execution_risk,
+            suggested_policy_change=args.suggested_policy_change,
         )
         report_name = "meta-feedback --apply" if args.apply else "meta-feedback --dry-run"
         lifecycle_before = _lifecycle_posture(destination_inventory) if args.apply else None
@@ -1079,10 +1091,7 @@ def _transition_dry_run_findings(inventory, args) -> list[Finding]:
         return findings
     if args.complete_current_phase:
         findings.append(Finding("info", "transition-step", "would complete current phase through writeback --phase-status complete", "project/project-state.md"))
-        phase_findings = writeback_dry_run_findings(
-            inventory,
-            make_writeback_request(phase_status="complete", allow_auto_compaction=args.allow_auto_compaction),
-        )
+        phase_findings = writeback_dry_run_findings(inventory, _transition_phase_complete_request(args))
         findings.extend(phase_findings)
         phase_completion_preview_ok = not any(finding.severity in {"warn", "error"} for finding in phase_findings)
         if phase_completion_preview_ok:
@@ -1169,7 +1178,7 @@ def _transition_apply_findings(inventory, args) -> list[Finding]:
     current = inventory
     if args.complete_current_phase:
         findings.append(Finding("info", "transition-step", "completing current phase through writeback --phase-status complete", "project/project-state.md"))
-        step_findings = writeback_apply_findings(current, make_writeback_request(phase_status="complete", allow_auto_compaction=args.allow_auto_compaction))
+        step_findings = writeback_apply_findings(current, _transition_phase_complete_request(args))
         findings.extend(step_findings)
         if any(finding.severity == "error" for finding in step_findings):
             return findings
@@ -1377,6 +1386,23 @@ def _transition_archive_request(inventory, args):
         residual_risk=args.residual_risk,
         carry_forward=args.carry_forward,
         work_result=args.work_result,
+    )
+
+
+def _transition_phase_complete_request(args):
+    return make_writeback_request(
+        allow_auto_compaction=args.allow_auto_compaction,
+        from_active_plan=args.from_active_plan,
+        worktree_start_state=args.worktree_start_state,
+        task_scope=args.task_scope,
+        docs_decision=args.docs_decision,
+        state_writeback=args.state_writeback,
+        verification=args.verification,
+        commit_decision=args.commit_decision,
+        residual_risk=args.residual_risk,
+        carry_forward=args.carry_forward,
+        work_result=args.work_result,
+        phase_status="complete",
     )
 
 
@@ -2297,13 +2323,34 @@ def _suggestions(command: str, findings) -> list[str]:
         ):
             return ["meta-feedback dry-run was refused before any candidate note or cluster metadata preview became reliable."]
         if any(finding.code == "meta-feedback-dry-run" for finding in findings):
+            if any(
+                finding.code == "meta-feedback-dedupe"
+                and "append to existing canonical incubation cluster" in str(finding.message or "")
+                for finding in findings
+            ):
+                return [
+                    "meta-feedback dry-run reported the existing-cluster append path, dedupe decision, "
+                    "cluster metadata, and explicit roadmap-detached boundary without new-note guidance."
+                ]
             return ["meta-feedback dry-run reported the candidate note, dedupe decision, cluster metadata, and explicit roadmap-detached boundary without writing files."]
         return ["meta-feedback apply collected the candidate note and cluster metadata; roadmap promotion, next-plan opening, and release removal remain explicit."]
     if command == "intake":
         if any(finding.severity == "error" for finding in findings):
             return ["intake apply was refused before any routed note was written."]
         if any(finding.code == "intake-dry-run" for finding in findings):
+            if any(
+                finding.code == "intake-route-advisor"
+                and any(marker in str(finding.message or "") for marker in ("classify input as adrs", "classify input as decisions"))
+                for finding in findings
+            ):
+                return ["intake dry-run routed durable architecture/decision knowledge to a reviewed draft lane without writing files."]
             return ["intake dry-run classified the incoming text without writing files."]
+        if any(
+            finding.code == "intake-route-advisor"
+            and any(marker in str(finding.message or "") for marker in ("classify input as adrs", "classify input as decisions"))
+            for finding in findings
+        ):
+            return ["intake apply wrote one explicit draft ADR/decision note; acceptance remains a separate review decision."]
         return ["intake apply wrote one explicit routed note; classification remains advisory and does not approve lifecycle movement."]
     if command == "research-import":
         if any(finding.severity == "error" for finding in findings):

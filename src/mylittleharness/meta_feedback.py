@@ -24,6 +24,34 @@ AGENT_OPERABILITY_FRICTION_SCOPE = (
     "command ergonomics, route discovery, dry-run/apply wording, docs_decision pressure, and state-transfer hesitation "
     "when they obscure lifecycle authority, required evidence, recovery, root boundaries, or reviewability"
 )
+CONTRACT_DRIFT_SIGNAL_TYPES = {"lifecycle-contract-drift", "coverage-contract-drift", "authority-contract-drift"}
+CONTRACT_DRIFT_OWNER_COMMANDS = "meta-feedback, plan, roadmap, check, and the route-specific owner command"
+CONTRACT_DRIFT_SCOPE = (
+    "coverage markers, related-plan facts, and active phase target or write scope that disagree about "
+    "which owner route may accept the work"
+)
+CONTRACT_DRIFT_FIELDS = (
+    ("claimed_contract", "claimed contract"),
+    ("effective_owner", "effective owner"),
+    ("drift_surface", "drift surface"),
+    ("drift_consequence", "drift consequence"),
+)
+HOOK_INCIDENT_SIGNAL_TYPES = {"hook-incident", "hook-analysis", "agent-operability-hook-analysis"}
+HOOK_INCIDENT_OWNER_COMMANDS = "hooks, meta-feedback, and the route-specific owner command"
+HOOK_INCIDENT_FIELDS = (
+    ("hook_event", "hook event"),
+    ("tool_name", "tool name"),
+    ("blocked_surface", "blocked surface"),
+    ("intended_route", "intended route"),
+    ("legal_route_available", "legal route available"),
+    ("next_safe_command", "next safe command"),
+    ("hook_classification", "hook classification"),
+    ("false_positive_shape", "false positive shape"),
+    ("false_negative_shape", "false negative shape"),
+    ("output_suppression", "output suppression"),
+    ("partial_execution_risk", "partial execution risk"),
+    ("suggested_policy_change", "suggested policy change"),
+)
 CLUSTER_BEGIN = "<!-- BEGIN mylittleharness-meta-feedback-cluster v1 -->"
 CLUSTER_END = "<!-- END mylittleharness-meta-feedback-cluster v1 -->"
 UNSPECIFIED_ROUTE = "unspecified"
@@ -87,6 +115,18 @@ class MetaFeedbackRequest:
     destination_source: str
     env_destination_root: str
     to_root: str
+    hook_event: str
+    tool_name: str
+    blocked_surface: str
+    intended_route: str
+    legal_route_available: str
+    next_safe_command: str
+    hook_classification: str
+    false_positive_shape: str
+    false_negative_shape: str
+    output_suppression: str
+    partial_execution_risk: str
+    suggested_policy_change: str
 
 
 @dataclass(frozen=True)
@@ -142,6 +182,18 @@ def make_meta_feedback_request(
     destination_source: str | None = None,
     env_destination_root: str | None = None,
     to_root: str | None = None,
+    hook_event: str | None = None,
+    tool_name: str | None = None,
+    blocked_surface: str | None = None,
+    intended_route: str | None = None,
+    legal_route_available: str | None = None,
+    next_safe_command: str | None = None,
+    hook_classification: str | None = None,
+    false_positive_shape: str | None = None,
+    false_negative_shape: str | None = None,
+    output_suppression: str | None = None,
+    partial_execution_risk: str | None = None,
+    suggested_policy_change: str | None = None,
 ) -> MetaFeedbackRequest:
     normalized_topic = _normalized_text(topic)
     normalized_note = str(note or "").strip()
@@ -165,6 +217,18 @@ def make_meta_feedback_request(
         destination_source=_normalized_text(destination_source),
         env_destination_root=_normalized_pathish(env_destination_root),
         to_root=_normalized_pathish(to_root),
+        hook_event=_normalized_text(hook_event) or _structured_line_field(normalized_note, "hook_event"),
+        tool_name=_normalized_text(tool_name) or _structured_line_field(normalized_note, "tool_name"),
+        blocked_surface=_normalized_text(blocked_surface) or _structured_line_field(normalized_note, "blocked_surface"),
+        intended_route=_normalized_text(intended_route) or _structured_line_field(normalized_note, "intended_route"),
+        legal_route_available=_normalized_text(legal_route_available) or _structured_line_field(normalized_note, "legal_route_available"),
+        next_safe_command=_normalized_text(next_safe_command) or _structured_line_field(normalized_note, "next_safe_command"),
+        hook_classification=_normalized_text(hook_classification) or _structured_line_field(normalized_note, "hook_classification"),
+        false_positive_shape=_normalized_text(false_positive_shape) or _structured_line_field(normalized_note, "false_positive_shape"),
+        false_negative_shape=_normalized_text(false_negative_shape) or _structured_line_field(normalized_note, "false_negative_shape"),
+        output_suppression=_normalized_text(output_suppression) or _structured_line_field(normalized_note, "output_suppression"),
+        partial_execution_risk=_normalized_text(partial_execution_risk) or _structured_line_field(normalized_note, "partial_execution_risk"),
+        suggested_policy_change=_normalized_text(suggested_policy_change) or _structured_line_field(normalized_note, "suggested_policy_change"),
     )
 
 
@@ -205,6 +269,8 @@ def meta_feedback_dry_run_findings(inventory: Inventory, request: MetaFeedbackRe
     findings.extend(_cluster_route_write_findings(inventory, observation, apply=False))
     findings.append(_dedupe_finding(inventory, observation, apply=False))
     findings.extend(_agent_operability_findings(request, apply=False))
+    findings.extend(_contract_drift_findings(request, apply=False))
+    findings.extend(_hook_incident_findings(request, apply=False))
     findings.extend(_roadmap_detached_findings(request, apply=False))
     findings.extend(_boundary_findings(apply=False))
     findings.append(
@@ -249,6 +315,8 @@ def meta_feedback_apply_findings(inventory: Inventory, request: MetaFeedbackRequ
 
     findings.append(_dedupe_finding(inventory, observation, apply=True))
     findings.extend(_agent_operability_findings(request, apply=True))
+    findings.extend(_contract_drift_findings(request, apply=True))
+    findings.extend(_hook_incident_findings(request, apply=True))
     findings.extend(_roadmap_detached_findings(request, apply=True))
     findings.extend(_boundary_findings(apply=True))
     findings.append(
@@ -353,6 +421,8 @@ def _note_body(request: MetaFeedbackRequest, observation: ClusterObservation) ->
             f"- occurrence_count_delta: {observation.occurrence_count_delta}\n"
             "- correction_boundary: correction marker only; historical entries remain append-only evidence.\n"
         )
+    contract_drift_fields = _contract_drift_note_fields(request)
+    hook_incident_fields = _hook_incident_note_fields(request)
     return (
         f"{request.note}\n\n"
         "Meta-feedback intake fields:\n"
@@ -378,6 +448,8 @@ def _note_body(request: MetaFeedbackRequest, observation: ClusterObservation) ->
         f"- latest_observation_hash: {observation.latest_observation_hash}\n"
         f"- expected_owner_command: {_expected_owner_command(request)}\n"
         f"{agent_operability_fields}"
+        f"{contract_drift_fields}"
+        f"{hook_incident_fields}"
         "- authority_boundary: operating-memory capture only; roadmap promotion requires explicit roadmap review; "
         f"{RELEASE_BOUNDARY}.\n"
     )
@@ -465,6 +537,54 @@ def _agent_operability_findings(request: MetaFeedbackRequest, *, apply: bool) ->
     ]
 
 
+def _contract_drift_findings(request: MetaFeedbackRequest, *, apply: bool) -> list[Finding]:
+    if not _has_contract_drift_profile(request):
+        return []
+    prefix = "" if apply else "would "
+    return [
+        Finding(
+            "info",
+            "meta-feedback-contract-drift-profile",
+            (
+                f"{prefix}capture lifecycle contract drift as a first-class MLH feedback signal; "
+                f"owner commands: {_expected_owner_command(request)}"
+            ),
+        ),
+        Finding(
+            "info",
+            "meta-feedback-contract-drift-boundary",
+            (
+                f"{prefix}record {CONTRACT_DRIFT_SCOPE} as operating memory without widening write scope "
+                f"or accepting roadmap coverage; {RELEASE_BOUNDARY}"
+            ),
+        ),
+    ]
+
+
+def _hook_incident_findings(request: MetaFeedbackRequest, *, apply: bool) -> list[Finding]:
+    if not _has_hook_incident_profile(request):
+        return []
+    prefix = "" if apply else "would "
+    return [
+        Finding(
+            "info",
+            "meta-feedback-hook-incident-profile",
+            (
+                f"{prefix}capture hook behavior as a first-class MLH feedback signal; "
+                f"owner commands: {_expected_owner_command(request)}"
+            ),
+        ),
+        Finding(
+            "info",
+            "meta-feedback-hook-incident-boundary",
+            (
+                f"{prefix}record whether the hook was safety-correct, overblocked, underblocked, suppressed output, "
+                f"missed the next safe command, or risked partial execution; {RELEASE_BOUNDARY}"
+            ),
+        ),
+    ]
+
+
 def _dedupe_finding(inventory: Inventory, observation: ClusterObservation, *, apply: bool) -> Finding:
     existing = (inventory.root / observation.source_rel).is_file()
     prefix = "" if apply else "would "
@@ -472,7 +592,11 @@ def _dedupe_finding(inventory: Inventory, observation: ClusterObservation, *, ap
         return Finding(
             "info",
             "meta-feedback-dedupe",
-            f"{prefix}append to existing canonical incubation cluster {observation.canonical_id!r}; duplicate note creation is skipped",
+            (
+                f"{prefix}append to existing canonical incubation cluster {observation.canonical_id!r}; "
+                "no new canonical note path is needed; use --dedupe-to <canonical-id> when an intentional "
+                "near-duplicate should append here"
+            ),
             observation.source_rel,
         )
     return Finding("info", "meta-feedback-dedupe", f"{prefix}create new canonical incubation cluster {observation.canonical_id!r}; no exact duplicate id was found", observation.source_rel)
@@ -482,7 +606,7 @@ def _cluster_observation(inventory: Inventory, request: MetaFeedbackRequest) -> 
     signal_type = request.signal_type.casefold().replace("_", "-")
     expected_owner_command = _expected_owner_command(request)
     affected_routes = _affected_routes(request)
-    problem_tokens = _problem_tokens(request.note)
+    problem_tokens = _problem_tokens(_observation_problem_text(request))
     friction_signature = _friction_signature(inventory, signal_type, expected_owner_command, affected_routes, problem_tokens)
     latest_hash = sha256(_normalized_observation_text(request).encode("utf-8")).hexdigest()[:16]
     records = _cluster_records(inventory)
@@ -811,7 +935,7 @@ def _canonical_topic(request: MetaFeedbackRequest, observation: ClusterObservati
 
 
 def _affected_routes(request: MetaFeedbackRequest) -> tuple[str, ...]:
-    haystack = f"{request.topic}\n{request.note}"
+    haystack = "\n".join((request.topic, request.note, request.blocked_surface, request.intended_route, request.next_safe_command))
     structured_routes = _structured_list_field(request.note, "affected_routes")
     if structured_routes:
         return tuple(_dedupe_nonempty(structured_routes))
@@ -853,7 +977,18 @@ def _friction_signature(
 
 
 def _normalized_observation_text(request: MetaFeedbackRequest) -> str:
-    return "|".join((request.topic, request.note, request.from_root, request.signal_type, request.severity, request.correction_of))
+    return "|".join(
+        (
+            request.topic,
+            request.note,
+            request.from_root,
+            request.signal_type,
+            request.severity,
+            request.correction_of,
+            _contract_drift_profile_text(request),
+            _hook_incident_profile_text(request),
+        )
+    )
 
 
 def _cluster_record_looks_related(
@@ -996,16 +1131,85 @@ def _normalized_item_id(value: object) -> str:
 
 
 def _is_agent_operability_signal(request: MetaFeedbackRequest) -> bool:
-    return request.signal_type.casefold().replace("_", "-") in AGENT_OPERABILITY_SIGNAL_TYPES
+    signal_type = request.signal_type.casefold().replace("_", "-")
+    return signal_type in AGENT_OPERABILITY_SIGNAL_TYPES or signal_type in HOOK_INCIDENT_SIGNAL_TYPES
 
 
 def _expected_owner_command(request: MetaFeedbackRequest) -> str:
     note_owner = _structured_line_field(request.note, "expected_owner_command")
     if note_owner:
         return note_owner
+    if _is_contract_drift_signal(request):
+        return CONTRACT_DRIFT_OWNER_COMMANDS
+    if _is_hook_incident_signal(request):
+        if request.intended_route:
+            return f"hooks, {request.intended_route}, and meta-feedback"
+        return HOOK_INCIDENT_OWNER_COMMANDS
     if _is_agent_operability_signal(request):
         return AGENT_OPERABILITY_OWNER_COMMANDS
     return "meta-feedback"
+
+
+def _is_hook_incident_signal(request: MetaFeedbackRequest) -> bool:
+    return request.signal_type.casefold().replace("_", "-") in HOOK_INCIDENT_SIGNAL_TYPES
+
+
+def _is_contract_drift_signal(request: MetaFeedbackRequest) -> bool:
+    return request.signal_type.casefold().replace("_", "-") in CONTRACT_DRIFT_SIGNAL_TYPES
+
+
+def _has_contract_drift_profile(request: MetaFeedbackRequest) -> bool:
+    return _is_contract_drift_signal(request) or any(_contract_drift_value(request, field_name) for field_name, _label in CONTRACT_DRIFT_FIELDS)
+
+
+def _contract_drift_note_fields(request: MetaFeedbackRequest) -> str:
+    if not _has_contract_drift_profile(request):
+        return ""
+    lines = ["- contract_drift_profile: captured\n"]
+    for field_name, _label in CONTRACT_DRIFT_FIELDS:
+        value = _contract_drift_value(request, field_name)
+        lines.append(f"- {field_name}: {value or '<unspecified>'}\n")
+    lines.append(
+        "- contract_drift_boundary: capture claimed coverage against effective owner scope without widening write scope or accepting roadmap coverage.\n"
+    )
+    return "".join(lines)
+
+
+def _contract_drift_profile_text(request: MetaFeedbackRequest) -> str:
+    return "|".join(_contract_drift_value(request, field_name) for field_name, _label in CONTRACT_DRIFT_FIELDS)
+
+
+def _contract_drift_value(request: MetaFeedbackRequest, field_name: str) -> str:
+    return _structured_line_field(request.note, field_name)
+
+
+def _has_hook_incident_profile(request: MetaFeedbackRequest) -> bool:
+    return _is_hook_incident_signal(request) or any(_hook_incident_value(request, field_name) for field_name, _label in HOOK_INCIDENT_FIELDS)
+
+
+def _hook_incident_note_fields(request: MetaFeedbackRequest) -> str:
+    if not _has_hook_incident_profile(request):
+        return ""
+    lines = ["- hook_incident_profile: captured\n"]
+    for field_name, label in HOOK_INCIDENT_FIELDS:
+        value = _hook_incident_value(request, field_name)
+        lines.append(f"- {field_name}: {value or '<unspecified>'}\n")
+    lines.append(
+        "- hook_analysis_boundary: classify hook behavior without treating hook output as lifecycle approval or weakening safety gates.\n"
+    )
+    return "".join(lines)
+
+
+def _hook_incident_profile_text(request: MetaFeedbackRequest) -> str:
+    return "|".join(_hook_incident_value(request, field_name) for field_name, _label in HOOK_INCIDENT_FIELDS)
+
+
+def _observation_problem_text(request: MetaFeedbackRequest) -> str:
+    return "\n".join((request.note, _contract_drift_profile_text(request), _hook_incident_profile_text(request)))
+
+
+def _hook_incident_value(request: MetaFeedbackRequest, field_name: str) -> str:
+    return str(getattr(request, field_name, "") or "").strip()
 
 
 def _structured_line_field(text: str, key: str) -> str:

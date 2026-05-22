@@ -111,6 +111,15 @@ FAN_IN_RESULT_LIMIT = 20
 CURRENT_PHASE_ONLY_POLICY = "current-phase-only"
 CENTRAL_META_FEEDBACK_PROJECT = "MyLittleHarness-dev"
 META_FEEDBACK_ROOT_ENV_VAR = "MYLITTLEHARNESS_META_FEEDBACK_ROOT"
+NONROUTE_PROJECT_MARKDOWN_EXEMPT_PREFIXES = (
+    "project/cache/",
+    "project/generated/",
+    "project/private/",
+    "project/scratch/",
+    "project/secrets/",
+    "project/temp/",
+    "project/tmp/",
+)
 COMMAND_SURFACE_SENTINEL_COMMANDS = ("transition", "roadmap", "meta-feedback")
 COMMAND_SURFACE_PROBE_TIMEOUT_SECONDS = 5
 RETIRED_COMMAND_DOC_SURFACES = ("mirror", "research-prompt")
@@ -867,6 +876,42 @@ def _ordered_route_ids(route_counts: dict[str, list[Surface]]) -> list[str]:
     return sorted(route_counts, key=lambda route_id: (registry_order.get(route_id, len(registry_order)), route_id))
 
 
+def _nonroute_project_markdown_findings(inventory: Inventory) -> list[Finding]:
+    if inventory.root_kind != "live_operating_root":
+        return []
+    project_root = inventory.root / "project"
+    if not project_root.is_dir():
+        return []
+
+    findings: list[Finding] = []
+    for path in sorted(project_root.rglob("*.md")):
+        if not path.is_file():
+            continue
+        rel_path = path.relative_to(inventory.root).as_posix()
+        if _is_nonroute_project_markdown_exempt(rel_path):
+            continue
+        if classify_memory_route(rel_path).route_id != "unclassified":
+            continue
+        findings.append(
+            Finding(
+                "warn",
+                "nonroute-project-markdown-blind-spot",
+                (
+                    f"{rel_path} is project Markdown outside the MLH-visible route inventory; route durable knowledge "
+                    "through intake or an owned project/adrs, project/decisions, project/research, project/plan-incubation, "
+                    "or project/verification lane"
+                ),
+                rel_path,
+            )
+        )
+    return findings
+
+
+def _is_nonroute_project_markdown_exempt(rel_path: str) -> bool:
+    normalized = str(rel_path or "").replace("\\", "/").casefold()
+    return any(normalized.startswith(prefix) for prefix in NONROUTE_PROJECT_MARKDOWN_EXEMPT_PREFIXES)
+
+
 def validation_findings(inventory: Inventory) -> list[Finding]:
     findings: list[Finding] = []
     findings.extend(_required_surface_findings(inventory))
@@ -879,6 +924,7 @@ def validation_findings(inventory: Inventory) -> list[Finding]:
     findings.extend(_spec_lifecycle_posture_findings(inventory))
     findings.extend(_frontmatter_findings(inventory))
     findings.extend(_route_metadata_findings(inventory))
+    findings.extend(_nonroute_project_markdown_findings(inventory))
     findings.extend(roadmap_order_namespace_findings(inventory))
     findings.extend(roadmap_terminal_related_plan_findings(inventory))
     findings.extend(roadmap_source_incubation_evidence_findings(inventory))
@@ -2294,6 +2340,14 @@ WORKFLOW_ATTACH_DIRECTORIES = (
     "project/specs/workflow",
     "project/research",
     "project/plan-incubation",
+    "project/decisions",
+    "project/adrs",
+    "project/verification",
+    "project/verification/agent-runs",
+    "project/verification/approval-packets",
+    "project/verification/handoffs",
+    "project/verification/session-active-work",
+    "project/verification/work-claims",
     "project/archive/plans",
     "project/archive/reference",
 )
@@ -2692,7 +2746,7 @@ def attach_dry_run_findings(inventory: Inventory, project_name: str | None = Non
 
     normalized_project = _normalize_project_name(project_name)
     if _is_attach_already_attached_live_root(inventory, normalized_project):
-        findings.extend(_attach_already_attached_dry_run_findings())
+        findings.extend(_attach_already_attached_dry_run_findings(inventory))
         findings.extend(connect_readiness_findings(inventory, "attach-connect-readiness"))
         return findings
 
@@ -2931,19 +2985,26 @@ def _attach_generated_projection_preflight_errors(inventory: Inventory) -> list[
     return errors
 
 
-def _attach_already_attached_dry_run_findings() -> list[Finding]:
-    return [
+def _attach_already_attached_dry_run_findings(inventory: Inventory) -> list[Finding]:
+    findings = [
         Finding(
             "info",
             "attach-already-attached",
-            "already-attached live operating root: default workflow manifest and project-state authority are readable; no create-only attach changes are proposed",
+            "already-attached live operating root: default workflow manifest and project-state authority are readable; first-run templates and generated projection setup are skipped",
             ATTACH_STATE_REL_PATH,
         ),
         Finding("info", "attach-existing", f"existing workflow manifest authority: {ATTACH_MANIFEST_REL_PATH}", ATTACH_MANIFEST_REL_PATH),
         Finding("info", "attach-existing", f"existing project-state authority: {ATTACH_STATE_REL_PATH}", ATTACH_STATE_REL_PATH),
         Finding("info", "attach-codex-hooks-plan", "attach --apply would still ensure project-local Codex native hooks by default", ".codex/hooks.json"),
-        Finding("info", "attach-proposal", "root is already attached; first-run template conflict checks and generated projection setup are skipped"),
     ]
+    missing_dirs = [rel_path for rel_path in WORKFLOW_ATTACH_DIRECTORIES if not (inventory.root / rel_path).exists()]
+    if missing_dirs:
+        for rel_path in missing_dirs:
+            findings.append(Finding("warn", "attach-proposal", f"would create missing advertised scaffold directory: {rel_path}", rel_path))
+    else:
+        findings.append(Finding("info", "attach-proposal", "all advertised scaffold directories are already present"))
+    findings.append(Finding("info", "attach-proposal", "root is already attached; attach --apply may create only missing advertised scaffold directories and Codex hook files"))
+    return findings
 
 
 def _attach_already_attached_apply_findings(inventory: Inventory) -> list[Finding]:
@@ -2951,17 +3012,41 @@ def _attach_already_attached_apply_findings(inventory: Inventory) -> list[Findin
         Finding(
             "info",
             "attach-already-attached",
-            "already-attached live operating root; attach --apply preserved authority files and ensured project-local Codex native hooks",
+            "already-attached live operating root; attach --apply preserved authority files and ensured advertised scaffold directories plus project-local Codex native hooks",
             ATTACH_STATE_REL_PATH,
         ),
         Finding("info", "attach-existing", f"preserved workflow manifest authority: {ATTACH_MANIFEST_REL_PATH}", ATTACH_MANIFEST_REL_PATH),
         Finding("info", "attach-existing", f"preserved project-state authority: {ATTACH_STATE_REL_PATH}", ATTACH_STATE_REL_PATH),
-        Finding("info", "attach-apply-boundary", "already-attached apply skips create-only template and generated projection writes, but keeps project-local Codex native hooks current"),
     ]
     hook_errors = _attach_codex_hook_preflight_errors(inventory)
     if hook_errors:
         return hook_errors
-    findings.extend(_attach_codex_hook_apply_findings(inventory))
+
+    created_paths: list[str] = []
+    existing_paths: list[str] = []
+    for rel_path in WORKFLOW_ATTACH_DIRECTORIES:
+        path = inventory.root / rel_path
+        if path.exists():
+            existing_paths.append(rel_path)
+            continue
+        path.mkdir(parents=True, exist_ok=False)
+        created_paths.append(rel_path)
+
+    for rel_path in created_paths:
+        findings.append(Finding("info", "attach-created", f"created missing advertised scaffold directory: {rel_path}", rel_path))
+    for rel_path in existing_paths:
+        findings.append(Finding("info", "attach-scaffold-existing", f"preserved advertised scaffold directory without changes: {rel_path}", rel_path))
+    if not created_paths:
+        findings.append(Finding("info", "attach-scaffold-unchanged", "all advertised scaffold directories were already present"))
+    findings.append(
+        Finding(
+            "info",
+            "attach-apply-boundary",
+            "already-attached apply skips create-only authority templates and generated projection writes, but may create missing advertised scaffold directories and keep project-local Codex native hooks current",
+        )
+    )
+    refreshed_inventory = load_inventory(inventory.root)
+    findings.extend(_attach_codex_hook_apply_findings(refreshed_inventory))
     findings.extend(connect_readiness_findings(load_inventory(inventory.root), "attach-connect-readiness"))
     return findings
 

@@ -810,7 +810,7 @@ def roadmap_batch_slice_gate_findings(
         ]
     accepted_ids = _accepted_batch_item_ids(inventory, ids)
     grouped_markers = _roadmap_grouped_slice_boundary_markers(inventory, ids)
-    should_block = apply and block_apply and len(accepted_ids) > 1 and not grouped_markers
+    should_block = apply and block_apply and len(accepted_ids) > 1
     severity = "error" if should_block else "warn"
     verb = "blocked" if severity == "error" else f"{prefix}cover"
     ids_for_message = accepted_ids if severity == "error" else ids
@@ -819,8 +819,11 @@ def roadmap_batch_slice_gate_findings(
         "reviewed bundle or human-gate evidence; use --only-requested-item for one-slice plan work, "
         "or record bundle_authorization/reviewed_bundle/human_gate_required before intentional batching"
     )
-    if grouped_markers and severity != "error":
-        message += f"; grouped slice boundary marker(s) present: {', '.join(grouped_markers)}"
+    if grouped_markers:
+        message += (
+            f"; grouped slice boundary marker(s) present: {', '.join(grouped_markers)} "
+            "but those markers are advisory only and do not authorize multi-slice plan apply"
+        )
     return [
         Finding(
             severity,

@@ -11,6 +11,7 @@ from .dashboard import dashboard_agent_packet, dashboard_payload, mlhd_freshness
 from .inventory import Inventory
 from .models import Finding
 from .preflight import preflight_sections
+from .routes import classify_memory_route
 
 
 HOOK_PRE_COMMIT = "git-pre-commit"
@@ -66,6 +67,31 @@ NATIVE_ADAPTER_HOOKS = CODEX_NATIVE_HOOKS
 RUNNABLE_HOOKS = (HOOK_PRE_COMMIT, HOOK_AGENT_STATUS, *CODEX_NATIVE_HOOKS)
 FIRST_CONTACT_HOOKS = (HOOK_SESSION_START, HOOK_USER_PROMPT_SUBMIT)
 TOOL_USE_HOOKS = (HOOK_PRE_TOOL_USE, HOOK_POST_TOOL_USE)
+FAST_COMMAND_OUTPUT_HOOKS = (HOOK_USER_PROMPT_SUBMIT, HOOK_PRE_TOOL_USE, HOOK_POST_TOOL_USE, HOOK_STOP)
+BOUNDED_MLH_READ_TOOL_SUFFIXES = (
+    "mylittleharness_read_projection",
+    "mylittleharness_read_source",
+    "mylittleharness_related_or_bundle",
+    "mylittleharness_search",
+)
+READ_ONLY_SOURCE_DISCOVERY_COMMANDS = {
+    "rg",
+    "ripgrep",
+    "select-string",
+    "findstr",
+}
+MLH_OWNER_ROUTE_REVIEW_COMMANDS = {
+    "incubate",
+    "memory-hygiene",
+    "meta-feedback",
+    "plan",
+    "projection",
+    "repair",
+    "research-import",
+    "roadmap",
+    "transition",
+    "writeback",
+}
 WRITING_COMMAND_TOKENS = (
     ">",
     ">>",
@@ -103,6 +129,15 @@ LIFECYCLE_AUTHORITY_PATHS = (
     "project/roadmap.md",
 )
 GENERATED_CACHE_PREFIXES = (".mylittleharness/generated/",)
+NONROUTE_PROJECT_MARKDOWN_EXEMPT_PREFIXES = (
+    "project/cache/",
+    "project/generated/",
+    "project/private/",
+    "project/scratch/",
+    "project/secrets/",
+    "project/temp/",
+    "project/tmp/",
+)
 CODE_WRITE_PREFIXES = ("src/", "tests/")
 GIT_WRITE_COMMANDS = (
     " git add ",
@@ -436,6 +471,9 @@ def hook_event_payload(inventory: Inventory, hook_id: str, hook_args: list[str],
 
 
 def codex_hook_command_output(inventory: Inventory, hook_id: str, hook_input_text: str = "") -> dict[str, object]:
+    if hook_id in FAST_COMMAND_OUTPUT_HOOKS:
+        return _codex_hook_command_output_fast(inventory, hook_id, hook_input_text)
+
     payload = hook_event_payload(inventory, hook_id, [], hook_input_text)
     codex_hints = payload.get("client_hints")
     codex_output = codex_hints.get(CODEX_CLIENT) if isinstance(codex_hints, dict) else {}
@@ -460,10 +498,48 @@ def codex_hook_command_output(inventory: Inventory, hook_id: str, hook_input_tex
             result["hookSpecificOutput"] = hook_specific
         return result
 
+    if hook_id == HOOK_STOP:
+        if blocked:
+            reason = system_message if isinstance(system_message, str) and system_message else "MyLittleHarness blocked this stop event by deterministic policy."
+            return {"decision": "block", "reason": reason}
+        return {}
+
     result = {"continue": bool(codex_output.get("continue", True))}
     if isinstance(system_message, str) and system_message:
         result["systemMessage"] = system_message
     if isinstance(hook_specific, dict):
+        result["hookSpecificOutput"] = hook_specific
+    return result
+
+
+def _codex_hook_command_output_fast(inventory: Inventory, hook_id: str, hook_input_text: str = "") -> dict[str, object]:
+    findings = _native_hook_policy_findings(inventory, hook_id, hook_input_text)
+    blocked = _hook_blocked(findings)
+    system_message = _hook_system_message(findings)
+    hook_specific = _codex_hook_specific_output(hook_id, _hook_event_context(inventory, hook_id), blocked, system_message)
+
+    if hook_id == HOOK_PRE_TOOL_USE:
+        result: dict[str, object] = {}
+        if isinstance(system_message, str) and system_message:
+            result["systemMessage"] = system_message
+        if hook_specific:
+            result["hookSpecificOutput"] = hook_specific
+        return result
+
+    if hook_id == HOOK_USER_PROMPT_SUBMIT and blocked:
+        reason = system_message if isinstance(system_message, str) and system_message else "MyLittleHarness blocked this prompt by deterministic policy."
+        return {"decision": "block", "reason": reason}
+
+    if hook_id == HOOK_STOP:
+        if blocked:
+            reason = system_message if isinstance(system_message, str) and system_message else "MyLittleHarness blocked this stop event by deterministic policy."
+            return {"decision": "block", "reason": reason}
+        return {}
+
+    result: dict[str, object] = {"continue": not blocked}
+    if isinstance(system_message, str) and system_message:
+        result["systemMessage"] = system_message
+    if hook_specific:
         result["hookSpecificOutput"] = hook_specific
     return result
 
@@ -549,7 +625,7 @@ def render_codex_session_start_script() -> str:
             "",
             "import json",
             "",
-            "from mylittleharness.hooks import CODEX_HOOK_EVENTS, CODEX_SESSION_START_EVENT, HOOK_SESSION_START, codex_hook_command_output, codex_session_start_command_output",
+            "from mylittleharness.hooks import CODEX_HOOK_EVENTS, CODEX_SESSION_START_EVENT, HOOK_SESSION_START, HOOK_STOP, codex_hook_command_output, codex_session_start_command_output",
             "from mylittleharness.inventory import load_inventory",
             "",
             "",
@@ -567,14 +643,17 @@ def render_codex_session_start_script() -> str:
             "        else:",
             "            payload = codex_hook_command_output(load_inventory(root), hook_event, hook_input)",
             "    except Exception as exc:",
-            "        payload = {",
-            "            \"continue\": True,",
-            "            \"systemMessage\": f\"MLH hook failed: {exc}\",",
-            "            \"hookSpecificOutput\": {",
-            "                \"hookEventName\": CODEX_HOOK_EVENTS.get(hook_event, CODEX_SESSION_START_EVENT),",
-            "                \"additionalContext\": \"MyLittleHarness first-contact context unavailable; run `mylittleharness --root <root> check` before lifecycle-sensitive work.\",",
-            "            },",
-            "        }",
+            "        if hook_event == HOOK_STOP:",
+            "            payload = {}",
+            "        else:",
+            "            payload = {",
+            "                \"continue\": True,",
+            "                \"systemMessage\": f\"MLH hook failed: {exc}\",",
+            "                \"hookSpecificOutput\": {",
+            "                    \"hookEventName\": CODEX_HOOK_EVENTS.get(hook_event, CODEX_SESSION_START_EVENT),",
+            "                    \"additionalContext\": \"MyLittleHarness first-contact context unavailable; run `mylittleharness --root <root> check` before lifecycle-sensitive work.\",",
+            "                },",
+            "            }",
             "    json.dump(payload, sys.stdout, ensure_ascii=True)",
             "    sys.stdout.write(\"\\n\")",
             "    raise SystemExit(0)",
@@ -935,7 +1014,7 @@ def _hook_system_message(findings: list[Finding]) -> str | None:
 
 
 def _hook_blocked(findings: list[Finding]) -> bool:
-    return any(finding.code.startswith("hooks-policy-block-") for finding in findings)
+    return any(finding.severity == "error" and finding.code.startswith("hooks-policy-block-") for finding in findings)
 
 
 def _codex_hook_specific_output(hook_id: str, additional_context: str, blocked: bool, system_message: str | None) -> dict[str, object]:
@@ -1015,7 +1094,7 @@ def _user_prompt_policy_findings(inventory: Inventory, hook_input_text: str) -> 
         findings.append(
             Finding(
                 "warn",
-                "hooks-policy-shortcut-prompt",
+                "hooks-policy-block-shortcut-prompt",
                 "prompt appears to ask for shortcut-prone lifecycle work; use dashboard, active plan, check, and explicit dry-run/apply rails before mutation",
                 "project/project-state.md" if inventory.state and inventory.state.exists else None,
             )
@@ -1027,6 +1106,9 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
     data = _hook_input_data(hook_input_text)
     text = _hook_input_search_text(hook_input_text)
     paths = _hook_input_paths(data, text)
+    command = _hook_input_command(data, text)
+    write_command = _hook_write_command(data, command)
+    lowered = command.casefold()
     findings = [
         Finding(
             "info",
@@ -1034,11 +1116,16 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
             "pre-tool-use inspects declared tool intent and blocks deterministic MLH shortcut attempts before tool execution",
         )
     ]
-    for finding in _path_policy_findings(inventory, paths):
+    allow_read_only_source_paths = _is_read_only_source_discovery_command(command) or _is_bounded_mlh_read_tool_request(data)
+    allow_mlh_owner_route_paths = _is_mlh_owner_route_review_command(command)
+    for finding in _path_policy_findings(
+        inventory,
+        paths,
+        allow_read_only_source_paths=allow_read_only_source_paths,
+        allow_mlh_owner_route_paths=allow_mlh_owner_route_paths,
+    ):
         findings.append(finding)
-    command = _hook_input_command(data, text)
-    lowered = command.casefold()
-    if _looks_like_generated_cache_write(paths, command):
+    if _looks_like_generated_cache_write(paths, write_command):
         findings.append(
             Finding(
                 "error",
@@ -1047,7 +1134,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 ".mylittleharness/generated",
             )
         )
-    if _looks_like_lifecycle_markdown_write(paths, command):
+    if _looks_like_lifecycle_markdown_write(paths, write_command):
         findings.append(
             Finding(
                 "error",
@@ -1056,14 +1143,28 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 paths[0] if paths else "project",
             )
         )
-    if _looks_like_code_write(paths, command):
+    nonroute_markdown = _nonroute_project_markdown_write_path(paths, write_command)
+    if nonroute_markdown:
+        findings.append(
+            Finding(
+                "error",
+                "hooks-policy-block-nonroute-project-markdown-write",
+                (
+                    "blocked project Markdown write outside an MLH-visible route; use intake or an owned route such as "
+                    "project/adrs, project/decisions, project/research, project/plan-incubation, or project/verification "
+                    "for durable knowledge"
+                ),
+                nonroute_markdown,
+            )
+        )
+    if _looks_like_code_write(paths, write_command):
         out_of_scope = [path for path in paths if _is_code_path(path) and not _is_active_plan_target_artifact(inventory, path)]
         if not _has_active_plan(inventory):
             findings.append(
                 Finding(
-                    "warn",
-                    "hooks-policy-warn-code-write-without-plan",
-                    "tool request appears to write source/test code while no active implementation plan is open; keep edits bounded and record lifecycle evidence before closeout",
+                    "error",
+                    "hooks-policy-block-code-write-without-plan",
+                    "tool request appears to write source/test code while no active implementation plan is open; open or resume the active plan before editing source/test code",
                     out_of_scope[0] if out_of_scope else (paths[0] if paths else None),
                 )
             )
@@ -1102,7 +1203,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 "project/implementation-plan.md",
             )
         )
-    if _looks_like_product_root_direct_edit(inventory, paths, command):
+    if _looks_like_product_root_direct_edit(inventory, paths, write_command):
         findings.append(
             Finding(
                 "error",
@@ -1176,6 +1277,9 @@ def _hook_additional_context(
     readiness = connect_readiness if isinstance(connect_readiness, dict) else {}
     docs = readiness.get("docs", {}) if isinstance(readiness.get("docs"), dict) else {}
     writeback = readiness.get("writeback", {}) if isinstance(readiness.get("writeback"), dict) else {}
+    authority_summary = agent_packet.get("authoritySummary") if isinstance(agent_packet.get("authoritySummary"), str) else ""
+    if not authority_summary:
+        authority_summary = _authority_cards_context(agent_packet.get("authorityCards") or readiness.get("authorityCards"))
     mlhd_payload = mlhd if isinstance(mlhd, dict) else {}
     return "\n".join(
         [
@@ -1184,6 +1288,7 @@ def _hook_additional_context(
             f"- cache: artifacts={_component_status(components, 'artifacts')}; sqlite_index={_component_status(components, 'sqlite_index')}",
             f"- mlhd: control_status={_payload_value(mlhd_payload, 'control_status')}; runtime_cache={_payload_value(mlhd_payload, 'runtime_cache_status')}; dirty_count={_payload_value(mlhd_payload, 'dirty_count')}; last_tick={_payload_value(mlhd_payload, 'last_tick_utc')}; last_failure={_payload_value(mlhd_payload, 'last_failed_refresh_utc')}",
             f"- connect readiness: writeback_required={str(writeback.get('requiredWhenPlanStatusActive') is True).lower()}; docs_decision={_payload_value(docs, 'docsDecision')}; docmap={_payload_value(docs, 'docmapStatus')}; next_safe={_payload_value(readiness, 'nextSafeCommand')}",
+            f"- authority cards: {authority_summary or 'unavailable'}; dashboard/check/hooks/cache/search output remains non-authority.",
             f"- accelerators: dashboard_packet=available; mcp={_payload_value(mcp, 'status')}; mounted={str(mcp.get('mounted') is True).lower()}; warm_cache=mylittleharness --root <root> projection --warm-cache --target all; rg_verification=required",
             "- mcp coverage: read_projection=current posture; read_source=bounded source slices; search=source-verified exact/path/full-text; related_or_bundle=links/fan-in/relationship bundle",
             f"- next legal dry-run: {_payload_value(next_legal, 'command')}",
@@ -1192,6 +1297,20 @@ def _hook_additional_context(
             "- boundary: this hook is advisory context only and approves no lifecycle, Git, dispatcher, provider, product-diff, cache, archive, staging, commit, push, or release action.",
         ]
     )
+
+
+def _authority_cards_context(cards: object) -> str:
+    if not isinstance(cards, list):
+        return ""
+    parts: list[str] = []
+    for card in cards:
+        if not isinstance(card, dict):
+            continue
+        card_id = str(card.get("id") or "")
+        refs = card.get("authorityRefs")
+        if card_id and isinstance(refs, list) and refs:
+            parts.append(f"{card_id}={'+'.join(str(ref) for ref in refs[:2])}")
+    return "; ".join(parts)
 
 
 def _hook_payload_boundary() -> dict[str, object]:
@@ -1257,7 +1376,17 @@ def _hook_input_command(data: dict[str, object], fallback_text: str) -> str:
     return fallback_text
 
 
+def _hook_write_command(data: dict[str, object], command: str) -> str:
+    if _hook_apply_patch_target_paths(data):
+        return f"{command}\nset-content"
+    return command
+
+
 def _hook_input_paths(data: dict[str, object], text: str) -> list[str]:
+    apply_patch_targets = _hook_apply_patch_target_paths(data)
+    if apply_patch_targets:
+        return _dedupe_normalized_hook_paths(apply_patch_targets)
+
     paths: list[str] = []
 
     def collect(value: object) -> None:
@@ -1275,6 +1404,10 @@ def _hook_input_paths(data: dict[str, object], text: str) -> list[str]:
 
     collect(data)
     paths.extend(_extract_paths(text))
+    return _dedupe_normalized_hook_paths(paths)
+
+
+def _dedupe_normalized_hook_paths(paths: list[str]) -> list[str]:
     normalized: list[str] = []
     seen: set[str] = set()
     for path in paths:
@@ -1283,6 +1416,46 @@ def _hook_input_paths(data: dict[str, object], text: str) -> list[str]:
             seen.add(clean)
             normalized.append(clean)
     return normalized
+
+
+def _hook_apply_patch_target_paths(data: dict[str, object]) -> list[str]:
+    tool_names = (
+        data.get("toolName"),
+        data.get("tool_name"),
+        data.get("tool"),
+        data.get("recipient_name"),
+    )
+    if not any("apply_patch" in str(candidate or "").casefold() for candidate in tool_names):
+        return []
+    patch_text = _hook_apply_patch_text(data)
+    if not patch_text:
+        return []
+    targets: list[str] = []
+    for line in patch_text.splitlines():
+        for marker in ("*** Update File: ", "*** Add File: ", "*** Delete File: ", "*** Move to: "):
+            if line.startswith(marker):
+                target = line[len(marker) :].strip()
+                if target:
+                    targets.append(target)
+    return targets
+
+
+def _hook_apply_patch_text(data: dict[str, object]) -> str:
+    candidates = (
+        data.get("input"),
+        data.get("patch"),
+        data.get("tool_input"),
+        data.get("parameters"),
+        data.get("arguments"),
+    )
+    for candidate in candidates:
+        if isinstance(candidate, str) and "*** Begin Patch" in candidate:
+            return candidate
+        if isinstance(candidate, dict):
+            nested = _hook_apply_patch_text(candidate)
+            if nested:
+                return nested
+    return ""
 
 
 def _extract_paths(text: str) -> list[str]:
@@ -1301,23 +1474,35 @@ def _normalize_hook_path(path: str) -> str:
     return rel
 
 
-def _path_policy_findings(inventory: Inventory, paths: list[str], *, warn_only: bool = False) -> list[Finding]:
+def _path_policy_findings(
+    inventory: Inventory,
+    paths: list[str],
+    *,
+    warn_only: bool = False,
+    allow_read_only_source_paths: bool = False,
+    allow_mlh_owner_route_paths: bool = False,
+) -> list[Finding]:
     findings: list[Finding] = []
+    severity = "warn" if warn_only else "error"
     for rel in paths:
         if _is_generated_cache_path(rel):
             findings.append(
                 Finding(
-                    "warn",
-                    "hooks-policy-warn-generated-cache-path" if warn_only else "hooks-policy-generated-cache-path",
+                    severity,
+                    "hooks-policy-block-generated-cache-path",
                     "tool request touches generated projection/cache paths; cache remains disposable and should be refreshed through projection rails",
                     rel,
                 )
             )
+        if (allow_read_only_source_paths or allow_mlh_owner_route_paths) and (
+            _is_lifecycle_authority_path(rel) or _is_lifecycle_markdown_path(rel)
+        ):
+            continue
         if _is_lifecycle_authority_path(rel):
             findings.append(
                 Finding(
-                    "warn",
-                    "hooks-policy-lifecycle-authority-path",
+                    severity,
+                    "hooks-policy-block-lifecycle-authority-path",
                     "tool request touches lifecycle authority paths; use explicit MLH dry-run/apply routes and record docs_decision/verification as required",
                     rel,
                 )
@@ -1325,22 +1510,56 @@ def _path_policy_findings(inventory: Inventory, paths: list[str], *, warn_only: 
         elif _is_lifecycle_markdown_path(rel):
             findings.append(
                 Finding(
-                    "warn",
-                    "hooks-policy-lifecycle-markdown-path",
+                    severity,
+                    "hooks-policy-block-lifecycle-markdown-path",
                     "tool request touches lifecycle Markdown routes; required frontmatter and owning route evidence must stay intact",
                     rel,
                 )
             )
         if _is_under_configured_product_root(inventory, rel):
+            if allow_read_only_source_paths or allow_mlh_owner_route_paths or _is_active_plan_product_artifact(inventory, rel):
+                continue
             findings.append(
                 Finding(
-                    "warn",
-                    "hooks-policy-product-root-path",
+                    severity,
+                    "hooks-policy-block-product-root-path",
                     "tool request names the configured product source root from an operating-root context; keep product edits deliberate and bounded",
                     rel,
                 )
             )
     return findings
+
+
+def _is_bounded_mlh_read_tool_request(data: dict[str, object]) -> bool:
+    candidates = (data.get("toolName"), data.get("tool_name"), data.get("tool"))
+    for candidate in candidates:
+        lowered = str(candidate or "").strip().casefold()
+        if lowered.endswith(BOUNDED_MLH_READ_TOOL_SUFFIXES):
+            return True
+    return False
+
+
+def _is_mlh_owner_route_review_command(command: str) -> bool:
+    lowered = command.casefold()
+    padded = f" {lowered} "
+    subcommand = _mlh_cli_subcommand(lowered)
+    return (
+        subcommand in MLH_OWNER_ROUTE_REVIEW_COMMANDS
+        and not _looks_like_write_command(command)
+        and (" --dry-run" in padded or " --apply" in padded or " --help" in padded or " -h" in padded)
+    )
+
+
+def _is_read_only_source_discovery_command(command: str) -> bool:
+    if _looks_like_write_command(command):
+        return False
+    tokens = _shell_tokens(command)
+    for token in tokens:
+        clean = _clean_token(token)
+        if not clean or clean.startswith("-"):
+            continue
+        return clean in READ_ONLY_SOURCE_DISCOVERY_COMMANDS
+    return False
 
 
 def _looks_like_shortcut_prompt(text: str) -> bool:
@@ -1355,6 +1574,15 @@ def _looks_like_generated_cache_write(paths: list[str], command: str) -> bool:
 
 def _looks_like_lifecycle_markdown_write(paths: list[str], command: str) -> bool:
     return any(_is_lifecycle_markdown_path(path) for path in paths) and _looks_like_write_command(command) and "mylittleharness" not in command.casefold()
+
+
+def _nonroute_project_markdown_write_path(paths: list[str], command: str) -> str:
+    if not _looks_like_write_command(command):
+        return ""
+    for path in paths:
+        if _is_nonroute_project_markdown_path(path):
+            return path
+    return ""
 
 
 def _looks_like_product_root_direct_edit(inventory: Inventory, paths: list[str], command: str) -> bool:
@@ -1510,6 +1738,15 @@ def _is_lifecycle_authority_path(path: str) -> bool:
 def _is_lifecycle_markdown_path(path: str) -> bool:
     rel = _normalize_hook_path(path).casefold()
     return rel.endswith(".md") and any(rel.startswith(prefix) for prefix in LIFECYCLE_MARKDOWN_PREFIXES)
+
+
+def _is_nonroute_project_markdown_path(path: str) -> bool:
+    rel = _normalize_hook_path(path).casefold()
+    if not rel.startswith("project/") or not rel.endswith(".md"):
+        return False
+    if any(rel.startswith(prefix) for prefix in NONROUTE_PROJECT_MARKDOWN_EXEMPT_PREFIXES):
+        return False
+    return classify_memory_route(rel).route_id == "unclassified"
 
 
 def _is_under_configured_product_root(inventory: Inventory, path: str) -> bool:

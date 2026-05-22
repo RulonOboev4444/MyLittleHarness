@@ -53,7 +53,7 @@ class CommandIntent:
 COMMAND_INTENTS: tuple[CommandIntent, ...] = (
     CommandIntent(
         "start-pass",
-        "Inspect current root posture through the dashboard-first navigation packet before choosing a mutating rail.",
+        "Inspect current root posture through the dashboard-first navigation packet, authority cards, and next safe command before choosing a mutating rail.",
         (
             "start",
             "status",
@@ -72,7 +72,7 @@ COMMAND_INTENTS: tuple[CommandIntent, ...] = (
             "mylittleharness --root <root> check",
         ),
         "any readable MLH root",
-        "read-only report only; does not repair, write files, close out, archive, stage, commit, or change lifecycle state",
+        "read-only report only; authority cards are navigation guidance and do not repair, write files, close out, archive, stage, commit, or change lifecycle state",
     ),
     CommandIntent(
         "operator-audit-loop",
@@ -303,6 +303,7 @@ COMMAND_INTENTS: tuple[CommandIntent, ...] = (
         (
             "mylittleharness --root <root> check --focus route-references",
             "mylittleharness --root <root> suggest --intent \"route reference recovery\"",
+            "mylittleharness --root <root> plan --dry-run --roadmap-item <id>",
         ),
         "live operating root after check reports route-metadata-* or lifecycle status diagnostics",
         "metadata-status review is advisory; status changes require an explicit owning dry-run/apply route or human-authored edit and cannot approve lifecycle movement",
@@ -629,6 +630,7 @@ COMMAND_INTENTS: tuple[CommandIntent, ...] = (
         (
             "mylittleharness --root <root> roadmap --dry-run --action update --item-id <id> [fields]",
             "mylittleharness --root <root> plan --dry-run --roadmap-item <id>",
+            "mylittleharness --root <root> suggest --intent \"metadata status\"",
         ),
         "live operating root with readable project/roadmap.md",
         "readiness output is advisory only; it cannot promote roadmap items, open plans, approve lifecycle movement, archive, stage, commit, or repair",

@@ -309,8 +309,6 @@ Any file-reading, shell-capable agent can use MyLittleHarness from repo-visible 
 
 Treat `dashboard --inspect` output as a read-only projection: it starts no daemon, listener, hook, dispatcher, worker, cache refresh, or product mutation; it cannot approve lifecycle movement, repair, archive, staging, commit, push, release, roadmap status, or product-diff acceptance; and any `mlhd` runtime/cache fields are disposable diagnostics only. The JSON payload includes source refs and a `nextLegalDryRun` candidate so an agent can see the next legal preview route, but the dashboard does not approve running or applying that route.
 
-`meta-feedback` is opt-in and is not part of the default start pass. Keep opt-in `meta-feedback` for concrete MLH rough edges after the active task is safe.
-
 ---
 
 ## Diagnostics And Closeout

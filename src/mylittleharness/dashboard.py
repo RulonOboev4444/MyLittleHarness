@@ -25,6 +25,13 @@ from .vcs import worktree_coordination_findings
 DASHBOARD_SCHEMA = "mylittleharness.dashboard.v1"
 CONNECT_READINESS_SCHEMA = "mylittleharness.connect-readiness-action-packet.v1"
 MLHD_RUNTIME_DIR_REL = ".mylittleharness/runtime/mlhd"
+PROJECT_ROUTE_DIR = "project"
+STATE_ROUTE_REL = f"{PROJECT_ROUTE_DIR}/project-state.md"
+ROADMAP_ROUTE_REL = f"{PROJECT_ROUTE_DIR}/roadmap.md"
+ACTIVE_PLAN_ROUTE_REL = f"{PROJECT_ROUTE_DIR}/implementation-plan.md"
+DOCMAP_ROUTE_REL = ".agents/" "docmap.yaml"
+DOCS_GLOB_REL = "docs/**/*.md"
+WORKFLOW_SPECS_GLOB_REL = f"{PROJECT_ROUTE_DIR}/specs/**/*.md"
 
 
 def dashboard_sections(inventory: Inventory) -> list[tuple[str, list[Finding]]]:
@@ -62,6 +69,7 @@ def dashboard_payload(inventory: Inventory, sections: list[tuple[str, list[Findi
         "projection": projection_summary_to_dict(build_projection(inventory)),
         "cachePosture": cache_posture,
         "agentPacket": agent_packet,
+        "authorityCards": agent_packet.get("authorityCards", []),
         "acceleratorAdoption": accelerator_adoption,
         "connectReadiness": connect_readiness_packet(
             inventory,
@@ -112,6 +120,7 @@ def dashboard_check_findings(inventory: Inventory, code_prefix: str = "check-das
             ),
             "project/project-state.md" if inventory.state and inventory.state.exists else None,
         ),
+        _authority_cards_finding(inventory, code_prefix),
         _accelerator_adoption_finding(inventory, code_prefix),
     ]
 
@@ -385,6 +394,8 @@ def dashboard_agent_packet(inventory: Inventory) -> dict[str, object]:
     adoption = _accelerator_adoption_payload(inventory)
     mcp_tool_coverage = _mcp_tool_coverage_payload()
     exact_verification = _exact_verification_payload()
+    next_legal = _next_legal_dry_run_payload(inventory)
+    authority_cards = _authority_cards_payload(inventory, next_legal)
     return {
         "schema": "mylittleharness.dashboard-agent-packet.v1",
         "source_refs": [
@@ -418,10 +429,13 @@ def dashboard_agent_packet(inventory: Inventory) -> dict[str, object]:
         ],
         "mcpToolCoverage": mcp_tool_coverage,
         "exactVerification": exact_verification,
-        "nextLegalDryRun": _next_legal_dry_run_payload(inventory),
+        "nextLegalDryRun": next_legal,
+        "authorityCards": authority_cards,
+        "authoritySummary": _authority_cards_summary(authority_cards),
         "acceleratorAdoption": adoption,
         "connectReadiness": connect_readiness_packet(
             inventory,
+            agent_packet={"nextLegalDryRun": next_legal, "authorityCards": authority_cards},
             accelerator_adoption=adoption,
         ),
         "lifecycle": {
@@ -455,6 +469,11 @@ def connect_readiness_packet(
     docmap = _docmap_readiness_payload(inventory)
     mlhd = mlhd_freshness_payload(inventory)
     plan_status = str(data.get("plan_status") or "")
+    authority_cards = (
+        agent_packet.get("authorityCards", [])
+        if isinstance(agent_packet, dict) and isinstance(agent_packet.get("authorityCards"), list)
+        else _authority_cards_payload(inventory, next_legal)
+    )
     return {
         "schema": CONNECT_READINESS_SCHEMA,
         "lifecycle": {
@@ -493,6 +512,7 @@ def connect_readiness_packet(
         },
         "docs": docmap,
         "repairTargets": repair_targets,
+        "authorityCards": authority_cards,
         "writeback": {
             "requiredWhenPlanStatusActive": plan_status.casefold() == "active",
             "dryRunCommand": str(next_legal.get("command") or ""),
@@ -553,12 +573,115 @@ def connect_readiness_findings(inventory: Inventory, code_prefix: str = "connect
             ),
             ".agents/docmap.yaml",
         ),
+        _authority_cards_finding(inventory, code_prefix),
         Finding(
             "info",
             f"{code_prefix}-boundary",
             str(packet["boundary"]),
         ),
     ]
+
+
+def _authority_cards_payload(inventory: Inventory, next_legal: dict[str, object] | None = None) -> list[dict[str, object]]:
+    data = _state_data(inventory)
+    plan_status = str(data.get("plan_status") or "").strip().casefold()
+    active_plan = str(data.get("active_plan") or "").strip() or ACTIVE_PLAN_ROUTE_REL
+    lifecycle_refs = [STATE_ROUTE_REL]
+    if plan_status == "active":
+        lifecycle_refs.append(active_plan)
+    next_legal = next_legal or _next_legal_dry_run_payload(inventory)
+    blocked_actions = [
+        "apply",
+        "closeout",
+        "archive",
+        "roadmap done",
+        "staging",
+        "commit",
+        "push",
+        "release",
+    ]
+    return [
+        {
+            "id": "lifecycle",
+            "label": "Lifecycle",
+            "authorityRefs": lifecycle_refs,
+            "nonAuthority": ["check output", "dashboard output", "hook output", "chat memory"],
+            "nextSafeCommand": str(next_legal.get("command") or "mylittleharness --root <root> check"),
+            "cannotApprove": blocked_actions,
+            "boundary": "project-state lifecycle frontmatter wins; reports and hooks are navigation only",
+        },
+        {
+            "id": "roadmap",
+            "label": "Roadmap",
+            "authorityRefs": [ROADMAP_ROUTE_REL],
+            "nonAuthority": ["roadmap readiness summaries", "dashboard queue rows", "suggest output"],
+            "nextSafeCommand": _roadmap_authority_next_safe_command(inventory, plan_status),
+            "cannotApprove": blocked_actions,
+            "boundary": "roadmap rows sequence accepted work but cannot open plans or mark work done without explicit rails",
+        },
+        {
+            "id": "projection",
+            "label": "Projection Cache",
+            "authorityRefs": ["repo-visible source files"],
+            "nonAuthority": [ARTIFACT_DIR_REL, MLHD_RUNTIME_DIR_REL],
+            "nextSafeCommand": "mylittleharness --root <root> projection --inspect --target all",
+            "cannotApprove": blocked_actions,
+            "boundary": "generated projection and runtime cache are disposable accelerators; source files remain truth",
+        },
+        {
+            "id": "docs",
+            "label": "Docs And Docmap",
+            "authorityRefs": [DOCS_GLOB_REL, WORKFLOW_SPECS_GLOB_REL],
+            "nonAuthority": [f"{DOCMAP_ROUTE_REL} as routing aid", "docs/docmap hygiene summaries"],
+            "nextSafeCommand": "mylittleharness --root <root> check --focus validation",
+            "cannotApprove": blocked_actions,
+            "boundary": "docmap routes docs impact but does not override product docs, specs, or lifecycle docs_decision",
+        },
+        {
+            "id": "verification",
+            "label": "Exact Verification",
+            "authorityRefs": ["source files", "repo-visible verification evidence"],
+            "nonAuthority": ["MCP search summaries", "SQLite full-text hits", "dashboard summaries"],
+            "nextSafeCommand": 'rg "<exact symbol or route>"',
+            "cannotApprove": blocked_actions,
+            "boundary": "navigation hits must be reconciled against exact source before edits or closeout claims",
+        },
+    ]
+
+
+def _roadmap_authority_next_safe_command(inventory: Inventory, plan_status: str) -> str:
+    if plan_status == "active":
+        return "mylittleharness --root <root> check"
+    queue = _roadmap_payload(inventory).get("active_or_accepted_queue", [])
+    item_id = str(queue[0]).split(" ", 1)[0] if queue else ""
+    if item_id:
+        return f"mylittleharness --root <root> plan --dry-run --roadmap-item {item_id}"
+    return "mylittleharness --root <root> check"
+
+
+def _authority_cards_summary(cards: list[dict[str, object]]) -> str:
+    parts: list[str] = []
+    for card in cards:
+        card_id = str(card.get("id") or "")
+        refs = card.get("authorityRefs", [])
+        if card_id and isinstance(refs, list) and refs:
+            parts.append(f"{card_id}={'+'.join(str(ref) for ref in refs[:2])}")
+    return "; ".join(parts)
+
+
+def _authority_cards_finding(inventory: Inventory, code_prefix: str) -> Finding:
+    cards = _authority_cards_payload(inventory)
+    next_legal = next((card for card in cards if card.get("id") == "lifecycle"), {})
+    return Finding(
+        "info",
+        f"{code_prefix}-authority-cards",
+        (
+            f"authority cards: {_authority_cards_summary(cards)}; "
+            f"next_legal={next_legal.get('nextSafeCommand', 'mylittleharness --root <root> check')}; "
+            "non-authority outputs include dashboard/check/hooks/cache/search; cards cannot approve apply, closeout, archive, staging, commit, or push"
+        ),
+        STATE_ROUTE_REL if inventory.state and inventory.state.exists else None,
+    )
 
 
 def _accelerator_adoption_payload(inventory: Inventory) -> dict[str, object]:
