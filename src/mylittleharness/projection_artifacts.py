@@ -529,6 +529,8 @@ def projection_cache_dirty_quiet_period_pending(
 def projection_cache_posture_payload(
     artifact_findings: list[Finding],
     index_findings: list[Finding],
+    *,
+    runtime_refresh_allowed: bool = True,
 ) -> dict[str, object]:
     artifact = _cache_component_posture(
         "artifacts",
@@ -542,7 +544,8 @@ def projection_cache_posture_payload(
         current_code="projection-index-current",
         missing_code="projection-index-missing",
     )
-    refresh_commands = _cache_refresh_commands(artifact, index)
+    refresh_commands = _cache_refresh_commands(artifact, index, runtime_refresh_allowed=runtime_refresh_allowed)
+    self_heal_command = PROJECTION_CACHE_SELF_HEAL_COMMAND if runtime_refresh_allowed else PROJECTION_CACHE_MANUAL_RECOVERY_COMMAND
     return {
         "schema": "mylittleharness.projection-cache-posture.v1",
         "read_only": True,
@@ -550,17 +553,17 @@ def projection_cache_posture_payload(
         "displayed_commands_only": True,
         "authority": "repo-visible source files and in-memory projection remain authoritative",
         "refreshable_by_adapter": False,
-        "self_heal_command": PROJECTION_CACHE_SELF_HEAL_COMMAND,
+        "self_heal_command": self_heal_command,
         "manual_recovery_command": PROJECTION_CACHE_MANUAL_RECOVERY_COMMAND,
         "self_healable_by_command": True,
         "generated_cache_mutation_boundary": ARTIFACT_DIR_REL,
         "manual_recovery_write_class": "disposable-generated-cache-only",
         "refresh_policy": (
-            "missing, dirty, stale, corrupt, or malformed generated cache is normally refreshed by mlhd; "
-            "projection warm-cache/rebuild remains explicit recovery without creating lifecycle authority; "
+            "missing, dirty, stale, corrupt, or malformed generated cache is normally refreshed by mlhd in live operating roots; "
+            "product-source roots use explicit projection warm-cache/rebuild recovery without mlhd runtime writes; "
             "read-only surfaces display recovery commands only and never execute them"
         ),
-        "command_boundary": _cache_command_boundary(),
+        "command_boundary": _cache_command_boundary(runtime_refresh_allowed=runtime_refresh_allowed),
         "components": {
             "artifacts": artifact,
             "sqlite_index": index,
@@ -578,18 +581,20 @@ def projection_cache_posture_payload(
     }
 
 
-def _cache_command_boundary() -> dict[str, object]:
+def _cache_command_boundary(*, runtime_refresh_allowed: bool = True) -> dict[str, object]:
+    self_heal_command = PROJECTION_CACHE_SELF_HEAL_COMMAND if runtime_refresh_allowed else PROJECTION_CACHE_MANUAL_RECOVERY_COMMAND
     return {
         "readOnlyPayload": True,
         "readOnlySurfacesExecuteRefresh": False,
         "displayedCommandsOnly": True,
         "recommendedRefreshCommandsAreSuggestionsOnly": True,
         "selfHealCommand": {
-            "command": PROJECTION_CACHE_SELF_HEAL_COMMAND,
-            "requiresExplicitApply": True,
+            "command": self_heal_command,
+            "requiresExplicitApply": runtime_refresh_allowed,
+            "requiresExplicitCommand": True,
             "invokedByReadOnlySurfaces": False,
-            "writeClass": "runtime-and-disposable-generated-cache",
-            "writeBoundary": ".mylittleharness/runtime/mlhd and .mylittleharness/generated/projection",
+            "writeClass": "runtime-and-disposable-generated-cache" if runtime_refresh_allowed else "disposable-generated-cache-only",
+            "writeBoundary": ".mylittleharness/runtime/mlhd and .mylittleharness/generated/projection" if runtime_refresh_allowed else ARTIFACT_DIR_REL,
             "cannotApprove": list(PROJECTION_CACHE_CANNOT_APPROVE),
         },
         "manualRecoveryCommand": {
@@ -1342,8 +1347,17 @@ def _cache_component_posture(
     }
 
 
-def _cache_refresh_commands(artifact: dict[str, object], index: dict[str, object]) -> list[str]:
-    commands: list[str] = ["mylittleharness --root <root> mlhd run-once --apply"]
+def _cache_refresh_commands(
+    artifact: dict[str, object],
+    index: dict[str, object],
+    *,
+    runtime_refresh_allowed: bool = True,
+) -> list[str]:
+    commands: list[str] = []
+    if runtime_refresh_allowed:
+        commands.append("mylittleharness --root <root> mlhd run-once --apply")
+    else:
+        commands.append(PROJECTION_CACHE_MANUAL_RECOVERY_COMMAND)
     artifact_status = str(artifact.get("status") or "")
     index_status = str(index.get("status") or "")
     if artifact_status != "current" and index_status != "current":

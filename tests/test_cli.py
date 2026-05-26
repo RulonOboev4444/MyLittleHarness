@@ -3516,6 +3516,7 @@ class CliTests(unittest.TestCase):
                 "detach-dry-run",
                 "detach-root-kind",
                 "detach-root-posture",
+                "detach-refused",
                 "detach-preserve",
                 "detach-marker-target",
                 "detach-generated-projection",
@@ -3526,6 +3527,7 @@ class CliTests(unittest.TestCase):
             ):
                 self.assertIn(code_name, rendered)
             self.assertIn("product-source compatibility fixture", rendered)
+            self.assertNotIn("rerun the same reviewed command with `--apply`", rendered)
             self.assertIn("disable is explanatory terminology", rendered)
 
     def test_detach_dry_run_live_root_preserves_generated_projection_without_writes(self) -> None:
@@ -6035,7 +6037,8 @@ class CliTests(unittest.TestCase):
 
     def test_mlhd_run_once_warms_dirty_projection_cache_after_quiet_period(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = make_root(Path(tmp), active=False, mirrors=False)
+            root = make_operating_root(Path(tmp))
+            (root / "README.md").write_text("# Operating Root\n", encoding="utf-8")
             with redirect_stdout(io.StringIO()):
                 self.assertEqual(main(["--root", str(root), "projection", "--build", "--target", "all"]), 0)
 
@@ -6104,6 +6107,30 @@ class CliTests(unittest.TestCase):
             with redirect_stdout(doctor_text):
                 self.assertEqual(main(["--root", str(root), "mlhd", "doctor"]), 0)
             self.assertIn("projection_refresh_status=refreshed", doctor_text.getvalue())
+
+    def test_mlhd_product_fixture_refuses_runtime_control_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=False)
+
+            for action in ("start", "run-once", "install"):
+                before = snapshot_tree_bytes(root)
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    self.assertEqual(main(["--root", str(root), "mlhd", action, "--dry-run"]), 0)
+                rendered = output.getvalue()
+                self.assertEqual(before, snapshot_tree_bytes(root))
+                self.assertFalse((root / ".mylittleharness").exists())
+                self.assertIn(f"mlhd-{action}-dry-run-refused", rendered)
+                self.assertIn("product-source compatibility fixtures", rendered)
+                self.assertNotIn("would update disposable mlhd runtime target", rendered)
+
+            before_apply = snapshot_tree_bytes(root)
+            apply_output = io.StringIO()
+            with redirect_stdout(apply_output):
+                self.assertEqual(main(["--root", str(root), "mlhd", "run-once", "--apply"]), 1)
+            self.assertEqual(before_apply, snapshot_tree_bytes(root))
+            self.assertFalse((root / ".mylittleharness").exists())
+            self.assertIn("mlhd-run-once-refused", apply_output.getvalue())
 
     def test_mlhd_run_once_writes_source_bound_context_capsule_for_dashboard_and_hooks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -6210,11 +6237,11 @@ class CliTests(unittest.TestCase):
 
     def test_mlhd_start_worker_refreshes_dirty_projection_cache_without_manual_warm_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = make_root(Path(tmp), active=False, mirrors=False)
+            root = make_operating_root(Path(tmp))
             with redirect_stdout(io.StringIO()):
                 self.assertEqual(main(["--root", str(root), "projection", "--build", "--target", "all"]), 0)
 
-            readme = root / "README.md"
+            readme = root / "AGENTS.md"
             readme.write_text(readme.read_text(encoding="utf-8") + "\nmlhd background refresh probe\n", encoding="utf-8")
             mark_projection_cache_dirty(load_inventory(root), ["README.md"], "test")
             runtime_dir = root / ".mylittleharness/runtime/mlhd"
@@ -9130,6 +9157,99 @@ class CliTests(unittest.TestCase):
             self.assertEqual(before, snapshot_tree(root))
             self.assertIn("writeback-product-diff-write-scope-blocked", rendered)
             self.assertIn("docs/out.md", rendered)
+
+    def test_writeback_refuses_product_diff_root_equal_to_operating_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, product_root = make_product_diff_scope_fixture(Path(tmp))
+            state_path = root / "project/project-state.md"
+            state_path.write_text(
+                state_path.read_text(encoding="utf-8").replace(
+                    f'product_source_root: "{product_root}"',
+                    f'projection_root: "{root}"',
+                ),
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "writeback",
+                        "--apply",
+                        "--phase-status",
+                        "complete",
+                        "--docs-decision",
+                        "not-needed",
+                        "--state-writeback",
+                        "Implemented product-diff-scope-gate in src/allowed.py",
+                        "--verification",
+                        "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src uv run --no-project --with pytest pytest -q tests/test_cli.py passed for src/allowed.py",
+                        "--commit-decision",
+                        "manual policy; no staging",
+                        "--residual-risk",
+                        "none known",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 2)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("writeback-product-diff-write-scope-blocked", rendered)
+            self.assertIn("configured product_source_root resolves to the live operating root", rendered)
+
+    def test_product_diff_rejects_absolute_active_plan_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, _product_root = make_product_diff_scope_fixture(Path(tmp))
+            plan_path = root / "project/implementation-plan.md"
+            plan_path.write_text(
+                plan_path.read_text(encoding="utf-8")
+                .replace('  - "src/allowed.py"\n', '  - "/src/allowed.py"\n')
+                .replace(
+                    "- write_scope: `src/allowed.py`, `tests/test_cli.py`\n",
+                    "- write_scope: `/src/allowed.py`, `tests/test_cli.py`\n",
+                ),
+                encoding="utf-8",
+            )
+
+            check_output = io.StringIO()
+            with redirect_stdout(check_output):
+                self.assertEqual(main(["--root", str(root), "check"]), 0)
+
+            check_rendered = check_output.getvalue()
+            self.assertIn("active-plan-product-diff-write-scope-blocked", check_rendered)
+            self.assertIn("leading slash would make product scope absolute", check_rendered)
+
+            before = snapshot_tree(root)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "writeback",
+                        "--apply",
+                        "--phase-status",
+                        "complete",
+                        "--docs-decision",
+                        "not-needed",
+                        "--state-writeback",
+                        "Implemented product-diff-scope-gate in src/allowed.py",
+                        "--verification",
+                        "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src uv run --no-project --with pytest pytest -q tests/test_cli.py passed for src/allowed.py",
+                        "--commit-decision",
+                        "manual policy; no staging",
+                        "--residual-risk",
+                        "none known",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 2)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("writeback-product-diff-write-scope-blocked", rendered)
 
     def test_writeback_allows_in_scope_product_diff_acceptance(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -23260,6 +23380,45 @@ class CliTests(unittest.TestCase):
             self.assertEqual(before, snapshot_tree_bytes(root))
             self.assertIn("hook target already exists; rerun with --force", output.getvalue())
 
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            (root / ".git/hooks").mkdir(parents=True)
+            hook_path = root / ".git/hooks/pre-commit"
+            outside_hook = Path(tmp) / "outside-pre-commit"
+            outside_hook.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            try:
+                os.symlink(outside_hook, hook_path)
+            except OSError as exc:
+                self.skipTest(f"file symlink unavailable: {exc}")
+            before = snapshot_tree_bytes(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "hooks", "--apply", "--hook", "git-pre-commit", "--force"])
+
+            self.assertEqual(code, 2)
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            self.assertIn("hook target is a symlink", output.getvalue())
+            self.assertEqual("#!/bin/sh\nexit 0\n", outside_hook.read_text(encoding="utf-8"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            (root / ".git").mkdir()
+            outside_hooks = Path(tmp) / "outside-hooks"
+            outside_hooks.mkdir()
+            try:
+                os.symlink(outside_hooks, root / ".git/hooks", target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"directory symlink unavailable: {exc}")
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "hooks", "--apply", "--hook", "git-pre-commit"])
+
+            self.assertEqual(code, 2)
+            self.assertFalse((outside_hooks / "pre-commit").exists())
+            self.assertIn("hook target parent is not a safe directory", output.getvalue())
+
     def test_semantic_inspect_product_fixture_no_active_plan_no_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_root(Path(tmp), active=False, mirrors=False)
@@ -23452,6 +23611,38 @@ class CliTests(unittest.TestCase):
             self.assertIn("adapter-mcp-helper", rendered)
             self.assertIn("--transport stdio", rendered)
             self.assertNotIn("[ERROR]", rendered)
+
+    def test_product_fixture_navigation_avoids_mlhd_runtime_refresh_recommendations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=False)
+            before = snapshot_tree_bytes(root)
+
+            check_output = io.StringIO()
+            with redirect_stdout(check_output):
+                self.assertEqual(main(["--root", str(root), "check"]), 0)
+            check_rendered = check_output.getvalue()
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            self.assertNotIn("mlhd run-once --apply", check_rendered)
+            self.assertIn("projection --warm-cache --target all", check_rendered)
+            self.assertIn("refresh_command=mylittleharness --root <root> check", check_rendered)
+
+            dashboard_json = io.StringIO()
+            with redirect_stdout(dashboard_json):
+                self.assertEqual(main(["--root", str(root), "dashboard", "--inspect", "--json"]), 0)
+            payload = json.loads(dashboard_json.getvalue())
+            payload_text = json.dumps(payload, sort_keys=True)
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            self.assertNotIn("mlhd run-once --apply", payload_text)
+            self.assertEqual("mylittleharness --root <root> projection --warm-cache --target all", payload["cachePosture"]["self_heal_command"])
+            self.assertEqual("", payload["acceleratorAdoption"]["mlhdRefreshCommand"])
+            self.assertFalse(payload["acceleratorAdoption"]["runtimeRefreshAllowed"])
+            self.assertEqual("mylittleharness --root <root> projection --warm-cache --target all", payload["connectReadiness"]["nextSafeCommand"])
+
+            adapter_output = io.StringIO()
+            with redirect_stdout(adapter_output):
+                self.assertEqual(main(["--root", str(root), "adapter", "--inspect", "--target", "mcp-read-projection"]), 0)
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            self.assertNotIn("mlhd run-once --apply", adapter_output.getvalue())
 
     def test_adapter_live_root_reports_missing_optional_surfaces_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

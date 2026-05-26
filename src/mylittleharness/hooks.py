@@ -15,6 +15,7 @@ from .models import Finding
 from .parsing import parse_frontmatter
 from .preflight import preflight_sections
 from .routes import classify_memory_route
+from .root_boundary import PRODUCT_SOURCE_FIXTURE
 
 
 HOOK_PRE_COMMIT = "git-pre-commit"
@@ -941,7 +942,9 @@ def _hook_install_target_findings(inventory: Inventory, request: HookInstallRequ
         findings.append(Finding("info", "hooks-git-dir", "local .git directory is present; hook install target can be evaluated", ".git"))
     else:
         findings.append(Finding("warn", "hooks-git-dir-missing", "local .git directory is absent; hook install apply would be refused", ".git"))
-    if target.exists():
+    if target.is_symlink():
+        findings.append(Finding("warn", "hooks-target-symlink", f"hook target is a symlink and apply would be refused: {_rel_path(inventory.root, target)}", _rel_path(inventory.root, target)))
+    elif target.exists():
         findings.append(Finding("info", "hooks-target-existing", f"hook target already exists: {_rel_path(inventory.root, target)}", _rel_path(inventory.root, target)))
     else:
         findings.append(Finding("info", "hooks-target-missing", f"hook target is absent: {_rel_path(inventory.root, target)}", _rel_path(inventory.root, target)))
@@ -1015,9 +1018,12 @@ def _hook_install_errors(inventory: Inventory, request: HookInstallRequest) -> l
     target = _hook_target(inventory.root, request.hook_id)
     if not _is_within_root(inventory.root, target):
         findings.append(Finding("error", "hooks-install-refused", f"hook target escapes root: {target}", _rel_path(inventory.root, target)))
-    if target.exists() and not target.is_file():
+    findings.extend(_unsafe_parent_directory_findings(inventory.root, target, "hooks-install-refused"))
+    if target.is_symlink():
+        findings.append(Finding("error", "hooks-install-refused", f"hook target is a symlink: {_rel_path(inventory.root, target)}", _rel_path(inventory.root, target)))
+    elif target.exists() and not target.is_file():
         findings.append(Finding("error", "hooks-install-refused", f"hook target is not a regular file: {_rel_path(inventory.root, target)}", _rel_path(inventory.root, target)))
-    if target.exists() and not request.force and target.read_text(encoding="utf-8", errors="replace") != render_hook_shim(inventory.root, request.hook_id):
+    if target.exists() and not target.is_symlink() and not request.force and target.read_text(encoding="utf-8", errors="replace") != render_hook_shim(inventory.root, request.hook_id):
         findings.append(Finding("error", "hooks-install-refused", f"hook target already exists; rerun with --force after reviewing {_rel_path(inventory.root, target)}", _rel_path(inventory.root, target)))
     return findings
 
@@ -1532,6 +1538,7 @@ def _hook_additional_context(
     readiness = connect_readiness if isinstance(connect_readiness, dict) else {}
     docs = readiness.get("docs", {}) if isinstance(readiness.get("docs"), dict) else {}
     writeback = readiness.get("writeback", {}) if isinstance(readiness.get("writeback"), dict) else {}
+    mlhd_refresh = str(adoption.get("mlhdRefreshCommand") or "<refused for product-source roots>")
     authority_summary = agent_packet.get("authoritySummary") if isinstance(agent_packet.get("authoritySummary"), str) else ""
     if not authority_summary:
         authority_summary = _authority_cards_context(agent_packet.get("authorityCards") or readiness.get("authorityCards"))
@@ -1547,7 +1554,7 @@ def _hook_additional_context(
             f"- connect readiness: writeback_required={str(writeback.get('requiredWhenPlanStatusActive') is True).lower()}; docs_decision={_payload_value(docs, 'docsDecision')}; docmap={_payload_value(docs, 'docmapStatus')}; next_safe={_payload_value(readiness, 'nextSafeCommand')}",
             f"- authority cards: {authority_summary or 'unavailable'}; dashboard/check/hooks/cache/search output remains non-authority.",
             "- cache command boundary: read-only hook payload displays recovery commands only; hooks do not execute generated-cache refreshes.",
-            f"- accelerators: dashboard_packet=available; mcp={_payload_value(mcp, 'status')}; mounted={str(mcp.get('mounted') is True).lower()}; mlhd_refresh=mylittleharness --root <root> mlhd run-once --apply; rg_verification=required",
+            f"- accelerators: dashboard_packet=available; mcp={_payload_value(mcp, 'status')}; mounted={str(mcp.get('mounted') is True).lower()}; mlhd_refresh={mlhd_refresh}; rg_verification=required",
             "- mcp coverage: read_projection=current posture; read_source=bounded source slices; search=source-verified exact/path/full-text; related_or_bundle=links/fan-in/relationship bundle",
             f"- next legal dry-run: {_payload_value(next_legal, 'command')}",
             f"- recommended first-pass commands: {', '.join(str(command) for command in recommended[:4])}",
@@ -2029,13 +2036,14 @@ def _path_policy_findings(
     severity = "warn" if warn_only else "error"
     for rel in paths:
         if _is_generated_cache_path(rel):
+            recovery_command = _generated_cache_recovery_command(inventory)
             findings.append(
                 Finding(
                     severity,
                     "hooks-policy-block-generated-cache-path",
                     (
                         "tool request touches generated projection/cache paths; cache remains disposable and should be "
-                        "refreshed through projection rails; next_safe_command=mylittleharness --root <root> mlhd run-once --apply"
+                        f"refreshed through projection rails; next_safe_command={recovery_command}"
                     ),
                     rel,
                 )
@@ -2329,6 +2337,12 @@ def _hook_route_next_safe_command(inventory: Inventory, path: str) -> str:
     if route_id == "archive":
         return "mylittleharness --root <root> writeback --dry-run --archive-active-plan or memory-hygiene --dry-run --scan"
     return f'mylittleharness --root <root> suggest --intent "route owner for {rel or path}"'
+
+
+def _generated_cache_recovery_command(inventory: Inventory) -> str:
+    if inventory.root_kind == PRODUCT_SOURCE_FIXTURE:
+        return "mylittleharness --root <root> projection --warm-cache --target all"
+    return "mylittleharness --root <root> mlhd run-once --apply"
 
 
 def _route_topic_from_path(path: str) -> str:

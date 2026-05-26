@@ -8,6 +8,7 @@ from pathlib import Path
 from .atomic_files import AtomicFileWrite, apply_file_transaction
 from .inventory import Inventory, Surface
 from .models import Finding
+from .root_boundary import PRODUCT_SOURCE_FIXTURE
 
 
 CONTEXT_MEMORY_SCHEMA = "mylittleharness.source-bound-context-memory-capsule.v1"
@@ -42,7 +43,7 @@ def context_memory_capsule_payload(inventory: Inventory) -> dict[str, object]:
         "trigger": str(payload.get("trigger") or ""),
         "source_ref_count": len(payload.get("source_refs") or []) if isinstance(payload.get("source_refs"), list) else 0,
         "stale_or_unknown": status["stale_or_unknown"],
-        "next_safe_command": "mylittleharness --root <root> mlhd run-once --apply",
+        "next_safe_command": _capsule_refresh_command(inventory),
         "authority": "source-bound context memory is generated non-authority context; source files and lifecycle routes remain truth",
     }
 
@@ -295,6 +296,12 @@ def _next_safe_command(state_data: dict[str, object]) -> str:
     if str(state_data.get("plan_status") or "").casefold() == "active":
         return "mylittleharness --root <root> check"
     return "mylittleharness --root <root> dashboard --inspect --json"
+
+
+def _capsule_refresh_command(inventory: Inventory) -> str:
+    if inventory.root_kind == PRODUCT_SOURCE_FIXTURE:
+        return "mylittleharness --root <root> check"
+    return "mylittleharness --root <root> mlhd run-once --apply"
 
 
 def _capsule_id(capsule: dict[str, object]) -> str:

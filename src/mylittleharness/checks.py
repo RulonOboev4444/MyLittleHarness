@@ -74,6 +74,7 @@ from .projection_artifacts import (
 )
 from .projection_index import INDEX_REL_PATH, build_projection_index, full_text_search_findings, inspect_projection_index, warm_projection_index
 from .reporting import RouteWriteEvidence, route_write_findings
+from .root_boundary import PRODUCT_SOURCE_FIXTURE
 from .research_recovery import (
     deep_research_rubric_recovery_findings,
     deep_research_rubric_recovery_target_label,
@@ -1310,7 +1311,11 @@ def projection_cache_status_findings(inventory: Inventory) -> list[Finding]:
         missing_code="projection-index-missing",
     )
     reason = _projection_cache_reason_label(artifact_reason, index_reason)
-    posture = projection_cache_posture_payload(artifact_findings, index_findings)
+    posture = projection_cache_posture_payload(
+        artifact_findings,
+        index_findings,
+        runtime_refresh_allowed=inventory.root_kind != PRODUCT_SOURCE_FIXTURE,
+    )
     refresh_commands = ", ".join(str(command) for command in posture.get("recommended_refresh_commands", [])[:2])
     return [
         Finding(
@@ -2457,13 +2462,21 @@ def _detach_root_posture_findings(inventory: Inventory) -> list[Finding]:
         Finding("info", "detach-root-kind", f"root kind: {inventory.root_kind}"),
     ]
     if _is_product_source_inventory(inventory):
-        findings.append(
-            Finding(
-                "info",
-                "detach-root-posture",
-                "product-source compatibility fixture: detach reports fixture preservation only; future detach apply would be refused",
-                inventory.state.rel_path if inventory.state else None,
-            )
+        findings.extend(
+            [
+                Finding(
+                    "info",
+                    "detach-root-posture",
+                    "product-source compatibility fixture: detach reports fixture preservation only; future detach apply would be refused",
+                    inventory.state.rel_path if inventory.state else None,
+                ),
+                Finding(
+                    "warn",
+                    "detach-refused",
+                    "product-source compatibility fixture: detach dry-run is a refused preview with no safe matching apply path for this root",
+                    inventory.state.rel_path if inventory.state else None,
+                ),
+            ]
         )
     elif _is_fallback_or_archive_inventory(inventory):
         findings.append(

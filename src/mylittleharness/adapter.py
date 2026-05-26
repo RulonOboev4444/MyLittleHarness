@@ -16,6 +16,7 @@ from .models import Finding
 from .projection import Projection, build_projection
 from .projection_artifacts import inspect_projection_artifacts, projection_cache_posture_payload
 from .projection_index import inspect_projection_index, source_verified_full_text_results
+from .root_boundary import PRODUCT_SOURCE_FIXTURE
 
 
 MCP_READ_PROJECTION_TARGET = "mcp-read-projection"
@@ -329,7 +330,11 @@ def mcp_read_projection_payload(
     projection = build_projection(inventory)
     artifact_findings = inspect_projection_artifacts(inventory, projection)
     index_findings = inspect_projection_index(inventory, projection)
-    cache_posture = projection_cache_posture_payload(artifact_findings, index_findings)
+    cache_posture = projection_cache_posture_payload(
+        artifact_findings,
+        index_findings,
+        runtime_refresh_allowed=_runtime_refresh_allowed(inventory),
+    )
     from .dashboard import connect_readiness_packet, dashboard_agent_packet, mlhd_freshness_payload
 
     agent_packet = dashboard_agent_packet(inventory)
@@ -818,6 +823,10 @@ def _payload_value(payload: object, key: str) -> str:
     return "<none>"
 
 
+def _runtime_refresh_allowed(inventory: Inventory) -> bool:
+    return inventory.root_kind != PRODUCT_SOURCE_FIXTURE
+
+
 def _source_findings(projection: Projection) -> list[Finding]:
     findings: list[Finding] = []
     for source in projection.sources:
@@ -845,7 +854,11 @@ def _source_findings(projection: Projection) -> list[Finding]:
 def _generated_input_findings(inventory: Inventory, projection: Projection) -> list[Finding]:
     artifact_findings = inspect_projection_artifacts(inventory, projection)
     index_findings = inspect_projection_index(inventory, projection)
-    posture = projection_cache_posture_payload(artifact_findings, index_findings)
+    posture = projection_cache_posture_payload(
+        artifact_findings,
+        index_findings,
+        runtime_refresh_allowed=_runtime_refresh_allowed(inventory),
+    )
     refresh_commands = ", ".join(str(command) for command in posture.get("recommended_refresh_commands", [])[:2])
     return [
         Finding(

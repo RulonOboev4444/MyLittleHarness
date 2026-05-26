@@ -15,17 +15,20 @@ from .models import Finding
 from .projection import build_projection, projection_summary_to_dict
 from .projection_artifacts import (
     ARTIFACT_DIR_REL,
+    PROJECTION_CACHE_MANUAL_RECOVERY_COMMAND,
     inspect_projection_artifacts,
     projection_cache_posture_payload,
 )
 from .projection_index import inspect_projection_index
 from .roadmap import roadmap_items_for_diagnostics
+from .root_boundary import PRODUCT_SOURCE_FIXTURE
 from .vcs import worktree_coordination_findings
 
 
 DASHBOARD_SCHEMA = "mylittleharness.dashboard.v1"
 CONNECT_READINESS_SCHEMA = "mylittleharness.connect-readiness-action-packet.v1"
 MLHD_RUNTIME_DIR_REL = ".mylittleharness/runtime/mlhd"
+MLHD_RUN_ONCE_APPLY_COMMAND = "mylittleharness --root <root> mlhd run-once --apply"
 PROJECT_ROUTE_DIR = "project"
 STATE_ROUTE_REL = f"{PROJECT_ROUTE_DIR}/project-state.md"
 ROADMAP_ROUTE_REL = f"{PROJECT_ROUTE_DIR}/roadmap.md"
@@ -424,14 +427,14 @@ def dashboard_agent_packet(inventory: Inventory) -> dict[str, object]:
             "mylittleharness --root <root> intelligence --query \"<task or route question>\"",
             "mylittleharness --root <root> adapter --client-config --target mcp-read-projection",
             "mylittleharness --root <root> adapter --install-client-config --target mcp-read-projection --dry-run",
-            "mylittleharness --root <root> mlhd run-once --apply",
+            _runtime_refresh_command(inventory),
             "rg \"<exact symbol or route>\"",
         ],
         "firstPassSequence": [
             "dashboard --inspect --json",
             "intelligence --query for fuzzy route discovery",
             "MCP read_projection/search/related_or_bundle when mounted",
-            "mlhd run-once --apply when cache posture or context capsule is stale or missing",
+            _runtime_refresh_sequence_step(inventory),
             "rg or mylittleharness.read_source for exact source verification",
         ],
         "mcpToolCoverage": mcp_tool_coverage,
@@ -531,7 +534,7 @@ def connect_readiness_packet(
             "capsuleRelPath": str(context_memory.get("capsule_rel_path") or ""),
             "capsuleId": str(context_memory.get("capsule_id") or ""),
             "sourceRefCount": int(context_memory.get("source_ref_count") or 0),
-            "nextSafeCommand": str(context_memory.get("next_safe_command") or "mylittleharness --root <root> mlhd run-once --apply"),
+            "nextSafeCommand": _context_memory_next_safe_command(inventory, context_memory),
         },
         "docs": docmap,
         "repairTargets": repair_targets,
@@ -710,6 +713,7 @@ def _authority_cards_finding(inventory: Inventory, code_prefix: str) -> Finding:
 
 
 def _accelerator_adoption_payload(inventory: Inventory) -> dict[str, object]:
+    runtime_refresh_allowed = _runtime_refresh_allowed(inventory)
     return {
         "schema": "mylittleharness.agent-accelerator-adoption.v1",
         "dashboardPacketAvailable": True,
@@ -717,15 +721,17 @@ def _accelerator_adoption_payload(inventory: Inventory) -> dict[str, object]:
         "mcpToolCoverage": _mcp_tool_coverage_payload(),
         "firstContactHookCommand": "mylittleharness --root <root> hooks --run session-start --json",
         "codexHookAdapterCommand": "mylittleharness --root <root> hooks adapter --client codex --dry-run --scope project",
-        "mlhdRefreshCommand": "mylittleharness --root <root> mlhd run-once --apply",
-        "projectionWarmCacheCommand": "mylittleharness --root <root> projection --warm-cache --target all",
+        "mlhdRefreshCommand": MLHD_RUN_ONCE_APPLY_COMMAND if runtime_refresh_allowed else "",
+        "runtimeRefreshAllowed": runtime_refresh_allowed,
+        "runtimeRefreshRefusalReason": "" if runtime_refresh_allowed else "product-source roots refuse mlhd runtime writes",
+        "projectionWarmCacheCommand": PROJECTION_CACHE_MANUAL_RECOVERY_COMMAND,
         "exactVerification": _exact_verification_payload(),
         "rgVerificationRequired": True,
         "sequence": [
             "dashboard packet",
             "MCP read/search/bundle when mounted",
             "Codex native hook adapter when project-local hooks are explicitly applied",
-            "mlhd projection refresh tick when stale or missing",
+            "mlhd projection refresh tick when stale or missing" if runtime_refresh_allowed else "projection warm-cache manual recovery for product-source generated cache",
             "projection warm-cache only as manual recovery/debug",
             "rg exact verification before edits or closeout claims",
         ],
@@ -759,6 +765,8 @@ def _accelerator_adoption_finding(inventory: Inventory, code_prefix: str) -> Fin
     mcp = adoption["mcp"]
     assert isinstance(mcp, dict)
     status = str(mcp.get("status") or "unknown")
+    mlhd_refresh = str(adoption.get("mlhdRefreshCommand") or "<refused for product-source roots>")
+    projection_warm_cache = str(adoption.get("projectionWarmCacheCommand") or PROJECTION_CACHE_MANUAL_RECOVERY_COMMAND)
     return Finding(
         "info",
         f"{code_prefix}-accelerator-adoption",
@@ -766,8 +774,8 @@ def _accelerator_adoption_finding(inventory: Inventory, code_prefix: str) -> Fin
             f"first-contact accelerators: dashboard_packet=available; mcp={status}; "
             "native_hooks=`mylittleharness --root <root> hooks --run session-start|user-prompt-submit|pre-tool-use|post-tool-use|stop --json`; "
             "codex_hook_adapter=`mylittleharness --root <root> hooks adapter --client codex --dry-run --scope project`; "
-            "mlhd_refresh_command=`mylittleharness --root <root> mlhd run-once --apply`; "
-            "projection_warm_cache_recovery=`mylittleharness --root <root> projection --warm-cache --target all`; "
+            f"mlhd_refresh_command=`{mlhd_refresh}`; "
+            f"projection_warm_cache_recovery=`{projection_warm_cache}`; "
             "rg_verification=required; config_merge=idempotent-explicit"
         ),
         "project/project-state.md" if inventory.state and inventory.state.exists else None,
@@ -779,7 +787,28 @@ def _cache_posture_payload(inventory: Inventory, projection=None) -> dict[str, o
     return projection_cache_posture_payload(
         inspect_projection_artifacts(inventory, projection),
         inspect_projection_index(inventory, projection),
+        runtime_refresh_allowed=_runtime_refresh_allowed(inventory),
     )
+
+
+def _runtime_refresh_allowed(inventory: Inventory) -> bool:
+    return inventory.root_kind != PRODUCT_SOURCE_FIXTURE
+
+
+def _runtime_refresh_command(inventory: Inventory) -> str:
+    return MLHD_RUN_ONCE_APPLY_COMMAND if _runtime_refresh_allowed(inventory) else PROJECTION_CACHE_MANUAL_RECOVERY_COMMAND
+
+
+def _runtime_refresh_sequence_step(inventory: Inventory) -> str:
+    if _runtime_refresh_allowed(inventory):
+        return "mlhd run-once --apply when cache posture or context capsule is stale or missing"
+    return "projection warm-cache when product-source generated cache needs explicit recovery"
+
+
+def _context_memory_next_safe_command(inventory: Inventory, context_memory: dict[str, object]) -> str:
+    if not _runtime_refresh_allowed(inventory):
+        return "mylittleharness --root <root> check"
+    return str(context_memory.get("next_safe_command") or MLHD_RUN_ONCE_APPLY_COMMAND)
 
 
 def _component_status(components: dict[str, object], name: str) -> str:

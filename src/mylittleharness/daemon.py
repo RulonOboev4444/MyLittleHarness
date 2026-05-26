@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .inventory import Inventory
 from .models import Finding
+from .root_boundary import PRODUCT_SOURCE_FIXTURE
 from .context_memory import (
     CONTEXT_MEMORY_DIR_REL,
     context_memory_capsule_findings,
@@ -43,6 +44,7 @@ MLHD_AUTOSTART_SCHEMA = "mylittleharness.mlhd-autostart.v1"
 MLHD_AUTOSTART_FILE_NAME = "autostart.json"
 MLHD_PROJECTION_QUIET_PERIOD_SECONDS = 1.0
 MLHD_WORKER_INTERVAL_SECONDS = 2.0
+MLHD_PRODUCT_SOURCE_REFUSED_ACTIONS = {"install", "run-once", "start", "stop", "uninstall"}
 _MLHD_WORKER_LOOP_CODE = "\n".join(
     [
         "import json, os, subprocess, sys, time",
@@ -120,7 +122,7 @@ def mlhd_control_payload(
         "background_worker_started": state["control_status"] == "running",
         "worker_interval_seconds": MLHD_WORKER_INTERVAL_SECONDS,
         "filesystem_watcher_started": False,
-        "generated_projection_cache_may_refresh": action in {"start", "run-once"},
+        "generated_projection_cache_may_refresh": _mlhd_runtime_refresh_allowed(inventory) and action in {"start", "run-once"},
         "projection_quiet_period_seconds": quiet_period_seconds,
         "projection_pulse": projection_pulse_payload(inventory, quiet_period_seconds=quiet_period_seconds),
         "context_memory": context_memory_capsule_payload(inventory),
@@ -371,6 +373,17 @@ def projection_pulse_payload(
     *,
     quiet_period_seconds: float = MLHD_PROJECTION_QUIET_PERIOD_SECONDS,
 ) -> dict[str, object]:
+    runtime_refresh_allowed = _mlhd_runtime_refresh_allowed(inventory)
+    refresh_command = (
+        "mylittleharness --root <root> mlhd run-once --apply"
+        if runtime_refresh_allowed
+        else "mylittleharness --root <root> projection --warm-cache --target all"
+    )
+    next_safe_command = (
+        "mylittleharness --root <root> mlhd run-once --dry-run"
+        if runtime_refresh_allowed
+        else "mylittleharness --root <root> projection --warm-cache --target all"
+    )
     dirty_payloads = [_read_json_marker(inventory.root, ARTIFACT_DIRTY_MARKER_NAME), _read_json_marker(inventory.root, INDEX_DIRTY_MARKER_NAME)]
     dirty_payloads = [payload for payload in dirty_payloads if payload]
     operation_payload = _read_json_marker(inventory.root, CACHE_OPERATION_MARKER_NAME)
@@ -408,10 +421,12 @@ def projection_pulse_payload(
         "last_successful_refresh_utc": str(refresh_payload.get("last_successful_refresh_utc") or ""),
         "last_failed_refresh_utc": str(refresh_payload.get("last_failed_refresh_utc") or ""),
         "stale_reason": str(refresh_payload.get("stale_reason") or ""),
-        "owner_command": "mylittleharness --root <root> mlhd run-once --apply",
+        "owner_command": refresh_command,
         "warm_cache_command": "mylittleharness --root <root> projection --warm-cache --target all",
         "manual_recovery_command": "mylittleharness --root <root> projection --warm-cache --target all",
-        "next_safe_command": "mylittleharness --root <root> mlhd run-once --dry-run",
+        "next_safe_command": next_safe_command,
+        "runtime_refresh_allowed": runtime_refresh_allowed,
+        "runtime_refusal_reason": "" if runtime_refresh_allowed else "product-source roots refuse mlhd runtime writes",
         "authority": "watch/pulse state is disposable; source files and lifecycle routes remain authoritative",
     }
 
@@ -528,6 +543,8 @@ def _mlhd_dry_run_findings(
     *,
     quiet_period_seconds: float = MLHD_PROJECTION_QUIET_PERIOD_SECONDS,
 ) -> list[Finding]:
+    if _mlhd_product_source_refuses_action(inventory, action):
+        return [_mlhd_product_source_refusal_finding(action, dry_run=True)]
     state = inspect_mlhd_control_state(inventory)
     if state["runtime_cache_status"] == "invalid":
         return [_invalid_runtime_finding(action)]
@@ -581,6 +598,8 @@ def _mlhd_apply_findings(
     *,
     quiet_period_seconds: float = MLHD_PROJECTION_QUIET_PERIOD_SECONDS,
 ) -> list[Finding]:
+    if _mlhd_product_source_refuses_action(inventory, action):
+        return [_mlhd_product_source_refusal_finding(action, dry_run=False)]
     runtime_dir = inventory.root / MLHD_RUNTIME_DIR_REL
     if _runtime_cache_status(runtime_dir) == "invalid":
         return [_invalid_runtime_finding(action)]
@@ -595,6 +614,28 @@ def _mlhd_apply_findings(
     if action == "uninstall":
         return _apply_mlhd_uninstall(inventory)
     return [Finding("error", "mlhd-control-action-unknown", f"unknown mlhd action: {action}", MLHD_RUNTIME_DIR_REL)]
+
+
+def _mlhd_runtime_refresh_allowed(inventory: Inventory) -> bool:
+    return inventory.root_kind != PRODUCT_SOURCE_FIXTURE
+
+
+def _mlhd_product_source_refuses_action(inventory: Inventory, action: str) -> bool:
+    return inventory.root_kind == PRODUCT_SOURCE_FIXTURE and action in MLHD_PRODUCT_SOURCE_REFUSED_ACTIONS
+
+
+def _mlhd_product_source_refusal_finding(action: str, *, dry_run: bool) -> Finding:
+    mode = "dry-run" if dry_run else "apply"
+    severity = "warn" if dry_run else "error"
+    return Finding(
+        severity,
+        f"mlhd-{action}-dry-run-refused" if dry_run else f"mlhd-{action}-refused",
+        (
+            f"mlhd {action} {mode} is refused for product-source compatibility fixtures before runtime preview or writes; "
+            "use a live operating root for mlhd runtime state, or run projection warm-cache explicitly for disposable product-source cache recovery"
+        ),
+        MLHD_RUNTIME_DIR_REL,
+    )
 
 
 def _spawn_mlhd_worker(root: Path, *, quiet_period_seconds: float) -> subprocess.Popen:

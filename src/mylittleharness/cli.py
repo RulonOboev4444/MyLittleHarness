@@ -150,6 +150,7 @@ from .preflight import orchestrator_workspace_preflight_sections, preflight_sect
 from .vcs import dispatcher_worktree_coordination_findings, worktree_coordination_findings
 from .reconcile import reconcile_findings
 from .reporting import emit_text, render_intelligence_report, render_json_report, render_report, render_sectioned_report
+from .root_boundary import PRODUCT_SOURCE_FIXTURE
 from .relationship_drift import (
     make_relationship_drift_request,
     relationship_drift_apply_findings,
@@ -2178,6 +2179,7 @@ def _existing_context_memory_capsule(inventory: object) -> bool:
 
 
 def _refresh_context_memory_after_apply(command: str, inventory: object) -> list[Finding]:
+    recovery_command = _context_memory_recovery_command(inventory)
     try:
         refreshed_inventory = load_for_root(Path(getattr(inventory, "root")))
     except (OSError, RootLoadError, TypeError, ValueError) as exc:
@@ -2187,7 +2189,7 @@ def _refresh_context_memory_after_apply(command: str, inventory: object) -> list
                 "context-memory-capsule-refresh-skipped",
                 (
                     f"could not reload source refs after {command} --apply; generated context capsule was left as-is "
-                    f"and can be refreshed with mylittleharness --root <root> mlhd run-once --apply: {exc}"
+                    f"and the next safe recovery command is {recovery_command}: {exc}"
                 ),
                 CONTEXT_MEMORY_DIR_REL,
             )
@@ -2201,12 +2203,18 @@ def _refresh_context_memory_after_apply(command: str, inventory: object) -> list
                 "context-memory-capsule-refresh-skipped",
                 (
                     f"could not refresh generated context capsule after {command} --apply; source files remain authoritative "
-                    f"and recovery is mylittleharness --root <root> mlhd run-once --apply: {exc}"
+                    f"and the next safe recovery command is {recovery_command}: {exc}"
                 ),
                 CONTEXT_MEMORY_DIR_REL,
             )
         ]
     return refresh_findings
+
+
+def _context_memory_recovery_command(inventory: object) -> str:
+    if str(getattr(inventory, "root_kind", "") or "") == PRODUCT_SOURCE_FIXTURE:
+        return "mylittleharness --root <root> check"
+    return "mylittleharness --root <root> mlhd run-once --apply"
 
 
 def _projection_cache_changed_paths(findings: list[Finding]) -> tuple[str, ...]:

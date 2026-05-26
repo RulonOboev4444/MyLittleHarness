@@ -211,6 +211,17 @@ def product_diff_write_scope_findings(
     source = scope["source"]
     problem = scope.get("problem", "")
     if problem:
+        problem_severity = str(scope.get("problem_severity") or "info")
+        if problem_severity == "error":
+            severity = "error" if apply or preflight else "warn"
+            return [
+                Finding(
+                    severity,
+                    f"{code_prefix}-product-diff-write-scope-blocked",
+                    problem,
+                    source,
+                )
+            ]
         if preflight or not completion_reason:
             return []
         return [Finding("info", f"{code_prefix}-product-diff-write-scope-skipped", problem, source)]
@@ -330,19 +341,25 @@ def _product_diff_scope(inventory: Inventory) -> dict[str, object] | None:
     state = inventory.state
     if not plan or not plan.exists or not state or not state.exists:
         return None
-    product_root, problem = _configured_product_source_root(inventory)
+    product_root, problem, problem_severity = _configured_product_source_root(inventory)
     source = plan.rel_path
     if product_root is None:
-        return {"source": source, "problem": problem}
+        return {"source": source, "problem": problem, "problem_severity": problem_severity}
 
-    allowed_paths = _active_plan_product_scope_paths(plan)
+    allowed_paths, scope_errors = _active_plan_product_scope(plan)
+    if scope_errors:
+        return {
+            "source": source,
+            "problem": f"active plan product scope contains invalid path(s): {_sample_text(scope_errors)}",
+            "problem_severity": "error",
+        }
     if not allowed_paths:
         return None
 
     posture = probe_vcs(product_root)
     if not posture.git_available or not posture.is_worktree or posture.state not in {"dirty", "clean"}:
         detail = posture.detail or posture.state or "unknown"
-        return {"source": source, "problem": f"product dirty diff unavailable for scope comparison: {detail}"}
+        return {"source": source, "problem": f"product dirty diff unavailable for scope comparison: {detail}", "problem_severity": "info"}
     entries = posture.changed_paths or posture.changed_samples
     dirty_paths = _changed_product_paths(entries)
     out_of_scope = tuple(path for path in dirty_paths if not _path_is_in_scope(path, allowed_paths))
@@ -354,39 +371,55 @@ def _product_diff_scope(inventory: Inventory) -> dict[str, object] | None:
     }
 
 
-def _configured_product_source_root(inventory: Inventory) -> tuple[Path | None, str]:
+def _configured_product_source_root(inventory: Inventory) -> tuple[Path | None, str, str]:
     state = inventory.state
     data = state.frontmatter.data if state and state.exists else {}
     raw = str(data.get("product_source_root") or data.get("projection_root") or "").strip()
     if not raw:
-        return None, "product_source_root is not configured; product dirty diff scope comparison skipped"
+        return None, "product_source_root is not configured; product dirty diff scope comparison skipped", "info"
     try:
         path = Path(raw.replace("\\\\", "\\")).expanduser()
         if not path.is_absolute():
             path = inventory.root / path
         resolved = path.resolve()
     except (OSError, RuntimeError) as exc:
-        return None, f"product_source_root could not be resolved for dirty diff scope comparison: {exc}"
+        return None, f"product_source_root could not be resolved for dirty diff scope comparison: {exc}", "info"
     if not resolved.exists() or not resolved.is_dir():
-        return None, f"product_source_root does not exist as a directory for dirty diff scope comparison: {resolved}"
-    return resolved, ""
+        return None, f"product_source_root does not exist as a directory for dirty diff scope comparison: {resolved}", "info"
+    if _same_resolved_path(resolved, inventory.root):
+        return (
+            None,
+            "configured product_source_root resolves to the live operating root; product dirty diff scope comparison is refused",
+            "error",
+        )
+    return resolved, "", "info"
 
 
 def _active_plan_product_scope_paths(plan: Surface) -> tuple[str, ...]:
+    paths, _errors = _active_plan_product_scope(plan)
+    return paths
+
+
+def _active_plan_product_scope(plan: Surface) -> tuple[tuple[str, ...], tuple[str, ...]]:
     values: list[str] = []
     if plan.frontmatter.has_frontmatter:
         values.extend(_scope_list_values(plan.frontmatter.data.get("target_artifacts")))
     for text in _plan_write_scope_values(plan.content):
         values.extend(_scope_list_values(text))
     normalized: list[str] = []
+    errors: list[str] = []
     seen: set[str] = set()
     for value in values:
+        invalid_reason = _invalid_product_scope_reason(value)
+        if invalid_reason:
+            errors.append(f"{value}: {invalid_reason}")
+            continue
         path = _normalize_product_rel(value)
         if not path or not _looks_like_product_scope(path) or path in seen:
             continue
         normalized.append(path)
         seen.add(path)
-    return tuple(normalized)
+    return tuple(normalized), tuple(errors)
 
 
 def _plan_write_scope_values(text: str) -> tuple[str, ...]:
@@ -427,6 +460,23 @@ def _normalize_product_rel(value: str) -> str:
     while path.startswith("./"):
         path = path[2:]
     return path.strip("/")
+
+
+def _invalid_product_scope_reason(value: str) -> str:
+    raw = _strip_scope_token(value)
+    path = raw.replace("\\", "/")
+    if not path:
+        return ""
+    if path.startswith("/"):
+        return "leading slash would make product scope absolute or root-ambiguous"
+    if re.match(r"^[A-Za-z]:", path):
+        return "drive-qualified path is outside active-plan product-relative scope"
+    while path.startswith("./"):
+        path = path[2:]
+    parts = [part for part in path.split("/") if part]
+    if any(part == ".." for part in parts):
+        return "parent traversal is outside active-plan product-relative scope"
+    return ""
 
 
 def _looks_like_product_scope(path: str) -> bool:
