@@ -1021,6 +1021,9 @@ def _codex_config_status(
     config_path: Path,
     expected_server: dict[str, object],
 ) -> tuple[str, bool, str, tuple[str, ...]]:
+    boundary_issue = _codex_config_boundary_issue(config_path)
+    if boundary_issue:
+        return "blocked", False, boundary_issue, ()
     if config_path.exists() and not config_path.is_file():
         return "blocked", False, "Codex config path exists but is not a regular file; apply is refused", ()
     if not config_path.exists():
@@ -1067,6 +1070,9 @@ def _codex_merge_mode(status: str) -> str:
 def _apply_codex_mcp_config(config_path: Path, command: list[str], status: str, mounted: bool) -> list[Finding]:
     if mounted:
         return [Finding("info", "adapter-codex-config-apply-unchanged", "MCP server is already mounted; no workstation file was changed")]
+    boundary_issue = _codex_config_boundary_issue(config_path)
+    if boundary_issue:
+        return [Finding("error", "adapter-codex-config-apply-refused", boundary_issue)]
     if status not in {"missing", "missing-server", "legacy-root-bound"}:
         return [
             Finding(
@@ -1107,6 +1113,14 @@ def _apply_codex_mcp_config(config_path: Path, command: list[str], status: str, 
             )
         )
     return findings
+
+
+def _codex_config_boundary_issue(config_path: Path) -> str:
+    if config_path.is_symlink():
+        return "Codex config path is a symlink; apply is refused"
+    if config_path.parent.exists() and config_path.parent.is_symlink():
+        return "Codex config parent path is a symlink; apply is refused"
+    return ""
 
 
 def _backup_codex_config(config_path: Path, text: str) -> Finding:

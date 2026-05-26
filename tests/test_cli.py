@@ -25,7 +25,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from mylittleharness import atomic_files, claims
+from mylittleharness import atomic_files, bootstrap, claims
 from mylittleharness.adapter import serve_mcp_read_projection
 from mylittleharness.checks import (
     WORKFLOW_ATTACH_DIRECTORIES,
@@ -1692,7 +1692,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(ci_code, 0)
             self.assertNotIn("meta-feedback-central-destination", ci_output.getvalue())
 
-    def test_check_warns_when_installed_console_lags_product_source_commands(self) -> None:
+    def test_check_reports_path_console_surface_without_executing_it(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             root = make_live_root(base / "operating")
@@ -1712,14 +1712,11 @@ class CliTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            def stale_console_probe(args, **_kwargs):
-                return subprocess.CompletedProcess(args, 2, stdout="", stderr="invalid choice")
-
             before = snapshot_tree(root)
             output = io.StringIO()
             with (
                 patch("mylittleharness.checks.shutil.which", return_value=str(base / "bin/mylittleharness")),
-                patch("mylittleharness.checks.subprocess.run", side_effect=stale_console_probe),
+                patch("mylittleharness.checks.subprocess.run") as run_probe,
                 redirect_stdout(output),
             ):
                 code = main(["--root", str(root), "check"])
@@ -1727,10 +1724,15 @@ class CliTests(unittest.TestCase):
             rendered = output.getvalue()
             self.assertEqual(code, 0)
             self.assertEqual(before, snapshot_tree(root))
-            self.assertIn("installed-cli-command-surface-lag", rendered)
+            run_probe.assert_not_called()
+            self.assertIn("installed-cli-command-surface-static", rendered)
             self.assertIn("transition, roadmap, meta-feedback", rendered)
             self.assertIn("PYTHONPATH=", rendered)
+            self.assertIn("default check does not execute a PATH-discovered mylittleharness console script", rendered)
+            self.assertIn("bootstrap --package-smoke", rendered)
             self.assertIn("no automatic install, mirror", rendered)
+            self.assertNotIn("installed-cli-command-surface-lag", rendered)
+            self.assertNotIn("installed-cli-command-surface-current", rendered)
 
     def test_installed_console_fallback_quotes_product_source_pythonpath(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1753,20 +1755,18 @@ class CliTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            def stale_console_probe(args, **_kwargs):
-                return subprocess.CompletedProcess(args, 2, stdout="", stderr="invalid choice")
-
             output = io.StringIO()
             with (
                 patch("mylittleharness.checks.shutil.which", return_value=str(base / "bin/mylittleharness")),
-                patch("mylittleharness.checks.subprocess.run", side_effect=stale_console_probe),
+                patch("mylittleharness.checks.subprocess.run") as run_probe,
                 redirect_stdout(output),
             ):
                 code = main(["--root", str(root), "check"])
 
             rendered = output.getvalue()
             self.assertEqual(code, 0)
-            self.assertIn("installed-cli-command-surface-lag", rendered)
+            run_probe.assert_not_called()
+            self.assertIn("installed-cli-command-surface-static", rendered)
             self.assertIn("PYTHONPATH='", rendered)
             self.assertIn(str(product_src), rendered)
             self.assertNotIn(f"PYTHONPATH={product_src} python", rendered)
@@ -1821,7 +1821,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("product_source_root command surface", rendered)
             self.assertIn("no automatic cross-root copy", rendered)
 
-    def test_check_probes_installed_console_without_source_pythonpath_masking_lag(self) -> None:
+    def test_check_does_not_probe_installed_console_with_source_pythonpath_present(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             root = make_live_root(base / "operating")
@@ -1842,18 +1842,12 @@ class CliTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            def source_masked_console_probe(args, **kwargs):
-                env = kwargs.get("env") or {}
-                if "PYTHONPATH" in {key.upper() for key in env}:
-                    return subprocess.CompletedProcess(args, 0, stdout="usage\n", stderr="")
-                return subprocess.CompletedProcess(args, 2, stdout="", stderr="invalid choice")
-
             before = snapshot_tree(root)
             output = io.StringIO()
             with (
                 patch.dict(os.environ, {"PYTHONPATH": str(product_src)}),
                 patch("mylittleharness.checks.shutil.which", return_value=str(base / "bin/mylittleharness")),
-                patch("mylittleharness.checks.subprocess.run", side_effect=source_masked_console_probe),
+                patch("mylittleharness.checks.subprocess.run") as run_probe,
                 redirect_stdout(output),
             ):
                 code = main(["--root", str(root), "check"])
@@ -1861,10 +1855,13 @@ class CliTests(unittest.TestCase):
             rendered = output.getvalue()
             self.assertEqual(code, 0)
             self.assertEqual(before, snapshot_tree(root))
-            self.assertIn("installed-cli-command-surface-lag", rendered)
+            run_probe.assert_not_called()
+            self.assertIn("installed-cli-command-surface-static", rendered)
+            self.assertIn("default check does not execute a PATH-discovered mylittleharness console script", rendered)
+            self.assertNotIn("installed-cli-command-surface-lag", rendered)
             self.assertNotIn("installed-cli-command-surface-current", rendered)
 
-    def test_check_reports_installed_console_import_probe_failure_with_source_fallback(self) -> None:
+    def test_check_reports_static_console_surface_when_installed_console_import_is_broken(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             root = make_live_root(base / "operating")
@@ -1884,19 +1881,11 @@ class CliTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            def import_broken_console_probe(args, **_kwargs):
-                return subprocess.CompletedProcess(
-                    args,
-                    1,
-                    stdout="",
-                    stderr="Traceback (most recent call last):\nImportError: cannot import name 'ROADMAP_CURRENT_POSTURE_FIELD'\n",
-                )
-
             before = snapshot_tree(root)
             output = io.StringIO()
             with (
                 patch("mylittleharness.checks.shutil.which", return_value=str(base / "bin/mylittleharness")),
-                patch("mylittleharness.checks.subprocess.run", side_effect=import_broken_console_probe),
+                patch("mylittleharness.checks.subprocess.run") as run_probe,
                 redirect_stdout(output),
             ):
                 code = main(["--root", str(root), "check"])
@@ -1904,9 +1893,10 @@ class CliTests(unittest.TestCase):
             rendered = output.getvalue()
             self.assertEqual(code, 0)
             self.assertEqual(before, snapshot_tree(root))
-            self.assertIn("installed-cli-command-surface-probe", rendered)
-            self.assertIn("ImportError: cannot import name", rendered)
+            run_probe.assert_not_called()
+            self.assertIn("installed-cli-command-surface-static", rendered)
             self.assertIn("PYTHONPATH=", rendered)
+            self.assertNotIn("ImportError: cannot import name", rendered)
             self.assertNotIn("installed-cli-command-surface-current", rendered)
 
     def test_check_labels_stale_phase_writeback_tail_after_archive_without_writes(self) -> None:
@@ -5110,8 +5100,15 @@ class CliTests(unittest.TestCase):
                     return subprocess.CompletedProcess(command, 0, stdout="1.0.0\n", stderr="")
                 return subprocess.CompletedProcess(command, 0, stdout="usage: mylittleharness\nMyLittleHarness repo safety utility\ninit\n", stderr="")
 
+            def fake_create_venv(venv_dir: Path) -> None:
+                script = bootstrap._venv_script(venv_dir, "mylittleharness")
+                script.parent.mkdir(parents=True, exist_ok=True)
+                script.write_text("", encoding="utf-8")
+
             output = io.StringIO()
-            with patch("mylittleharness.bootstrap._create_venv"), patch("mylittleharness.bootstrap._run_command", side_effect=fake_run):
+            with patch("mylittleharness.bootstrap._create_venv", side_effect=fake_create_venv), patch(
+                "mylittleharness.bootstrap._run_command", side_effect=fake_run
+            ):
                 with redirect_stdout(output):
                     code = main(["--root", str(root), "bootstrap", "--package-smoke"])
             rendered = output.getvalue()
@@ -5131,6 +5128,14 @@ class CliTests(unittest.TestCase):
             self.assertIn("temporary workspace outside product root: True", rendered)
             self.assertIn("does not publish packages, change PATH, write user config, install hooks, add CI/GitHub workflows", rendered)
 
+    def test_bootstrap_package_smoke_creates_venv_without_system_site_packages(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            venv_dir = Path(tmp) / "venv"
+            with patch("mylittleharness.bootstrap.venv.EnvBuilder") as builder:
+                bootstrap._create_venv(venv_dir)
+            builder.assert_called_once_with(with_pip=True, system_site_packages=False, clear=True)
+            builder.return_value.create.assert_called_once_with(venv_dir)
+
     def test_bootstrap_package_smoke_refuses_non_product_root_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_live_root(Path(tmp))
@@ -5142,6 +5147,44 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 1)
             self.assertEqual(before, snapshot_tree(root))
             self.assertIn("package-smoke-root-refused", rendered)
+            self.assertIn("package-smoke-not-started", rendered)
+
+    def test_bootstrap_package_smoke_refuses_path_shaped_version_before_install(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_package_source_root(Path(tmp))
+            pyproject = root / "pyproject.toml"
+            pyproject.write_text(pyproject.read_text(encoding="utf-8").replace('version = "1.0.0"', 'version = "../escape"', 1), encoding="utf-8")
+            before = snapshot_tree(root)
+            output = io.StringIO()
+            with patch("mylittleharness.bootstrap._run_package_smoke", side_effect=AssertionError("package smoke should not start")):
+                with redirect_stdout(output):
+                    code = main(["--root", str(root), "bootstrap", "--package-smoke"])
+            rendered = output.getvalue()
+            self.assertEqual(code, 1)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("package-smoke-version-invalid", rendered)
+            self.assertIn("project.version must not contain path separators", rendered)
+            self.assertIn("package-smoke-not-started", rendered)
+
+    def test_bootstrap_package_smoke_refuses_symlinked_package_source_before_install(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_package_source_root(Path(tmp) / "product")
+            outside = Path(tmp) / "outside.py"
+            outside.write_text("secret = True\n", encoding="utf-8")
+            link = root / "src/mylittleharness/symlinked_secret.py"
+            try:
+                os.symlink(outside, link)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"file symlinks are unavailable: {exc}")
+            before = snapshot_tree(root)
+            output = io.StringIO()
+            with patch("mylittleharness.bootstrap._run_package_smoke", side_effect=AssertionError("package smoke should not start")):
+                with redirect_stdout(output):
+                    code = main(["--root", str(root), "bootstrap", "--package-smoke"])
+            rendered = output.getvalue()
+            self.assertEqual(code, 1)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("package-smoke-source-symlink", rendered)
             self.assertIn("package-smoke-not-started", rendered)
 
     def test_bootstrap_package_smoke_reports_install_failure_without_later_checks_or_writes(self) -> None:
@@ -5163,6 +5206,31 @@ class CliTests(unittest.TestCase):
             self.assertIn("package-smoke-import-skipped", rendered)
             self.assertIn("package-smoke-console-skipped", rendered)
             self.assertIn("package smoke failed before creating product-root package artifacts or workstation changes", rendered)
+
+    def test_bootstrap_package_smoke_requires_installed_console_script(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_package_source_root(Path(tmp))
+            before = snapshot_tree(root)
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+                calls.append(command)
+                if command[1:3] == ["-m", "pip"]:
+                    return subprocess.CompletedProcess(command, 0, stdout="installed\n", stderr="")
+                if "-c" in command:
+                    return subprocess.CompletedProcess(command, 0, stdout="1.0.0\n", stderr="")
+                return subprocess.CompletedProcess(command, 0, stdout="unexpected console fallback\n", stderr="")
+
+            output = io.StringIO()
+            with patch("mylittleharness.bootstrap._create_venv"), patch("mylittleharness.bootstrap._run_command", side_effect=fake_run):
+                with redirect_stdout(output):
+                    code = main(["--root", str(root), "bootstrap", "--package-smoke"])
+            rendered = output.getvalue()
+            self.assertEqual(code, 1)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertEqual(2, len(calls))
+            self.assertIn("package-smoke-console-missing", rendered)
+            self.assertNotIn("package-smoke-console-ok", rendered)
 
     def test_bootstrap_requires_explicit_inspect(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -24244,6 +24312,43 @@ class CliTests(unittest.TestCase):
             self.assertIn("adapter install apply found the Codex MCP config already mounted", second_apply_output.getvalue())
             self.assertNotIn("adapter inspection completed as a terminal-only read-only report", second_apply_output.getvalue())
 
+    def test_adapter_install_client_config_refuses_symlinked_config_target_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp) / "root")
+            target_config = Path(tmp) / "redirected-config.toml"
+            target_config.write_text("[mcp_servers]\n", encoding="utf-8")
+            config_path = Path(tmp) / "home" / ".codex" / "config.toml"
+            config_path.parent.mkdir(parents=True)
+            try:
+                os.symlink(target_config, config_path)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"file symlinks are unavailable: {exc}")
+
+            before_target = target_config.read_text(encoding="utf-8")
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "adapter",
+                        "--install-client-config",
+                        "--target",
+                        "mcp-read-projection",
+                        "--config-path",
+                        str(config_path),
+                        "--apply",
+                    ]
+                )
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 2)
+            self.assertEqual(before_target, target_config.read_text(encoding="utf-8"))
+            self.assertIn("adapter-codex-config-apply-refused", rendered)
+            self.assertIn("Codex config path is a symlink", rendered)
+            self.assertFalse((root / ".codex/hooks.json").exists())
+            self.assertFalse((root / ".codex/hooks/mylittleharness_session_start.py").exists())
+
     def test_adapter_install_client_config_refuses_conflicting_existing_server_without_secret_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_operating_root(Path(tmp) / "root")
@@ -26906,6 +27011,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("stable-spec-create-plan", rendered)
             self.assertIn(f"project/specs/workflow/{missing[0]}", rendered)
             self.assertIn(f"project/specs/workflow/{missing[1]}", rendered)
+            self.assertIn("stable-spec-create-review-required", rendered)
             self.assertIn("manual rollback only", rendered)
             self.assertFalse((root / ".mylittleharness").exists())
 
@@ -26922,11 +27028,15 @@ class CliTests(unittest.TestCase):
             rendered = output.getvalue()
             self.assertEqual(code, 0)
             self.assertIn("stable-spec-create-created", rendered)
+            self.assertIn("stable-spec-create-review-required", rendered)
             self.assertIn("stable-spec-create-rollback", rendered)
             self.assertIn("post-repair validation findings: 0 errors", rendered)
             self.assertIn("post-repair audit-link findings: 0 warnings", rendered)
             self.assertTrue(target.is_file())
-            self.assertIn("# Workflow Artifact Model Spec", target.read_text(encoding="utf-8"))
+            created = target.read_text(encoding="utf-8")
+            self.assertIn("# Workflow Artifact Model Spec", created)
+            self.assertIn("intentionally minimal bootstrap stub", created)
+            self.assertIn("review-required", created)
             self.assertFalse((root / ".mylittleharness").exists())
 
     def test_repair_apply_stable_spec_create_is_idempotent(self) -> None:
@@ -27747,15 +27857,48 @@ class CliTests(unittest.TestCase):
                         "--product-root",
                         str(root / "product-source"),
                     ]
-                )
+            )
             self.assertEqual(product_code, 0)
             self.assertIn("inside the configured product source root", product_output.getvalue())
 
+            relative_root = make_operating_root(Path(tmp) / "relative-coordination")
+            relative_product = Path(tmp) / "configured-product"
+            relative_worker = relative_product / "worker"
+            relative_worker.mkdir(parents=True)
+            relative_state = relative_root / "project/project-state.md"
+            relative_state.write_text(
+                relative_state.read_text(encoding="utf-8").replace(
+                    'active_plan = "project/implementation-plan.md"',
+                    'active_plan = "project/implementation-plan.md"\n\nproduct_source_root = "../configured-product"',
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            relative_output = io.StringIO()
+            with redirect_stdout(relative_output):
+                relative_code = main(
+                    [
+                        "--root",
+                        str(relative_root),
+                        "preflight",
+                        "--orchestrator-workspace",
+                        str(relative_worker),
+                    ]
+                )
+            relative_rendered = relative_output.getvalue()
+            self.assertEqual(relative_code, 0)
+            self.assertIn("orchestrator-preflight-product-root", relative_rendered)
+            self.assertIn("orchestrator-shell-preflight-product-root", relative_rendered)
+            self.assertIn("inside the configured product source root", relative_rendered)
+
     def test_preflight_orchestrator_workspace_probes_capabilities_and_completion_policy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
             root = make_operating_root(Path(tmp) / "coordination")
             workspace = Path(tmp) / "worker"
             workspace.mkdir()
+            git_executable = base / "bin" / "git.exe"
+            mlh_executable = base / "bin" / "mylittleharness.exe"
             before = snapshot_tree_bytes(root)
             calls: list[list[str]] = []
 
@@ -27763,16 +27906,23 @@ class CliTests(unittest.TestCase):
                 calls.append(list(command))
                 if command[:2] == [sys.executable, "-c"]:
                     return subprocess.CompletedProcess(command, 0, stdout="mlh-process-spawn-ok\n", stderr="")
-                if command[0] == "git":
+                if command[0] == str(git_executable.resolve()):
                     return subprocess.CompletedProcess(command, 1, stdout="", stderr="fatal: not a git repo\n")
-                if command[0] == "mylittleharness" and command[-1] == "check":
+                if command[0] == str(mlh_executable.resolve()) and command[-1] == "check":
                     return subprocess.CompletedProcess(command, 1, stdout="", stderr="check failed\n")
-                if command[0] == "mylittleharness" and "adapter" in command:
+                if command[0] == str(mlh_executable.resolve()) and "adapter" in command:
                     return subprocess.CompletedProcess(command, 0, stdout="mcp-read-projection\n", stderr="")
                 raise AssertionError(f"unexpected probe command: {command} in {cwd}")
 
+            def fake_which(name: str) -> str | None:
+                if name == "git":
+                    return str(git_executable)
+                if name == "mylittleharness":
+                    return str(mlh_executable)
+                return None
+
             output = io.StringIO()
-            with patch("mylittleharness.checks.shutil.which", return_value="tool"):
+            with patch("mylittleharness.checks.shutil.which", side_effect=fake_which):
                 with patch("mylittleharness.checks.subprocess.run", side_effect=fake_run):
                     with redirect_stdout(output):
                         code = main(
@@ -27800,9 +27950,46 @@ class CliTests(unittest.TestCase):
             self.assertIn("orchestrator-shell-preflight-refused", rendered)
             self.assertIn("completion claims require repo-visible handoff", rendered)
             self.assertTrue(any(call[:2] == [sys.executable, "-c"] for call in calls))
-            self.assertTrue(any(call[:1] == ["git"] for call in calls))
-            self.assertTrue(any(call[:1] == ["mylittleharness"] and call[-1:] == ["check"] for call in calls))
-            self.assertTrue(any(call[:1] == ["mylittleharness"] and "adapter" in call for call in calls))
+            self.assertTrue(any(call[:1] == [str(git_executable.resolve())] for call in calls))
+            self.assertTrue(any(call[:1] == [str(mlh_executable.resolve())] and call[-1:] == ["check"] for call in calls))
+            self.assertTrue(any(call[:1] == [str(mlh_executable.resolve())] and "adapter" in call for call in calls))
+
+    def test_preflight_orchestrator_workspace_refuses_workspace_local_mlh_probe_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp) / "coordination")
+            workspace = Path(tmp) / "worker"
+            workspace.mkdir()
+            workspace_mlh = workspace / "mylittleharness.exe"
+            workspace_mlh.write_text("not a real executable\n", encoding="utf-8")
+            calls: list[list[str]] = []
+
+            def fake_which(name: str) -> str | None:
+                if name == "git":
+                    return str(Path(tmp) / "bin" / "git.exe")
+                if name == "mylittleharness":
+                    return str(workspace_mlh)
+                return None
+
+            def fake_run(command: list[str], cwd: Path, **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(list(command))
+                if command[:2] == [sys.executable, "-c"]:
+                    return subprocess.CompletedProcess(command, 0, stdout="mlh-process-spawn-ok\n", stderr="")
+                if command[0] == str((Path(tmp) / "bin" / "git.exe").resolve()):
+                    return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+                raise AssertionError(f"unexpected probe command: {command} in {cwd}")
+
+            output = io.StringIO()
+            with patch("mylittleharness.checks.shutil.which", side_effect=fake_which):
+                with patch("mylittleharness.checks.subprocess.run", side_effect=fake_run):
+                    with redirect_stdout(output):
+                        code = main(["--root", str(root), "preflight", "--orchestrator-workspace", str(workspace)])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("executable resolves inside the candidate workspace", rendered)
+            self.assertIn("orchestrator-mlh-check-refused", rendered)
+            self.assertIn("orchestrator-mcp-read-path-refused", rendered)
+            self.assertFalse(any(call and call[0] == str(workspace_mlh.resolve()) for call in calls))
 
     def test_research_generated_metadata_omits_empty_optional_relationship_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

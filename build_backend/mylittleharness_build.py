@@ -4,12 +4,16 @@ import base64
 import csv
 import hashlib
 import io
+import re
 import tomllib
 import zipfile
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+_PATH_SAFE_NAME = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
+_PATH_SAFE_VERSION = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._+-]*[A-Za-z0-9])?$")
+_PATH_FORBIDDEN_CHARS = {"/", "\\", ":"}
 
 
 def get_requires_for_build_wheel(config_settings: object | None = None) -> list[str]:
@@ -18,7 +22,7 @@ def get_requires_for_build_wheel(config_settings: object | None = None) -> list[
 
 def prepare_metadata_for_build_wheel(metadata_directory: str, config_settings: object | None = None) -> str:
     dist_info = _dist_info_name()
-    target = Path(metadata_directory) / dist_info
+    target = _safe_output_path(Path(metadata_directory), dist_info)
     target.mkdir(parents=True, exist_ok=True)
     _write_metadata_files(target)
     return dist_info
@@ -29,20 +33,14 @@ def build_wheel(
     config_settings: object | None = None,
     metadata_directory: str | None = None,
 ) -> str:
-    project = _project_metadata()
-    name = _normalized_name(project["name"])
-    version = str(project["version"])
+    name, version = _package_identity()
     wheel_name = f"{name}-{version}-py3-none-any.whl"
-    wheel_path = Path(wheel_directory) / wheel_name
+    wheel_path = _safe_output_path(Path(wheel_directory), wheel_name)
     dist_info = _dist_info_name()
     records: list[tuple[str, bytes]] = []
 
     with zipfile.ZipFile(wheel_path, "w", compression=zipfile.ZIP_DEFLATED) as wheel:
-        for path in sorted((ROOT / "src/mylittleharness").rglob("*")):
-            if not path.is_file() or "__pycache__" in path.parts:
-                continue
-            rel_path = path.relative_to(ROOT / "src").as_posix()
-            data = path.read_bytes()
+        for rel_path, data in _package_source_payloads():
             wheel.writestr(rel_path, data)
             records.append((rel_path, data))
         for rel_path, data in _metadata_file_payloads(dist_info):
@@ -62,8 +60,8 @@ def _project_metadata() -> dict[str, object]:
 
 
 def _dist_info_name() -> str:
-    project = _project_metadata()
-    return f"{_normalized_name(project['name'])}-{project['version']}.dist-info"
+    name, version = _package_identity()
+    return f"{name}-{version}.dist-info"
 
 
 def _write_metadata_files(target: Path) -> None:
@@ -120,3 +118,66 @@ def _record_payload(records: list[tuple[str, bytes]], record_path: str) -> str:
 
 def _normalized_name(name: object) -> str:
     return str(name).replace("-", "_")
+
+
+def _package_identity() -> tuple[str, str]:
+    project = _project_metadata()
+    name = _validated_distribution_name(project.get("name"))
+    version = _validated_version(project.get("version"))
+    return name, version
+
+
+def _validated_distribution_name(value: object) -> str:
+    raw = _path_safe_text(value, "project.name")
+    normalized = _normalized_name(raw)
+    if not _PATH_SAFE_NAME.fullmatch(normalized):
+        raise ValueError(f"project.name must normalize to a path-safe distribution name: {raw!r}")
+    return normalized
+
+
+def _validated_version(value: object) -> str:
+    version = _path_safe_text(value, "project.version")
+    if not _PATH_SAFE_VERSION.fullmatch(version):
+        raise ValueError(f"project.version must be path-safe: {version!r}")
+    return version
+
+
+def _path_safe_text(value: object, field: str) -> str:
+    text = str(value)
+    if not text or text != text.strip():
+        raise ValueError(f"{field} must be a non-empty path-safe value")
+    if ".." in text or any(char in text for char in _PATH_FORBIDDEN_CHARS) or any(ord(char) < 32 for char in text):
+        raise ValueError(f"{field} must not contain path separators, parent segments, drive prefixes, or control characters")
+    return text
+
+
+def _safe_output_path(directory: Path, filename: str) -> Path:
+    output_dir = directory.resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    candidate = output_dir / filename
+    try:
+        candidate.resolve(strict=False).relative_to(output_dir)
+    except ValueError as exc:
+        raise ValueError(f"build output path escapes the requested output directory: {filename}") from exc
+    return candidate
+
+
+def _package_source_payloads() -> list[tuple[str, bytes]]:
+    package_dir = ROOT / "src/mylittleharness"
+    source_dir = ROOT / "src"
+    package_resolved = package_dir.resolve()
+    payloads: list[tuple[str, bytes]] = []
+    for path in sorted(package_dir.rglob("*")):
+        if "__pycache__" in path.parts:
+            continue
+        rel_path = path.relative_to(source_dir).as_posix()
+        if path.is_symlink():
+            raise ValueError(f"refusing symlinked package source member: {rel_path}")
+        if not path.is_file():
+            continue
+        try:
+            path.resolve().relative_to(package_resolved)
+        except ValueError as exc:
+            raise ValueError(f"package source member escapes package root: {rel_path}") from exc
+        payloads.append((rel_path, path.read_bytes()))
+    return payloads

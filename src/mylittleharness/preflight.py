@@ -58,7 +58,7 @@ def orchestrator_workspace_preflight_sections(
     product_root: str = "",
 ) -> list[tuple[str, list[Finding]]]:
     workspace_path = Path(workspace).expanduser()
-    product_path = Path(product_root).expanduser() if product_root else _configured_product_root(inventory)
+    product_path = _explicit_or_configured_product_root(inventory, product_root)
     findings = [
         Finding(
             "info",
@@ -254,7 +254,23 @@ def _orchestrator_command_findings(workspace: Path) -> list[Finding]:
 def _configured_product_root(inventory: Inventory) -> Path | None:
     data = inventory.state.frontmatter.data if inventory.state and inventory.state.exists else {}
     value = str(data.get("product_source_root") or data.get("projection_root") or "").strip()
-    return Path(value).expanduser() if value else None
+    return _root_relative_path(inventory.root, value)
+
+
+def _explicit_or_configured_product_root(inventory: Inventory, value: str) -> Path | None:
+    if value:
+        return _root_relative_path(inventory.root, value)
+    return _configured_product_root(inventory)
+
+
+def _root_relative_path(root: Path, value: str) -> Path | None:
+    text = str(value).strip()
+    if not text:
+        return None
+    candidate = Path(text).expanduser()
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    return candidate
 
 
 def _safe_resolve(path: Path) -> Path:

@@ -5241,6 +5241,12 @@ def _stable_spec_create_plan_findings(inventory: Inventory, validation: list[Fin
                 "stable spec fixtures are repo-visible compatibility surfaces and cannot approve repair, closeout, archive, commit, lifecycle decisions, or future repairs",
                 STABLE_SPEC_ROOT_REL,
             ),
+            Finding(
+                "warn",
+                "stable-spec-create-review-required",
+                "packaged stable spec templates are intentionally minimal bootstrap stubs; repaired specs require human review before they are treated as complete stable contract depth",
+                STABLE_SPEC_ROOT_REL,
+            ),
         ]
     )
     return findings
@@ -5332,6 +5338,12 @@ def _stable_spec_create_apply_findings(inventory: Inventory, validation: list[Fi
                 "info",
                 "stable-spec-create-authority",
                 "stable spec fixtures are repo-visible compatibility surfaces and cannot approve repair, closeout, archive, commit, lifecycle decisions, or future repairs",
+                STABLE_SPEC_ROOT_REL,
+            ),
+            Finding(
+                "warn",
+                "stable-spec-create-review-required",
+                "packaged stable spec templates are intentionally minimal bootstrap stubs; repaired specs require human review before they are treated as complete stable contract depth",
                 STABLE_SPEC_ROOT_REL,
             ),
         ]
@@ -7755,56 +7767,21 @@ def _live_product_command_surface_findings(inventory: Inventory, state: Surface)
     if not expected:
         return []
     console_script = shutil.which("mylittleharness")
-    if not console_script:
-        return []
-
-    missing: list[str] = []
-    probe_errors: list[str] = []
-    for command in expected:
-        accepts, error = _console_script_accepts_command(console_script, command)
-        if error:
-            probe_errors.append(f"{command}: {error}")
-        elif not accepts:
-            missing.append(command)
-
-    findings: list[Finding] = []
     source_fallback_command = _source_pythonpath_fallback_command(product_root)
-    if missing:
-        findings.append(
-            Finding(
-                "warn",
-                "installed-cli-command-surface-lag",
-                (
-                    f"installed mylittleharness console script at {console_script} is missing product_source_root command(s): "
-                    f"{', '.join(missing)}; use `{source_fallback_command}` "
-                    "or explicitly install/mirror the updated CLI after review; diagnostic only, with no automatic install, mirror, lifecycle movement, closeout, archive, staging, or commit"
-                ),
-                state.rel_path,
-            )
+    console_detail = f"PATH candidate: {console_script}" if console_script else "PATH candidate: not found"
+    return [
+        Finding(
+            "info",
+            "installed-cli-command-surface-static",
+            (
+                f"product_source_root exposes sentinel command(s): {', '.join(expected)}; default check does not execute "
+                f"a PATH-discovered mylittleharness console script ({console_detail}); use `{source_fallback_command}` "
+                "for source-checkout command access or `bootstrap --package-smoke` for package entrypoint verification after review; "
+                "diagnostic only, with no automatic install, mirror, lifecycle movement, closeout, archive, staging, or commit"
+            ),
+            state.rel_path,
         )
-    if probe_errors:
-        findings.append(
-            Finding(
-                "warn",
-                "installed-cli-command-surface-probe",
-                (
-                    f"could not fully probe installed mylittleharness command surface at {console_script}: "
-                    f"{'; '.join(probe_errors)}; use `{source_fallback_command}` "
-                    "or explicitly install/mirror the updated CLI after review; command-surface diagnostics are read-only and advisory"
-                ),
-                state.rel_path,
-            )
-        )
-    if not findings:
-        findings.append(
-            Finding(
-                "info",
-                "installed-cli-command-surface-current",
-                f"installed mylittleharness console script accepts product_source_root sentinel command(s): {', '.join(expected)}",
-                state.rel_path,
-            )
-        )
-    return findings
+    ]
 
 
 def _product_source_command_names(product_root: Path) -> set[str]:
@@ -11375,7 +11352,12 @@ WORKSPACE_PREVIEW_SOURCE = "external-orchestrator-workspace"
 def _configured_product_source_root(inventory: Inventory) -> Path | None:
     data = inventory.state.frontmatter.data if inventory.state and inventory.state.exists else {}
     value = str(data.get("product_source_root") or data.get("projection_root") or "").strip()
-    return Path(value).expanduser() if value else None
+    if not value:
+        return None
+    candidate = Path(value).expanduser()
+    if not candidate.is_absolute():
+        candidate = inventory.root / candidate
+    return candidate
 
 
 def _external_orchestrator_live_product_findings(workspace: Path, root: Path, product_root: Path | None) -> list[Finding]:
@@ -11425,9 +11407,11 @@ def _external_orchestrator_probe_gate_findings(workspace: Path) -> list[Finding]
 def _external_orchestrator_git_probe_findings(workspace: Path) -> list[Finding]:
     if not workspace.exists() or not workspace.is_dir():
         return [Finding("warn", "orchestrator-git-status-refused", "git status was not proven because the candidate workspace is not an existing directory", str(workspace))]
-    if not shutil.which("git"):
-        return [Finding("warn", "orchestrator-git-status-refused", "git executable is not available on PATH", str(workspace))]
-    result, error = _run_external_orchestrator_probe(["git", "status", "--short", "--branch"], workspace)
+    git_executable, refusal = _external_orchestrator_resolved_executable("git", workspace, "orchestrator-git-status-refused", "git")
+    if refusal:
+        return [refusal]
+    assert git_executable is not None
+    result, error = _run_external_orchestrator_probe([git_executable, "status", "--short", "--branch"], workspace)
     if error:
         return [Finding("warn", "orchestrator-git-status-refused", f"git status failed before dispatch: {error}", str(workspace))]
     assert result is not None
@@ -11440,9 +11424,16 @@ def _external_orchestrator_git_probe_findings(workspace: Path) -> list[Finding]:
 def _external_orchestrator_mlh_probe_findings(workspace: Path) -> list[Finding]:
     if not workspace.exists() or not workspace.is_dir():
         return [Finding("warn", "orchestrator-mlh-check-refused", "MLH check was not proven because the candidate workspace is not an existing directory", str(workspace))]
-    if not shutil.which("mylittleharness"):
-        return [Finding("warn", "orchestrator-mlh-check-refused", "mylittleharness executable is not available on PATH", str(workspace))]
-    result, error = _run_external_orchestrator_probe(["mylittleharness", "--root", str(workspace), "check"], workspace)
+    mlh_executable, refusal = _external_orchestrator_resolved_executable(
+        "mylittleharness",
+        workspace,
+        "orchestrator-mlh-check-refused",
+        "mylittleharness",
+    )
+    if refusal:
+        return [refusal]
+    assert mlh_executable is not None
+    result, error = _run_external_orchestrator_probe([mlh_executable, "--root", str(workspace), "check"], workspace)
     if error:
         return [Finding("warn", "orchestrator-mlh-check-refused", f"mylittleharness check failed before dispatch: {error}", str(workspace))]
     assert result is not None
@@ -11454,9 +11445,16 @@ def _external_orchestrator_mlh_probe_findings(workspace: Path) -> list[Finding]:
 def _external_orchestrator_mcp_probe_findings(workspace: Path) -> list[Finding]:
     if not workspace.exists() or not workspace.is_dir():
         return [Finding("warn", "orchestrator-mcp-read-path-refused", "MCP/read path was not proven because the candidate workspace is not an existing directory", str(workspace))]
-    if not shutil.which("mylittleharness"):
-        return [Finding("warn", "orchestrator-mcp-read-path-refused", "mylittleharness executable is not available for adapter client-config probing", str(workspace))]
-    command = ["mylittleharness", "--root", str(workspace), "adapter", "--client-config", "--target", "mcp-read-projection"]
+    mlh_executable, refusal = _external_orchestrator_resolved_executable(
+        "mylittleharness",
+        workspace,
+        "orchestrator-mcp-read-path-refused",
+        "mylittleharness",
+    )
+    if refusal:
+        return [refusal]
+    assert mlh_executable is not None
+    command = [mlh_executable, "--root", str(workspace), "adapter", "--client-config", "--target", "mcp-read-projection"]
     result, error = _run_external_orchestrator_probe(command, workspace)
     if error:
         return [Finding("warn", "orchestrator-mcp-read-path-refused", f"MCP/read adapter probe failed before dispatch: {error}", str(workspace))]
@@ -11465,6 +11463,33 @@ def _external_orchestrator_mcp_probe_findings(workspace: Path) -> list[Finding]:
         return [Finding("warn", "orchestrator-mcp-read-path-refused", f"MCP/read adapter probe exited {result.returncode}: {_probe_output(result)}", str(workspace))]
     detail = _probe_output(result) or "adapter client-config rendered"
     return [Finding("info", "orchestrator-mcp-read-path-ok", f"MCP/read adapter posture is reviewable: {detail}", str(workspace))]
+
+
+def _external_orchestrator_resolved_executable(
+    name: str,
+    workspace: Path,
+    refused_code: str,
+    label: str,
+) -> tuple[str | None, Finding | None]:
+    found = shutil.which(name)
+    if not found:
+        return None, Finding("warn", refused_code, f"{label} executable is not available on PATH", str(workspace))
+    executable = Path(found).expanduser()
+    if not executable.is_absolute():
+        executable = Path.cwd() / executable
+    resolved = _safe_resolve_path(executable)
+    resolved_workspace = _safe_resolve_path(workspace)
+    if resolved == resolved_workspace or _path_is_within(resolved, resolved_workspace):
+        return (
+            None,
+            Finding(
+                "warn",
+                refused_code,
+                f"{label} executable resolves inside the candidate workspace; capability probe is refused: {resolved}",
+                str(workspace),
+            ),
+        )
+    return str(resolved), None
 
 
 def _run_external_orchestrator_probe(command: list[str], cwd: Path) -> tuple[subprocess.CompletedProcess[str] | None, str]:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import os
 import sys
 import tempfile
 import tomllib
@@ -17,6 +18,7 @@ from mylittleharness import __version__
 from mylittleharness.agent_roles import role_manifest as agent_role_manifest
 from mylittleharness.agent_roles import role_profile_for_id, roles_with_apply_authority
 from mylittleharness.command_discovery import command_intent_registry, command_suggestions_for_intent
+from mylittleharness.inventory import EXPECTED_SPEC_NAMES
 from mylittleharness.routes import route_manifest, route_protocol_for_id
 import mylittleharness_build
 
@@ -258,6 +260,66 @@ class PackageMetadataTests(unittest.TestCase):
         self.assertIn("mylittleharness/templates/workflow/workflow-artifact-model-spec.md", names)
         self.assertIn("mylittleharness/templates/workflow/workflow-plan-synthesis-spec.md", names)
 
+    def test_build_backend_rejects_path_shaped_metadata_before_outputs(self) -> None:
+        original_project_metadata = mylittleharness_build._project_metadata
+        try:
+            mylittleharness_build._project_metadata = lambda: {"name": "../escape", "version": "1.0.0"}
+            with tempfile.TemporaryDirectory() as tmp:
+                output = Path(tmp)
+                with self.assertRaisesRegex(ValueError, "path separators"):
+                    mylittleharness_build.build_wheel(str(output))
+                self.assertEqual([], list(output.iterdir()))
+
+            mylittleharness_build._project_metadata = lambda: {"name": "mylittleharness", "version": "../escape"}
+            with tempfile.TemporaryDirectory() as tmp:
+                output = Path(tmp)
+                with self.assertRaisesRegex(ValueError, "path"):
+                    mylittleharness_build.prepare_metadata_for_build_wheel(str(output))
+                self.assertEqual([], list(output.iterdir()))
+        finally:
+            mylittleharness_build._project_metadata = original_project_metadata
+
+    def test_build_backend_refuses_symlinked_package_members(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "product"
+            package = root / "src/mylittleharness"
+            package.mkdir(parents=True)
+            (package / "__init__.py").write_text('__version__ = "1.0.0"\n', encoding="utf-8")
+            (root / "pyproject.toml").write_text(
+                "[project]\n"
+                'name = "mylittleharness"\n'
+                'version = "1.0.0"\n',
+                encoding="utf-8",
+            )
+            outside = Path(tmp) / "outside.py"
+            outside.write_text("secret = True\n", encoding="utf-8")
+            link = package / "symlinked_secret.py"
+            try:
+                os.symlink(outside, link)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"file symlinks are unavailable: {exc}")
+
+            original_root = mylittleharness_build.ROOT
+            try:
+                mylittleharness_build.ROOT = root
+                with tempfile.TemporaryDirectory() as wheel_tmp:
+                    with self.assertRaisesRegex(ValueError, "symlinked package source member"):
+                        mylittleharness_build.build_wheel(wheel_tmp)
+            finally:
+                mylittleharness_build.ROOT = original_root
+
+    def test_stable_spec_templates_are_review_required_bootstrap_stubs(self) -> None:
+        template_dir = ROOT / "src/mylittleharness/templates/workflow"
+        for name in EXPECTED_SPEC_NAMES:
+            with self.subTest(name=name):
+                text = (template_dir / name).read_text(encoding="utf-8")
+                self.assertIn("intentionally minimal bootstrap stub", text)
+                self.assertIn("review-required", text)
+
+        operating_root = (ROOT / "docs/specs/operating-root.md").read_text(encoding="utf-8")
+        self.assertIn("Packaged stable spec templates are intentionally minimal bootstrap stubs", operating_root)
+        self.assertIn("repair output marks created specs review-required", operating_root)
+
     def test_wheel_metadata_keeps_local_install_entrypoint_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             wheel_name = mylittleharness_build.build_wheel(tmp)
@@ -275,6 +337,7 @@ class PackageMetadataTests(unittest.TestCase):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         docs_readme = (ROOT / "docs/README.md").read_text(encoding="utf-8")
         boundary = (ROOT / "docs/specs/product-boundary.md").read_text(encoding="utf-8")
+        operating_root = (ROOT / "docs/specs/operating-root.md").read_text(encoding="utf-8")
 
         self.assertIn("The local release checklist is:", readme)
         for expected in (
@@ -295,6 +358,13 @@ class PackageMetadataTests(unittest.TestCase):
             "not required for release-candidate correctness",
         ):
             self.assertIn(expected, boundary)
+        for expected in (
+            "rejects symlinked package members and path-shaped package metadata before build/install",
+            "creates the virtual environment without system site packages",
+            "requires the installed console script to exist",
+            "Routine `check` reports PATH-discovered console scripts as static workstation context only",
+        ):
+            self.assertIn(expected, operating_root)
 
     def test_removed_root_transition_terms_stay_out_of_product_files(self) -> None:
         terms = ("switch" + "-over", "switch" + "over", "switch" + " over")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -11,6 +12,11 @@ from pathlib import Path
 
 from .inventory import Inventory
 from .models import Finding
+
+
+_PATH_SAFE_NAME = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
+_PATH_SAFE_VERSION = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._+-]*[A-Za-z0-9])?$")
+_PATH_FORBIDDEN_CHARS = {"/", "\\", ":"}
 
 
 def bootstrap_sections(inventory: Inventory) -> list[tuple[str, list[Finding]]]:
@@ -114,16 +120,26 @@ def _package_root_findings(inventory: Inventory) -> list[Finding]:
     if project is None:
         findings.append(Finding("error", "package-smoke-pyproject-invalid", "pyproject.toml could not be parsed for package metadata"))
     else:
+        scripts = project.get("scripts")
+        script_names = sorted(scripts.keys()) if isinstance(scripts, dict) else []
         findings.append(
             Finding(
                 "info",
                 "package-smoke-metadata",
-                f"name={project.get('name', 'unknown')}; version={project.get('version', 'unknown')}; scripts={sorted((project.get('scripts') or {}).keys())}",
+                f"name={project.get('name', 'unknown')}; version={project.get('version', 'unknown')}; scripts={script_names}",
             )
         )
-        if project.get("name") != "mylittleharness":
+        name = str(project.get("name", ""))
+        name_error = _path_safe_metadata_error(name, _PATH_SAFE_NAME, "project.name")
+        version_error = _path_safe_metadata_error(str(project.get("version", "")), _PATH_SAFE_VERSION, "project.version")
+        if name_error:
+            findings.append(Finding("error", "package-smoke-name-invalid", name_error))
+        elif name != "mylittleharness":
             findings.append(Finding("error", "package-smoke-name-invalid", "package name must be mylittleharness"))
-        if (project.get("scripts") or {}).get("mylittleharness") != "mylittleharness.cli:main":
+        if version_error:
+            findings.append(Finding("error", "package-smoke-version-invalid", version_error))
+        scripts = project.get("scripts") if isinstance(project.get("scripts"), dict) else {}
+        if scripts.get("mylittleharness") != "mylittleharness.cli:main":
             findings.append(Finding("error", "package-smoke-script-invalid", "console script must be mylittleharness = mylittleharness.cli:main"))
     build_system = pyproject.get("build-system") if pyproject else None
     if isinstance(build_system, dict):
@@ -136,6 +152,7 @@ def _package_root_findings(inventory: Inventory) -> list[Finding]:
             findings.append(Finding("error", "package-smoke-build-backend-missing", "build_backend/mylittleharness_build.py is required for no-network package smoke"))
     else:
         findings.append(Finding("error", "package-smoke-build-system-invalid", "pyproject.toml [build-system] table is required"))
+    findings.extend(_package_source_boundary_findings(inventory.root))
     return findings
 
 
@@ -149,7 +166,7 @@ def _run_package_smoke(inventory: Inventory, root_findings: list[Finding]) -> li
         import_findings: list[Finding] = []
         console_findings: list[Finding] = []
         try:
-            shutil.copytree(inventory.root, source_copy, ignore=_package_copy_ignore)
+            shutil.copytree(inventory.root, source_copy, symlinks=True, ignore=_package_copy_ignore)
             _create_venv(venv_dir)
             python_exe = _venv_python(venv_dir)
             install_findings = _install_findings(python_exe, source_copy)
@@ -259,7 +276,7 @@ def _install_findings(python_exe: Path, source_copy: Path) -> list[Finding]:
 def _import_findings(python_exe: Path, source_copy: Path) -> list[Finding]:
     expected_version = _read_project_metadata(source_copy / "pyproject.toml")["version"]  # type: ignore[index]
     code = "import mylittleharness; print(mylittleharness.__version__)"
-    result = _run_command([str(python_exe), "-c", code], cwd=source_copy.parent)
+    result = _run_command([str(python_exe), "-I", "-c", code], cwd=source_copy.parent)
     observed = result.stdout.strip()
     if result.returncode != 0:
         return [Finding("error", "package-smoke-import-failed", f"import check failed with exit {result.returncode}: {_command_output(result)}")]
@@ -276,7 +293,9 @@ def _import_findings(python_exe: Path, source_copy: Path) -> list[Finding]:
 
 def _console_findings(python_exe: Path, source_copy: Path) -> list[Finding]:
     script = _venv_script(python_exe.parent.parent, "mylittleharness")
-    command = [str(script), "--help"] if script.exists() else [str(python_exe), "-m", "mylittleharness.cli", "--help"]
+    if not script.exists():
+        return [Finding("error", "package-smoke-console-missing", f"installed console script is missing from the temporary environment: {script}")]
+    command = [str(script), "--help"]
     result = _run_command(command, cwd=source_copy.parent)
     if result.returncode != 0:
         return [Finding("error", "package-smoke-console-failed", f"console script help failed with exit {result.returncode}: {_command_output(result)}")]
@@ -310,7 +329,7 @@ def _skip_after_failure(code: str, message: str) -> Finding:
 
 
 def _create_venv(venv_dir: Path) -> None:
-    venv.EnvBuilder(with_pip=True, system_site_packages=True, clear=True).create(venv_dir)
+    venv.EnvBuilder(with_pip=True, system_site_packages=False, clear=True).create(venv_dir)
 
 
 def _venv_python(venv_dir: Path) -> Path:
@@ -328,13 +347,51 @@ def _venv_script(venv_dir: Path, name: str) -> Path:
 def _run_command(command: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env.pop("PYTHONPATH", None)
+    env["PYTHONNOUSERSITE"] = "1"
     return subprocess.run(command, cwd=cwd, env=env, text=True, capture_output=True, timeout=120)
 
 
 def _package_copy_ignore(directory: str, names: list[str]) -> set[str]:
-    ignored = {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", "build", "dist"}
+    ignored = {"__pycache__", ".git", ".mylittleharness", ".pytest_cache", ".mypy_cache", ".ruff_cache", "build", "dist"}
     ignored.update(name for name in names if name.endswith(".egg-info") or name.endswith(".pyc") or name.endswith(".pyo"))
     return ignored.intersection(names)
+
+
+def _path_safe_metadata_error(value: str, pattern: re.Pattern[str], field: str) -> str:
+    if not value or value != value.strip():
+        return f"{field} must be a non-empty path-safe value"
+    if ".." in value or any(char in value for char in _PATH_FORBIDDEN_CHARS) or any(ord(char) < 32 for char in value):
+        return f"{field} must not contain path separators, parent segments, drive prefixes, or control characters"
+    normalized = value.replace("-", "_") if field == "project.name" else value
+    if not pattern.fullmatch(normalized):
+        return f"{field} must be path-safe"
+    return ""
+
+
+def _package_source_boundary_findings(product_root: Path) -> list[Finding]:
+    package_dir = product_root / "src/mylittleharness"
+    if not package_dir.exists():
+        return []
+    findings: list[Finding] = []
+    try:
+        package_resolved = package_dir.resolve()
+    except OSError:
+        package_resolved = package_dir
+    for path in sorted(package_dir.rglob("*")):
+        try:
+            rel_path = path.relative_to(product_root).as_posix()
+        except ValueError:
+            rel_path = str(path)
+        if path.is_symlink():
+            findings.append(Finding("error", "package-smoke-source-symlink", f"package source member is a symlink and package smoke refuses to follow it: {rel_path}", rel_path))
+            continue
+        if not path.is_file():
+            continue
+        try:
+            path.resolve().relative_to(package_resolved)
+        except ValueError:
+            findings.append(Finding("error", "package-smoke-source-escape", f"package source member resolves outside src/mylittleharness: {rel_path}", rel_path))
+    return findings
 
 
 def _command_output(result: subprocess.CompletedProcess[str]) -> str:

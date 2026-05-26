@@ -139,6 +139,8 @@ def _classify_product_hygiene_path(path: Path, rel_path: str) -> tuple[str, str]
             return ("forbidden-product-surface", reason)
 
     name = path.name.lower()
+    if path.is_symlink() and normalized.startswith("src/mylittleharness/"):
+        return ("forbidden-product-surface", "package source must not contain symlinked members")
     if path.is_dir() and (name in PRODUCT_HYGIENE_DEBRIS_DIR_NAMES or name.endswith(".egg-info")):
         return ("product-debris", "generated/cache/build/runtime directory is excluded from product source")
     if path.is_file():
