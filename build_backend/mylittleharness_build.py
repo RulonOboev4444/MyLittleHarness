@@ -71,16 +71,20 @@ def _write_metadata_files(target: Path) -> None:
 
 def _metadata_file_payloads(dist_info: str) -> list[tuple[str, bytes]]:
     project = _project_metadata()
-    metadata = "\n".join(
-        [
-            "Metadata-Version: 2.1",
-            f"Name: {project['name']}",
-            f"Version: {project['version']}",
-            f"Summary: {project.get('description', '')}",
-            f"Requires-Python: {project.get('requires-python', '>=3.11')}",
-            "",
-        ]
-    ).encode("utf-8")
+    metadata_lines = [
+        "Metadata-Version: 2.1",
+        f"Name: {project['name']}",
+        f"Version: {project['version']}",
+        f"Summary: {_metadata_header_value(project.get('description', ''), 'project.description')}",
+        f"Requires-Python: {_metadata_header_value(project.get('requires-python', '>=3.11'), 'project.requires-python')}",
+    ]
+    license_text = _license_metadata_value(project)
+    if license_text:
+        metadata_lines.append(f"License: {license_text}")
+    for classifier in _classifier_metadata_values(project):
+        metadata_lines.append(f"Classifier: {classifier}")
+    metadata_lines.append("")
+    metadata = "\n".join(metadata_lines).encode("utf-8")
     wheel = "\n".join(
         [
             "Wheel-Version: 1.0",
@@ -98,12 +102,41 @@ def _metadata_file_payloads(dist_info: str) -> list[tuple[str, bytes]]:
         ]
     ).encode("utf-8")
     top_level = b"mylittleharness\n"
-    return [
+    payloads = [
         (f"{dist_info}/METADATA", metadata),
         (f"{dist_info}/WHEEL", wheel),
         (f"{dist_info}/entry_points.txt", entry_points),
         (f"{dist_info}/top_level.txt", top_level),
     ]
+    license_path = ROOT / "LICENSE"
+    if license_path.is_file():
+        payloads.append((f"{dist_info}/LICENSE", license_path.read_bytes()))
+    return payloads
+
+
+def _license_metadata_value(project: dict[str, object]) -> str:
+    license_value = project.get("license")
+    if license_value is None:
+        return ""
+    if isinstance(license_value, str):
+        return _metadata_header_value(license_value, "project.license")
+    if isinstance(license_value, dict) and "text" in license_value:
+        return _metadata_header_value(license_value["text"], "project.license.text")
+    raise ValueError("project.license must be a string or a table with text")
+
+
+def _classifier_metadata_values(project: dict[str, object]) -> list[str]:
+    classifiers = project.get("classifiers", [])
+    if not isinstance(classifiers, list):
+        raise ValueError("project.classifiers must be a list")
+    return [_metadata_header_value(classifier, "project.classifiers") for classifier in classifiers]
+
+
+def _metadata_header_value(value: object, field: str) -> str:
+    text = str(value)
+    if "\r" in text or "\n" in text or any(ord(char) < 32 for char in text):
+        raise ValueError(f"{field} must be a single-line metadata value")
+    return text
 
 
 def _record_payload(records: list[tuple[str, bytes]], record_path: str) -> str:

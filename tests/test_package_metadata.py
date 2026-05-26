@@ -91,6 +91,8 @@ class PackageMetadataTests(unittest.TestCase):
         self.assertEqual(__version__, project["version"])
         self.assertEqual("1.0.0", __version__)
         self.assertEqual([], project["dependencies"])
+        self.assertEqual({"text": "Apache-2.0"}, project["license"])
+        self.assertIn("License :: OSI Approved :: Apache Software License", project["classifiers"])
         self.assertEqual({"mylittleharness": "mylittleharness.cli:main"}, project["scripts"])
 
     def test_external_audit_safety_failure_coverage_matrix_points_to_regressions(self) -> None:
@@ -325,11 +327,18 @@ class PackageMetadataTests(unittest.TestCase):
             wheel_name = mylittleharness_build.build_wheel(tmp)
             self.assertEqual("mylittleharness-1.0.0-py3-none-any.whl", wheel_name)
             with zipfile.ZipFile(Path(tmp) / wheel_name) as wheel:
+                names = set(wheel.namelist())
                 metadata = wheel.read("mylittleharness-1.0.0.dist-info/METADATA").decode("utf-8")
                 entry_points = wheel.read("mylittleharness-1.0.0.dist-info/entry_points.txt").decode("utf-8")
+                license_text = wheel.read("mylittleharness-1.0.0.dist-info/LICENSE").decode("utf-8")
 
         self.assertIn("Name: mylittleharness\n", metadata)
         self.assertIn("Version: 1.0.0\n", metadata)
+        self.assertIn("License: Apache-2.0\n", metadata)
+        self.assertIn("Classifier: License :: OSI Approved :: Apache Software License\n", metadata)
+        self.assertIn("mylittleharness-1.0.0.dist-info/LICENSE", names)
+        self.assertIn("Apache License", license_text)
+        self.assertIn("Version 2.0, January 2004", license_text)
         self.assertIn("[console_scripts]\n", entry_points)
         self.assertIn("mylittleharness = mylittleharness.cli:main\n", entry_points)
 
@@ -1029,7 +1038,7 @@ class PackageMetadataTests(unittest.TestCase):
             self.assertIn("optional non-authoritative sensors", doc)
         for doc in (readme, docs_readme, cli_spec):
             self.assertIn("not correctness prerequisites", doc)
-        self.assertIn("Successful `init --apply`/`attach --apply` keeps project-local Codex native hooks current by default", readme)
+        self.assertIn("Successful `init --apply`/`attach --apply` may keep project-local Codex native hooks current by default", readme)
         self.assertIn("Successful `init --apply` and compatibility `attach --apply` keep project-local Codex native hooks current by default", docs_readme)
         self.assertIn("Those hooks are optional non-authoritative sensors, not correctness prerequisites", cli_spec)
         self.assertIn("cannot approve lifecycle, archive, roadmap, Git, release, provider, or product-diff decisions", cli_spec)

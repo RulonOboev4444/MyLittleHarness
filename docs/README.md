@@ -18,7 +18,9 @@ Reusable product docs describe MyLittleHarness serving an explicitly targeted re
 9. `specs/generated-state-and-projections.md` - the generated-state, cache, index, and SQLite projection contract.
 10. `specs/generated-state-search-and-sqlite.md` - the search, backlink, repo-map, telemetry, and SQLite projection contract.
 11. `specs/attach-repair-status-cli.md` - the small visible CLI target, compatibility command surface, advanced diagnostics, and attach/repair mutation boundary.
-12. `specs/adapter-boundary.md` - the adapter and optional integration boundary.
+12. `reference/command-surface.md` - the product-facing command surface matrix and write-boundary summary.
+13. `security.md` - the security, session-helper, runtime-cache, MCP, and "will never do" boundaries.
+14. `specs/adapter-boundary.md` - the adapter and optional integration boundary.
 
 ## Authority
 
@@ -53,6 +55,8 @@ The v2 foundation starts with protocol and documentation, not runtime adoption. 
 `manifest --inspect --json` now exposes both `route_manifest` and `role_manifest` protocol data for external orchestrators. The route manifest names orchestration constraints such as `parallelism_class`, `authority_lane`, `claim_scope`, `merge_policy`, `fan_in_gate`, `max_parallelism_hint`, stale-claim policy, and conflict policy. Lifecycle routes stay `sequential_only`, coordinator-owned, and claim-gated; generated caches stay rebuildable and non-authoritative. The role manifest names advisory role permissions, forbidden actions, required outputs, context/output packet requirements, gate classes, human gates, `orchestration_role`, `may_spawn_workers`, `worker_space_boundary`, `isolation_contract`, `fan_in_output_required`, and `coordination_budget`, but it grants no direct apply authority and does not spawn workers.
 
 Product docs should continue rejecting `swarm run` as the first v2 command, hidden daemons, mandatory model-provider gateways, provider credential storage, vector/RAG memory as authority, direct worker writes to shared lifecycle routes, and autonomous release/commit/push behavior.
+
+Product docs should describe optional helpers precisely: MLH core is not daemon-required and does not need a hidden control plane, while hooks, MCP stdio helpers, dashboards, and `mlhd` runtime cache may exist as local session/runtime convenience layers. Those helpers remain advisory and cannot approve lifecycle, roadmap, archive, Git, release, provider, or cache-truth decisions.
 
 The current productization posture is a local 1.0.0 release candidate at package version `1.0.0`. It is a verified product boundary for the direct `MyLittleHarness -> target repository` model, not a published package-index release, global installation flow, mutating workstation adoption step, or workstation mutation.
 

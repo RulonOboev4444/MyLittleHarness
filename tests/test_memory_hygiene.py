@@ -596,7 +596,11 @@ class MemoryHygieneTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(before, snapshot_tree(root))
             self.assertIn("--source 'project/plan-incubation/covered note.md'", rendered)
-            self.assertIn("--archive-to 'project/archive/reference/incubation/2026-05-26-covered note.md'", rendered)
+            today = date.today().isoformat()
+            self.assertIn(
+                f"--archive-to 'project/archive/reference/incubation/{today}-covered note.md'",
+                rendered,
+            )
 
     def test_scan_classifies_keep_active_followups_and_ambiguous_notes_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -71,9 +71,7 @@ MyLittleHarness is **not**:
 - an AI agent framework
 - an orchestrator
 - a workflow runner
-- a daemon
 - a scheduler
-- a dashboard
 - a CI replacement
 - a hidden control plane
 - a mandatory MCP, IDE, hook, or CI dependency
@@ -81,6 +79,23 @@ MyLittleHarness is **not**:
 Your agent, editor, orchestrator, or shell workflow still decides what to do.
 
 MyLittleHarness defines what the repository is allowed to treat as true.
+
+---
+
+## Core and optional helpers
+
+The core MLH workflow is file-first and does not require a daemon, dashboard,
+MCP client, hook, or IDE integration.
+
+Optional local helpers exist around that core:
+
+- hooks can inject context or block deterministic unsafe shortcuts
+- the MCP adapter can expose read-only projection/search helpers over stdio
+- `dashboard --inspect` can summarize current repo-visible posture
+- `mlhd` can refresh disposable generated context and runtime cockpit cache
+
+Those helpers are session/runtime convenience layers. They are not authority, do
+not approve lifecycle decisions, and must fail open to the repo-visible files.
 
 ---
 
@@ -150,7 +165,7 @@ python -m mylittleharness --root "$TargetRoot" detach --dry-run
 ```
 
 Apply modes are intentionally explicit. Prefer dry-run first.
-Successful `init --apply`/`attach --apply` keeps project-local Codex native hooks current by default; those hooks are optional non-authoritative sensors, not correctness prerequisites.
+Successful `init --apply`/`attach --apply` may keep project-local Codex native hooks current by default; those hooks are optional non-authoritative sensors, not correctness prerequisites.
 
 ---
 
@@ -195,7 +210,7 @@ Creates a marker-only detach posture without treating generated artifacts as aut
 mylittleharness --root /path/to/target detach --dry-run
 ```
 
-Advanced commands exist for recovery and deeper lifecycle work. Start with [`docs/README.md`](docs/README.md), [`docs/specs/attach-repair-status-cli.md`](docs/specs/attach-repair-status-cli.md), and [`docs/specs/metadata-routing-and-evidence.md`](docs/specs/metadata-routing-and-evidence.md) when you need the full command surface.
+Advanced commands exist for recovery and deeper lifecycle work. Start with [`docs/README.md`](docs/README.md), [`docs/reference/command-surface.md`](docs/reference/command-surface.md), [`docs/security.md`](docs/security.md), [`docs/specs/attach-repair-status-cli.md`](docs/specs/attach-repair-status-cli.md), and [`docs/specs/metadata-routing-and-evidence.md`](docs/specs/metadata-routing-and-evidence.md) when you need the full command surface.
 
 ---
 
@@ -290,7 +305,9 @@ MyLittleHarness is built around a few safety rules:
 
 Any shell-capable or file-reading agent can use the repo-visible state.
 
-No hidden service is required.
+No hidden control plane is required. Optional session helpers and `mlhd`
+runtime cache can improve ergonomics, but they remain disposable and
+non-authoritative.
 
 ---
 
@@ -328,9 +345,12 @@ bare `evidence`, `evidence --record`, and `closeout` are separate surfaces: bare
 The local release checklist is:
 
 - package metadata and runtime version agree on `1.0.0`
+- CI runs `python -m unittest discover -s tests` on supported Python and OS targets
 - `bootstrap --package-smoke` passes from temporary source/build/install locations outside the product source checkout
 - Wheel, build, and install artifacts are verification outputs only
 - the CLI rejects standalone `bootstrap --apply`
+- the command surface and security/session-helper boundaries are documented
+- the product source declares Apache-2.0 licensing in `LICENSE` and package metadata
 
 ---
 
