@@ -4,6 +4,7 @@ from pathlib import Path
 
 from .inventory import Inventory
 from .models import Finding
+from .root_boundary import PRODUCT_SOURCE_FIXTURE
 
 
 PRODUCT_HYGIENE_OPERATIONAL_PREFIXES = {
@@ -78,7 +79,7 @@ PRODUCT_HYGIENE_ARCHIVE_SUFFIXES = (
 
 
 def product_hygiene_findings(inventory: Inventory) -> list[Finding]:
-    if inventory.root_kind != "product_source_fixture":
+    if inventory.root_kind != PRODUCT_SOURCE_FIXTURE:
         return [Finding("info", "product-hygiene-scope", "product hygiene check skipped because root is not marked as product source")]
 
     findings: list[Finding] = []

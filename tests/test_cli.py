@@ -47,6 +47,7 @@ from mylittleharness.projection_artifacts import (
 )
 from mylittleharness.projection_index import INDEX_REL_PATH
 from mylittleharness.reporting import render_report
+from mylittleharness.root_boundary import first_symlink_prefix, path_resolves_within_root, source_path_boundary_violation
 from mylittleharness.vcs import VcsChangedPath, VcsPosture, VcsTrailer, VcsTrailerParseResult
 
 
@@ -141,6 +142,53 @@ class CliTests(unittest.TestCase):
             self.assertEqual("state\n", target.read_text(encoding="utf-8"))
             self.assertFalse(tmp_path.exists())
             self.assertFalse(backup_path.exists())
+
+    def test_root_boundary_primitives_detect_symlink_and_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "root"
+            outside = Path(tmp) / "outside"
+            root.mkdir()
+            outside.mkdir()
+            link = root / "linked"
+            try:
+                os.symlink(outside, link, target_is_directory=True)
+            except (NotImplementedError, OSError) as exc:
+                self.skipTest(f"directory symlinks are unavailable: {exc}")
+
+            target = link / "evidence.md"
+            violation = source_path_boundary_violation(root, target, label="evidence")
+
+            self.assertIsNotNone(violation)
+            self.assertEqual("symlink", violation.code)
+            self.assertEqual(link, first_symlink_prefix(root, target))
+            self.assertFalse(path_resolves_within_root(root, root / ".." / "outside" / "evidence.md"))
+
+    def test_inventory_refuses_symlinked_state_as_root_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "root"
+            outside = base / "outside"
+            root.mkdir()
+            outside.mkdir()
+            (root / ".codex").mkdir()
+            (root / "project").mkdir()
+            (root / ".codex/project-workflow.toml").write_text('workflow = "workflow-core"\n', encoding="utf-8")
+            outside_state = outside / "project-state.md"
+            outside_state.write_text(
+                '---\nproject: "Escaped"\nworkflow: "workflow-core"\nplan_status: "none"\n---\n',
+                encoding="utf-8",
+            )
+            state_path = root / "project/project-state.md"
+            try:
+                os.symlink(outside_state, state_path)
+            except (NotImplementedError, OSError) as exc:
+                self.skipTest(f"file symlinks are unavailable: {exc}")
+
+            inventory = load_inventory(root)
+
+            self.assertEqual("ambiguous", inventory.root_kind)
+            self.assertEqual("", inventory.state.content)
+            self.assertIn("project-state source crosses symlink inside root", inventory.state.read_error or "")
 
     def test_malformed_partial_workflow_core_state_is_not_classified_as_live_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

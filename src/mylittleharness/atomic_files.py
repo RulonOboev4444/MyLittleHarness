@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+from .root_boundary import absolute_path, first_symlink_prefix
+
 
 @dataclass(frozen=True)
 class AtomicFileWrite:
@@ -101,7 +103,7 @@ def _validate_transaction_paths(
 
 
 def _validate_transaction_root_paths(operations: tuple[AtomicFileWrite | AtomicFileDelete, ...], root: Path) -> None:
-    root_path = _absolute_path(root)
+    root_path = absolute_path(root)
     if root_path.is_symlink():
         raise FileTransactionError(f"transaction root cannot be a symlink: {root}")
     root_resolved = root_path.resolve(strict=False)
@@ -121,35 +123,16 @@ def _validate_transaction_root_paths(operations: tuple[AtomicFileWrite | AtomicF
 
 
 def _validate_path_under_root(path: Path, root_path: Path, root_resolved: Path, label: str) -> Path:
-    absolute_path = _absolute_path(path)
-    symlink_path = _first_symlink_prefix(root_path, absolute_path)
+    absolute_target = absolute_path(path, base=root_path)
+    symlink_path = first_symlink_prefix(root_path, absolute_target)
     if symlink_path is not None:
         raise FileTransactionError(f"file transaction {label} path crosses symlink inside transaction root: {symlink_path}")
-    resolved_path = absolute_path.resolve(strict=False)
+    resolved_path = absolute_target.resolve(strict=False)
     try:
         resolved_path.relative_to(root_resolved)
     except ValueError as exc:
         raise FileTransactionError(f"file transaction {label} path is outside transaction root: {path}") from exc
     return resolved_path
-
-
-def _first_symlink_prefix(root_path: Path, path: Path) -> Path | None:
-    try:
-        relative = path.relative_to(root_path)
-    except ValueError:
-        return None
-    current = root_path
-    for part in relative.parts:
-        current = current / part
-        if current.is_symlink():
-            return current
-    return None
-
-
-def _absolute_path(path: Path) -> Path:
-    if path.is_absolute():
-        return path
-    return Path.cwd() / path
 
 
 def _rollback_applied_operations(applied: list[_AppliedOperation]) -> list[str]:

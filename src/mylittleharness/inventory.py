@@ -7,6 +7,14 @@ from pathlib import Path
 from typing import Any
 
 from .parsing import Frontmatter, Heading, LinkRef, extract_headings, extract_path_refs, parse_frontmatter
+from .root_boundary import (
+    AMBIGUOUS_ROOT,
+    FALLBACK_OR_ARCHIVE,
+    LIVE_OPERATING_ROOT,
+    PRODUCT_SOURCE_FIXTURE,
+    same_resolved_path,
+    source_path_boundary_violation,
+)
 from .routes import classify_memory_route
 
 
@@ -257,6 +265,17 @@ def load_inventory(root: Path | str) -> Inventory:
 
 
 def _read_surface(root: Path, rel_path: str, role: str, required: bool, path: Path) -> Surface:
+    boundary_violation = source_path_boundary_violation(root, path, label=f"{role} source")
+    if boundary_violation is not None:
+        return Surface(
+            root=root,
+            rel_path=rel_path,
+            role=role,
+            required=required,
+            path=path,
+            exists=path.exists() or path.is_symlink(),
+            read_error=boundary_violation.message,
+        )
     if not path.exists():
         return Surface(root=root, rel_path=rel_path, role=role, required=required, path=path, exists=False)
     try:
@@ -366,20 +385,20 @@ def _classify_root_kind(root: Path, manifest: dict[str, Any], state: Surface) ->
         or data.get("fixture_status") == "product-compatibility-fixture"
         or _same_path_value(data.get("product_source_root"), root)
     ):
-        return "product_source_fixture"
+        return PRODUCT_SOURCE_FIXTURE
 
     role = str(data.get("root_role") or "").casefold()
     fixture_status = str(data.get("fixture_status") or "").casefold()
     if role in {"fallback", "historical-fallback", "archive", "archive-only", "generated-output"}:
-        return "fallback_or_archive"
+        return FALLBACK_OR_ARCHIVE
     if any(marker in fixture_status for marker in ("fallback", "archive", "generated-output")):
-        return "fallback_or_archive"
+        return FALLBACK_OR_ARCHIVE
     if _same_path_value(data.get("historical_fallback_root"), root):
-        return "fallback_or_archive"
+        return FALLBACK_OR_ARCHIVE
 
     if manifest.get("workflow") == "workflow-core" and _state_can_classify_live_root(state):
-        return "live_operating_root"
-    return "ambiguous"
+        return LIVE_OPERATING_ROOT
+    return AMBIGUOUS_ROOT
 
 
 def _state_can_classify_live_root(state: Surface | None) -> bool:
@@ -404,9 +423,7 @@ def _same_path_value(value: object, expected: Path) -> bool:
         candidate = Path(normalized).expanduser()
         if not candidate.is_absolute():
             candidate = expected / candidate
-        candidate = candidate.resolve()
-        target = expected.expanduser().resolve()
-        return str(candidate).casefold() == str(target).casefold()
+        return same_resolved_path(candidate, expected)
     except (OSError, RuntimeError):
         return normalized.replace("/", "\\").rstrip("\\").casefold() == str(expected).replace("/", "\\").rstrip("\\").casefold()
 
