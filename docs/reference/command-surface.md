@@ -68,6 +68,13 @@ refresh commands. That suggestion is not cache truth or lifecycle approval.
 `mlhd` is an optional runtime helper. It is not a hidden control plane, provider
 gateway, source of lifecycle truth, or release authority.
 
+Client adapters are optional helper setup, not first-run scaffold. Fresh
+`init --apply` and compatibility `attach --apply` create the neutral workflow
+manifest and project state without installing `.codex`, Claude Code, GitHub
+Copilot, VS Code, MCP, or other client configuration. Project-local native
+hooks stay behind explicit `hooks adapter --client <client> --dry-run|--apply
+--scope project` review.
+
 ## Release-Blocking Product Decisions
 
 - Apache-2.0 is declared in `LICENSE` and package metadata for public

@@ -1046,9 +1046,13 @@ class PackageMetadataTests(unittest.TestCase):
             self.assertIn("not correctness prerequisites", doc)
         self.assertIn("Successful `init --apply`/`attach --apply` creates the neutral `.mylittleharness/project-workflow.toml` manifest", readme)
         self.assertIn("Successful `init --apply` and compatibility `attach --apply` create the neutral `.mylittleharness/project-workflow.toml` manifest", docs_readme)
+        self.assertIn("init --apply` and compatibility `attach --apply` do not write project-local Codex native hooks by default", cli_spec)
         self.assertIn("Those hooks are optional non-authoritative sensors, not correctness prerequisites", cli_spec)
         self.assertIn("cannot approve lifecycle, archive, roadmap, Git, release, provider, or product-diff decisions", cli_spec)
+        self.assertIn("Fresh init/attach does not install the project-local Codex hook adapter by default", product_boundary)
         self.assertIn("not correctness prerequisites", product_boundary)
+        self.assertNotIn("keep those project-local Codex native hooks current by default", cli_spec)
+        self.assertNotIn("attach/init apply keeps the Codex hook adapter current by default", product_boundary)
 
     def test_rule_context_drift_docs_keep_check_compact(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")

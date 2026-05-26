@@ -84,6 +84,11 @@ or return a client-specific deterministic block for unsafe shortcuts. They must
 not silently repair files, install hidden services, archive plans, commit
 changes, or become the only condition for correctness.
 
+Fresh `init --apply` and compatibility `attach --apply` do not install native
+client hooks or client configuration. Codex, Claude Code, GitHub Copilot, VS
+Code, MCP, and other adapters stay explicit opt-in helpers; their output remains
+advisory even when a user installs them through a reviewed adapter command.
+
 ## Release Readiness Notes
 
 The product source declares Apache-2.0 licensing in `LICENSE` and package

@@ -2882,7 +2882,6 @@ def attach_dry_run_findings(inventory: Inventory, project_name: str | None = Non
 ATTACH_MANIFEST_REL_PATH = WORKFLOW_MANIFEST_REL
 ATTACH_STATE_REL_PATH = "project/project-state.md"
 ATTACH_RECOVERY_CHECK_COMMAND = "next_safe_command=mylittleharness --root <root> check"
-ATTACH_CODEX_HOOK_RECOVERY_COMMAND = "next_safe_command=mylittleharness --root <root> hooks adapter --client codex --apply --scope project"
 
 
 def attach_apply_findings(inventory: Inventory, project_name: str | None) -> list[Finding]:
@@ -3205,69 +3204,6 @@ def _attach_already_attached_apply_findings(inventory: Inventory) -> list[Findin
     )
     refreshed_inventory = load_inventory(inventory.root)
     findings.extend(connect_readiness_findings(load_inventory(inventory.root), "attach-connect-readiness"))
-    return findings
-
-
-def _attach_codex_hook_preflight_errors(inventory: Inventory) -> list[Finding]:
-    from .hooks import CodexHookAdapterRequest, codex_hook_adapter_validation_findings
-
-    errors = codex_hook_adapter_validation_findings(inventory, CodexHookAdapterRequest(), require_live_root=False)
-    return [
-        Finding(
-            "error",
-            "attach-codex-hooks-refused",
-            f"attach-time Codex hook adoption refused before scaffold mutation: {error.message}",
-            error.source,
-            error.line,
-        )
-        for error in errors
-    ]
-
-
-def _attach_codex_hook_apply_findings(inventory: Inventory, *, after_scaffold_write: bool = False) -> list[Finding]:
-    from .hooks import CodexHookAdapterRequest, codex_hook_adapter_apply_findings
-
-    findings = [
-        Finding(
-            "info",
-            "attach-codex-hooks-autoadoption",
-            "attach --apply keeps the project-local Codex native hook adapter current by default as an optional non-authoritative sensor, not a correctness prerequisite",
-            ".codex/hooks.json",
-        )
-    ]
-    try:
-        hook_findings = codex_hook_adapter_apply_findings(inventory, CodexHookAdapterRequest())
-    except Exception as exc:
-        findings.append(
-            _attach_post_step_exception_finding(
-                "codex-hooks",
-                "project-local Codex native hook adapter apply",
-                exc,
-                ".codex/hooks.json",
-            )
-        )
-        if after_scaffold_write:
-            findings.append(
-                _attach_post_scaffold_recovery_finding(
-                    "attach-codex-hooks-recovery",
-                    "Codex hook adapter adoption",
-                    ATTACH_CODEX_HOOK_RECOVERY_COMMAND,
-                    ".codex/hooks.json",
-                    severity="error",
-                )
-            )
-        return findings
-    findings.extend(hook_findings)
-    if after_scaffold_write and any(finding.severity == "error" for finding in hook_findings):
-        findings.append(
-            _attach_post_scaffold_recovery_finding(
-                "attach-codex-hooks-recovery",
-                "Codex hook adapter adoption",
-                ATTACH_CODEX_HOOK_RECOVERY_COMMAND,
-                ".codex/hooks.json",
-                severity="error",
-            )
-        )
     return findings
 
 

@@ -417,7 +417,8 @@ def codex_hook_adapter_adoption_payload(inventory: Inventory, request: CodexHook
         "dryRunCommand": _hook_adapter_review_command(request, "--dry-run"),
         "applyCommand": _hook_adapter_review_command(request, "--apply"),
         "includedInCodexMcpInstall": True,
-        "includedInAttachApply": True,
+        "includedInAttachApply": False,
+        "includedInDefaultInitAttach": False,
         "boundary": {
             "writesRepoFilesOnApplyOnly": True,
             "writesUserConfig": False,
