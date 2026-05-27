@@ -25835,6 +25835,68 @@ class CliTests(unittest.TestCase):
             self.assertIn("doctor-connect-readiness-action-packet", rendered)
             self.assertIn("required_repair_targets=", rendered)
 
+    def test_doctor_integration_mcp_reports_readonly_smoke_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=False)
+            write_neutral_manifest_from_legacy(root)
+            before = snapshot_tree_bytes(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "doctor", "--integration", "mcp"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            for expected in (
+                "doctor --integration mcp",
+                "doctor-integration-read-only",
+                "doctor-integration-install-path",
+                "doctor-integration-root-kind",
+                "doctor-integration-neutral-manifest",
+                "doctor-integration-mcp-startup-smoke",
+                "mylittleharness.read_projection",
+                "mylittleharness://projection",
+                "doctor-integration-client-config",
+                "mylittleharness.mcp-client-configs.v1",
+                "profile=genericMcp",
+                "configKey=mcpServers",
+                "adapter --client-config --target mcp-read-projection",
+                "doctor-integration-client-command",
+                "doctor-integration-hook-posture",
+                "doctor-integration-cache-posture",
+                "refresh_by_adapter=false",
+                "doctor-integration-authority-boundary",
+                "repo-visible files remain authoritative",
+            ):
+                self.assertIn(expected, rendered)
+
+    def test_doctor_integration_client_profiles_report_client_config_pointers(self) -> None:
+        cases = (
+            ("vscode", "profile=vsCode", "configKey=servers", "code.visualstudio.com", ""),
+            ("claude-code", "profile=claudeCode", "configKey=mcpServers", "code.claude.com", "native_hook_client=claude-code"),
+            ("jetbrains", "profile=jetBrains", "configKey=mcpServers", "jetbrains.com", ""),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=False)
+            before = snapshot_tree_bytes(root)
+            for integration, profile, config_key, reference, hook_status in cases:
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    code = main(["--root", str(root), "doctor", "--integration", integration])
+
+                rendered = output.getvalue()
+                self.assertEqual(code, 0)
+                self.assertEqual(before, snapshot_tree_bytes(root))
+                self.assertIn(f"doctor --integration {integration}", rendered)
+                self.assertIn("doctor-integration-client-config", rendered)
+                self.assertIn(profile, rendered)
+                self.assertIn(config_key, rendered)
+                self.assertIn(reference, rendered)
+                self.assertIn("doctor-integration-hook-posture", rendered)
+                if hook_status:
+                    self.assertIn(hook_status, rendered)
+
     def test_missing_root_returns_usage_failure_code(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             missing = Path(tmp) / "missing"

@@ -518,9 +518,11 @@ def main(argv: list[str] | None = None) -> int:
         emit_text(render_report("audit-links", inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
         return 0
     if command == "doctor":
-        findings = doctor_findings(inventory.root, inventory)
+        integration = getattr(args, "integration", None)
+        findings = doctor_findings(inventory.root, inventory, integration=integration)
         result = _result_for(findings)
-        emit_text(render_report("doctor", inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
+        report_name = f"doctor --integration {integration}" if integration else "doctor"
+        emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
         return 0
     if command == "preflight":
         if args.template == "git-pre-commit":

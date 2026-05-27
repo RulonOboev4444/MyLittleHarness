@@ -4,6 +4,7 @@ import ast
 import difflib
 import glob
 import hashlib
+import io
 import json
 import os
 import re
@@ -2348,7 +2349,25 @@ def _unique_sorted(values) -> list[str]:
     return sorted(set(values))
 
 
-def doctor_findings(root: Path, inventory: Inventory) -> list[Finding]:
+INTEGRATION_DOCTOR_PROFILE_KEYS = {
+    "mcp": "genericMcp",
+    "vscode": "vsCode",
+    "claude-code": "claudeCode",
+    "jetbrains": "jetBrains",
+}
+
+INTEGRATION_DOCTOR_NATIVE_HOOK_CLIENTS = {
+    "mcp": "",
+    "vscode": "",
+    "claude-code": "claude-code",
+    "jetbrains": "",
+}
+
+
+def doctor_findings(root: Path, inventory: Inventory, integration: str | None = None) -> list[Finding]:
+    if integration:
+        return integration_doctor_findings(root, inventory, integration)
+
     hygiene = product_hygiene_findings(inventory)
     hygiene_warnings = [finding for finding in hygiene if finding.severity in {"warn", "error"}]
     relationship_hygiene = relationship_hygiene_scan_findings(inventory)
@@ -2402,6 +2421,242 @@ def doctor_findings(root: Path, inventory: Inventory) -> list[Finding]:
         )
     )
     return findings
+
+
+def integration_doctor_findings(root: Path, inventory: Inventory, integration: str) -> list[Finding]:
+    if integration not in INTEGRATION_DOCTOR_PROFILE_KEYS:
+        return [
+            Finding(
+                "error",
+                "doctor-integration-unknown",
+                f"unknown integration={integration}; expected one of {', '.join(INTEGRATION_DOCTOR_PROFILE_KEYS)}",
+            )
+        ]
+    findings = [
+        Finding(
+            "info",
+            "doctor-integration-read-only",
+            (
+                f"integration={integration}; read-only diagnostic; no config, hook, cache, lifecycle, Git, "
+                "adapter, or provider state writes are performed"
+            ),
+        ),
+        _integration_install_path_finding(),
+        Finding(
+            "info",
+            "doctor-integration-root-kind",
+            f"root kind: {inventory.root_kind}; classification is routing posture, not lifecycle validity proof",
+        ),
+        _integration_manifest_finding(inventory),
+    ]
+    findings.extend(_integration_mcp_startup_findings(inventory))
+    findings.extend(_integration_client_config_findings(inventory, integration))
+    findings.extend(_integration_hook_findings(inventory, integration))
+    findings.append(_integration_cache_finding(inventory))
+    findings.append(
+        Finding(
+            "info",
+            "doctor-integration-authority-boundary",
+            (
+                "repo-visible files remain authoritative; doctor/check/hooks/adapter/cache outputs are advisory "
+                "and cannot approve lifecycle, archive, roadmap status, staging, commit, push, release, "
+                "provider routing, or cache truth"
+            ),
+        )
+    )
+    return findings
+
+
+def _integration_install_path_finding() -> Finding:
+    console_script = shutil.which("mylittleharness") or "<not-found>"
+    return Finding(
+        "info",
+        "doctor-integration-install-path",
+        f"python={sys.executable}; console_script={console_script}; package_version={__version__}; module={Path(__file__).resolve()}",
+    )
+
+
+def _integration_manifest_finding(inventory: Inventory) -> Finding:
+    neutral = inventory.surface_by_rel.get(WORKFLOW_MANIFEST_REL)
+    legacy = inventory.surface_by_rel.get(LEGACY_WORKFLOW_MANIFEST_REL)
+    selected = inventory.manifest_surface.rel_path if inventory.manifest_surface else "<none>"
+    return Finding(
+        "info",
+        "doctor-integration-neutral-manifest",
+        (
+            f"selected_manifest={selected}; neutral_manifest={_surface_state(neutral)}; "
+            f"legacy_manifest={_surface_state(legacy)}; "
+            f"next_safe_command={_display_command(['mylittleharness', '--root', str(inventory.root), 'migrate', '--dry-run'])}"
+        ),
+        WORKFLOW_MANIFEST_REL,
+    )
+
+
+def _integration_mcp_startup_findings(inventory: Inventory) -> list[Finding]:
+    from .adapter import (
+        MCP_PROTOCOL_VERSION,
+        MCP_READ_PROJECTION_RESOURCE_URI,
+        MCP_TOOL_NAMES,
+        serve_mcp_read_projection,
+    )
+
+    request_lines = [
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"protocolVersion": MCP_PROTOCOL_VERSION, "capabilities": {}, "clientInfo": {"name": "doctor", "version": __version__}},
+        },
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+        {"jsonrpc": "2.0", "id": 3, "method": "resources/list", "params": {}},
+    ]
+    stdin = io.StringIO("\n".join(json.dumps(line, sort_keys=True, ensure_ascii=True) for line in request_lines) + "\n")
+    stdout = io.StringIO()
+    try:
+        exit_code = serve_mcp_read_projection(inventory, stdin, stdout)
+        responses = [json.loads(line) for line in stdout.getvalue().splitlines() if line.strip()]
+    except Exception as exc:  # pragma: no cover - defensive diagnostic path
+        return [Finding("warn", "doctor-integration-mcp-startup-smoke", f"stdio smoke failed before response validation: {exc}")]
+
+    by_id = {response.get("id"): response for response in responses if isinstance(response, dict)}
+    initialize = by_id.get(1, {}).get("result", {})
+    tools_result = by_id.get(2, {}).get("result", {})
+    resources_result = by_id.get(3, {}).get("result", {})
+    protocol = initialize.get("protocolVersion") if isinstance(initialize, dict) else ""
+    tools = _response_tool_names(tools_result)
+    resources = _response_resource_uris(resources_result)
+    missing_tools = [tool for tool in MCP_TOOL_NAMES if tool not in tools]
+    resource_present = MCP_READ_PROJECTION_RESOURCE_URI in resources
+    errors = [response.get("error") for response in responses if isinstance(response, dict) and response.get("error")]
+    ok = exit_code == 0 and not errors and protocol == MCP_PROTOCOL_VERSION and not missing_tools and resource_present
+    detail = (
+        f"stdio smoke {'ok' if ok else 'degraded'}; protocolVersion={protocol or '<missing>'}; "
+        f"tools={','.join(tools) or '<none>'}; resource={MCP_READ_PROJECTION_RESOURCE_URI if resource_present else '<missing>'}; "
+        f"exit_code={exit_code}"
+    )
+    if errors:
+        detail += f"; errors={len(errors)}"
+    if missing_tools:
+        detail += f"; missing_tools={','.join(missing_tools)}"
+    return [Finding("info" if ok else "warn", "doctor-integration-mcp-startup-smoke", detail)]
+
+
+def _integration_client_config_findings(inventory: Inventory, integration: str) -> list[Finding]:
+    from .adapter import MCP_CLIENT_CONFIGS_SCHEMA, MCP_READ_PROJECTION_TARGET, mcp_read_projection_client_config, mcp_read_projection_serve_command
+
+    config = mcp_read_projection_client_config(inventory)
+    profile_key = INTEGRATION_DOCTOR_PROFILE_KEYS[integration]
+    profiles = config.get("clientConfigs", {})
+    profile = profiles.get(profile_key, {}) if isinstance(profiles, dict) else {}
+    command = mcp_read_projection_serve_command(inventory)
+    return [
+        Finding(
+            "info",
+            "doctor-integration-client-config",
+            (
+                f"schema={config.get('schema', MCP_CLIENT_CONFIGS_SCHEMA)}; profile={profile_key}; "
+                f"configKey={profile.get('configKey', '<unknown>')}; configSurface={profile.get('configSurface', '<unknown>')}; "
+                f"reference={profile.get('reference', '<unknown>')}; "
+                f"next_safe_command={_display_command(['mylittleharness', '--root', str(inventory.root), 'adapter', '--client-config', '--target', MCP_READ_PROJECTION_TARGET])}"
+            ),
+        ),
+        Finding(
+            "info",
+            "doctor-integration-client-command",
+            f"server={config.get('serverName', 'mylittleharness')}; command={_display_command(command)}; transport=stdio; read_only=true",
+        ),
+    ]
+
+
+def _integration_hook_findings(inventory: Inventory, integration: str) -> list[Finding]:
+    from .hooks import hooks_doctor_sections
+
+    hook_findings = flatten_sections(hooks_doctor_sections(inventory))
+    status_codes = [finding.code for finding in hook_findings if finding.code.endswith("-status")][:4]
+    native_client = INTEGRATION_DOCTOR_NATIVE_HOOK_CLIENTS[integration]
+    if native_client:
+        posture = (
+            f"native_hook_client={native_client}; inspect with "
+            f"{_display_command(['mylittleharness', '--root', str(inventory.root), 'hooks', 'adapter', '--client', native_client, '--dry-run', '--scope', 'project'])}"
+        )
+    else:
+        posture = "native_hook_client=<none>; no native hook adapter is implied by this MCP profile"
+    status_summary = ",".join(status_codes) if status_codes else "<none>"
+    return [
+        Finding(
+            "info",
+            "doctor-integration-hook-posture",
+            (
+                f"{posture}; hooks --doctor remains read-only; sampled_status_codes={status_summary}; "
+                f"next_safe_command={_display_command(['mylittleharness', '--root', str(inventory.root), 'hooks', '--doctor'])}"
+            ),
+        )
+    ]
+
+
+def _integration_cache_finding(inventory: Inventory) -> Finding:
+    projection = build_projection(inventory)
+    artifact_findings = inspect_projection_artifacts(inventory, projection)
+    index_findings = inspect_projection_index(inventory, projection)
+    posture = projection_cache_posture_payload(
+        artifact_findings,
+        index_findings,
+        runtime_refresh_allowed=inventory.root_kind != PRODUCT_SOURCE_FIXTURE,
+    )
+    components = posture.get("components", {})
+    artifact_status = _component_status(components, "artifacts")
+    index_status = _component_status(components, "sqlite_index")
+    commands = posture.get("recommended_refresh_commands", [])
+    command_text = ", ".join(str(command) for command in commands) if isinstance(commands, list) else str(commands)
+    return Finding(
+        "info",
+        "doctor-integration-cache-posture",
+        (
+            f"schema={posture.get('schema')}; artifacts={artifact_status}; sqlite_index={index_status}; "
+            f"refresh_by_adapter=false; adapter_executes_refresh=false; recommended_commands={command_text}"
+        ),
+        ARTIFACT_DIR_REL,
+    )
+
+
+def _surface_state(surface: Surface | None) -> str:
+    if surface is None or not surface.exists:
+        return "missing"
+    if surface.read_error:
+        return "unreadable"
+    return "present"
+
+
+def _display_command(command: list[str]) -> str:
+    return " ".join(shell_arg(part) for part in command)
+
+
+def _response_tool_names(result: object) -> list[str]:
+    if not isinstance(result, dict):
+        return []
+    tools = result.get("tools")
+    if not isinstance(tools, list):
+        return []
+    return [str(tool.get("name")) for tool in tools if isinstance(tool, dict) and tool.get("name")]
+
+
+def _response_resource_uris(result: object) -> list[str]:
+    if not isinstance(result, dict):
+        return []
+    resources = result.get("resources")
+    if not isinstance(resources, list):
+        return []
+    return [str(resource.get("uri")) for resource in resources if isinstance(resource, dict) and resource.get("uri")]
+
+
+def _component_status(components: object, key: str) -> str:
+    if not isinstance(components, dict):
+        return "<unknown>"
+    component = components.get(key)
+    if not isinstance(component, dict):
+        return "<unknown>"
+    return str(component.get("status") or "<unknown>")
 
 
 WORKFLOW_ATTACH_DIRECTORIES = (

@@ -63,6 +63,13 @@ AI Assistant profile snippets, but printing the snippets writes no client files,
 starts no server, opens no network listener, enables no provider routing,
 enables no mutating MCP tools by default, and exposes no shell passthrough.
 
+`doctor --integration mcp|vscode|claude-code|jetbrains` is also read-only. It
+smokes the local MCP stdio handler in-process and reports install path, root
+classification, manifest posture, client config pointers, hook posture, cache
+posture, and next safe commands, but it does not install hooks, write client
+config, refresh cache, mutate lifecycle files, touch Git state, start a daemon,
+or approve provider routing.
+
 Mutating MCP tools are not part of the default product surface. Any future
 mutating MCP tool needs a separate scoped plan, disabled-by-default posture,
 write metadata, dry-run artifact, and explicit human apply gate.

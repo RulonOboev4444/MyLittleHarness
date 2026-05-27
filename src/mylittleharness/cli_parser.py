@@ -119,8 +119,14 @@ def build_parser() -> argparse.ArgumentParser:
     detach_mode = detach.add_mutually_exclusive_group(required=True)
     detach_mode.add_argument("--dry-run", action="store_true", help="Report detach preservation and refusal posture without writing files.")
     detach_mode.add_argument("--apply", action="store_true", help="Create the marker-only detach evidence file in an eligible live operating root.")
-    for command in ("status", "validate", "context-budget", "audit-links", "doctor", "closeout"):
+    for command in ("status", "validate", "context-budget", "audit-links", "closeout"):
         subparsers.add_parser(command)
+    doctor = subparsers.add_parser("doctor")
+    doctor.add_argument(
+        "--integration",
+        choices=("mcp", "vscode", "claude-code", "jetbrains"),
+        help="Inspect a read-only client integration smoke profile without writing files.",
+    )
     evidence = subparsers.add_parser(
         "evidence",
         help=argparse.SUPPRESS,

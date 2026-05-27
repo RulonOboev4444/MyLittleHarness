@@ -80,6 +80,15 @@ routing are enabled, and no shell passthrough is exposed. The shapes follow the
 published client docs for [VS Code MCP configuration](https://code.visualstudio.com/docs/copilot/reference/mcp-configuration),
 [Claude Code MCP](https://code.claude.com/docs/en/mcp), and
 [JetBrains AI Assistant MCP](https://www.jetbrains.com/help/ai-assistant/mcp.html).
+`doctor --integration mcp|vscode|claude-code|jetbrains` is the paired
+read-only integration smoke report. It checks install/runtime provenance, root
+classification, neutral/legacy manifest posture, MCP stdio startup,
+client-profile pointers, native hook posture, generated-cache freshness, and
+authority boundaries without writing config, hooks, cache, lifecycle state, Git
+state, adapter state, or provider routing. The report names next safe commands
+such as `adapter --client-config`, `hooks --doctor`, `hooks adapter --client
+claude-code --dry-run`, and projection recovery commands, but those commands
+remain suggestions until the operator runs their explicit dry-run/apply routes.
 
 The first-run operator path is deliberately shorter than the full diagnostic surface: run from the product source checkout with `PYTHONPATH=src`, optionally run `bootstrap --package-smoke` against the product checkout, then point `--root` at the target repository and start with `init --dry-run`, `check`, optional legacy-root `migrate --dry-run`, `repair --dry-run`, and `detach --dry-run`. Apply modes stay explicit and target-bound after dry-run review. Successful `init --apply` and compatibility `attach --apply` create the neutral `.mylittleharness/project-workflow.toml` manifest and do not create `.codex` by default. `migrate --apply` copies an existing legacy `.codex/project-workflow.toml` to the neutral path, preserves the legacy file, and refuses missing legacy files, divergent existing neutral manifests, symlinked targets, and root escapes. Project-local Codex native hooks are optional non-authoritative sensors, not correctness prerequisites, and remain available through `hooks adapter --client codex --dry-run|--apply --scope project`. They are not prerequisites for first-run correctness. `bootstrap --inspect`, `tasks --inspect`, publication, global installation, PATH/profile edits, user-config mutation, hooks, CI, MCP clients, semantic providers, and workstation adoption are not prerequisites for first-run correctness.
 
