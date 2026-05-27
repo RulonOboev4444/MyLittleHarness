@@ -1212,6 +1212,28 @@ class CliTests(unittest.TestCase):
             self.assertIn("research-import --dry-run", rendered)
             self.assertIn("does not call an external model", rendered)
 
+    def test_suggest_intent_outputs_context_pack_bootstrap_pointers_without_dup_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            before = snapshot_tree(root)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "suggest", "--intent", "create context pack for any-agent Deep Research adoption"])
+
+            rendered = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("context-pack-bootstrap-pointers", rendered)
+            self.assertIn("AGENTS.md", rendered)
+            self.assertIn("project/project-state.md", rendered)
+            self.assertIn("dashboard --inspect", rendered)
+            self.assertIn("adapter --client-config --target mcp-read-projection", rendered)
+            self.assertIn("not duplicate authority bodies", rendered)
+            self.assertIn("research-import --dry-run", rendered)
+            self.assertIn("research-distill --dry-run", rendered)
+            self.assertIn("any file-reading, shell-capable agent", rendered)
+            self.assertIn("does not call an external model", rendered)
+
     def test_suggest_intent_routes_deep_research_rubric_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_operating_root(Path(tmp))

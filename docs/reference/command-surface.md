@@ -54,6 +54,7 @@ only an explicit apply route writes repo-visible authority.
 | `manifest --inspect` | route/role protocol report | no | advisory orchestration metadata |
 | `closeout` | closeout cue report | no | may suggest trailers, never stages or commits |
 | bare `evidence` | evidence cue report | no | report only |
+| `suggest --intent "<context pack>"` | adoption/navigation hints | no | pointer-only bootstrap and Deep Research import guidance |
 | `preflight` | terminal warning feed | no | does not install hooks or CI |
 | `hooks --doctor` / `hooks --run` | hook posture or foreground event | no | advisory/contextual unless a deterministic client block is returned |
 | `adapter --inspect` | adapter report | no | source-bound projection posture |
@@ -62,6 +63,17 @@ only an explicit apply route writes repo-visible authority.
 
 Some navigation commands can report stale generated projection cache and suggest
 refresh commands. That suggestion is not cache truth or lifecycle approval.
+
+When the intent asks for a context pack or adoption handoff, `suggest --intent`
+adds bootstrap pointers for any file-reading, shell-capable agent: read the
+operator contract, neutral or legacy workflow manifest, project state, roadmap,
+and active plan only when active; then use `check`, `dashboard --inspect`,
+`adapter --client-config --target mcp-read-projection`, and exact `rg` or
+bounded source reads. For Deep Research adoption, it points at reviewed
+`research-import` and `research-distill` dry-run/apply rails after human review
+of external output. It does not copy authority bodies, call external models,
+create public repos, publish, mutate lifecycle, stage, commit, push, release, or
+approve provider routing.
 
 ## Optional Runtime and Client Config
 

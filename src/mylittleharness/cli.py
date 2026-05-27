@@ -377,10 +377,13 @@ def main(argv: list[str] | None = None) -> int:
     command = args.command
     if command == "suggest":
         suggestions = command_intent_registry() if args.list else command_suggestions_for_intent(args.intent, args.limit)
+        context_pack_findings = _context_pack_suggestion_findings(args.intent, args.list)
         sections = [
             ("Command Suggestions", command_suggestion_findings(suggestions, intent=args.intent, list_all=args.list)),
-            ("Boundary", command_suggestion_boundary_findings()),
         ]
+        if context_pack_findings:
+            sections.append(("Context Pack", context_pack_findings))
+        sections.append(("Boundary", command_suggestion_boundary_findings()))
         findings = flatten_sections(sections)
         result = _result_for(findings)
         report_name = "suggest --list" if args.list else "suggest --intent"
@@ -1960,6 +1963,61 @@ def _state_plan_status(inventory) -> str:
 
 def _with_severity(findings: list[Finding], severity: str) -> list[Finding]:
     return [Finding(severity, finding.code, finding.message, finding.source, finding.line) for finding in findings]
+
+
+def _context_pack_suggestion_findings(intent: str | None, list_all: bool) -> list[Finding]:
+    if list_all or not intent or not _looks_like_context_pack_intent(intent):
+        return []
+    return [
+        Finding(
+            "info",
+            "context-pack-bootstrap-pointers",
+            (
+                "context-pack bootstrap pointers only: read AGENTS.md, .mylittleharness/project-workflow.toml "
+                "or the .codex fallback manifest, project/project-state.md, project/roadmap.md, and "
+                "project/implementation-plan.md only when plan_status is active; then run check, dashboard --inspect, "
+                "and adapter --client-config --target mcp-read-projection as optional read-only navigation"
+            ),
+            "AGENTS.md",
+        ),
+        Finding(
+            "info",
+            "context-pack-exact-verification",
+            (
+                "the packet should carry root-relative pointers and commands, not duplicate authority bodies; "
+                "agents verify exact source with rg or bounded source reads before edits or closeout claims"
+            ),
+            "project/project-state.md",
+        ),
+        Finding(
+            "info",
+            "context-pack-deep-research-flow",
+            (
+                "Deep Research remains a manual external request; after human review, import evidence with "
+                "research-import --dry-run before --apply, then use research-distill --dry-run before --apply "
+                "before any later explicit roadmap promotion"
+            ),
+            "project/research",
+        ),
+        Finding(
+            "info",
+            "context-pack-authority-boundary",
+            (
+                "context-pack guidance works for any file-reading, shell-capable agent; Codex, MCP, hooks, dashboard, "
+                "and mlhd are optional helpers and the packet does not call an external model, create a public repo, "
+                "publish, mutate lifecycle, stage, commit, push, release, or approve provider routing"
+            ),
+            "project/project-state.md",
+        ),
+    ]
+
+
+def _looks_like_context_pack_intent(intent: str) -> bool:
+    normalized = intent.casefold()
+    if "context" not in normalized:
+        return False
+    context_pack_terms = ("pack", "packet", "bundle", "onboard", "adoption", "handoff", "пак", "контекст")
+    return any(term in normalized for term in context_pack_terms)
 
 
 def _result_for(findings) -> str:
