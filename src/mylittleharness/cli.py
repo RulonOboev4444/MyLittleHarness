@@ -42,6 +42,8 @@ from .checks import (
     intake_dry_run_findings,
     load_for_root,
     make_intake_request,
+    migrate_apply_findings,
+    migrate_dry_run_findings,
     projection_cache_status_findings,
     detach_apply_sections,
     repair_apply_findings,
@@ -188,6 +190,7 @@ COMMANDS = (
     "check",
     "suggest",
     "manifest",
+    "migrate",
     "dashboard",
     "mlhd",
     "repair",
@@ -239,6 +242,7 @@ CACHE_DIRTY_APPLY_COMMANDS = {
     "memory-hygiene",
     "relationship-drift",
     "meta-feedback",
+    "migrate",
     "plan",
     "research-compare",
     "research-import",
@@ -426,6 +430,13 @@ def main(argv: list[str] | None = None) -> int:
         else:
             emit_text(render_sectioned_report(report_name, inventory.root, result, inventory.sources_for_report(), sections, suggestions))
         return 0
+    if command == "migrate":
+        report_name = "migrate --apply" if args.apply else "migrate --dry-run"
+        findings = migrate_apply_findings(inventory) if args.apply else migrate_dry_run_findings(inventory)
+        findings = _with_projection_cache_dirty_findings(command, args, inventory, findings)
+        result = _result_for(findings)
+        emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
+        return 2 if args.apply and result == "error" else 0
     if command == "dashboard":
         sections = dashboard_sections(inventory)
         findings = flatten_sections(sections)
@@ -2437,6 +2448,14 @@ def _suggestions(command: str, findings) -> list[str]:
         if warnings:
             return ["Review manifest warnings manually; route and role manifests are advisory protocol data only."]
         return ["manifest inspection completed as a terminal-only read-only protocol report; it did not grant apply authority, spawn workers, or approve lifecycle decisions."]
+    if command == "migrate":
+        if any(finding.code == "migrate-refused" for finding in errors):
+            return ["migrate apply was refused before writing the neutral workflow manifest."]
+        if any(finding.code == "migrate-dry-run" for finding in findings):
+            return ["migrate dry-run reported the legacy-to-neutral manifest copy posture without writing files."]
+        if any(finding.code == "migrate-copied" for finding in findings):
+            return ["migrate apply copied the legacy workflow manifest to the neutral path and preserved the legacy file."]
+        return ["migrate apply completed without changing lifecycle, adapter, Git, or legacy manifest deletion state."]
     if command == "detach":
         if any(finding.code == "detach-marker-created" for finding in findings):
             return ["detach apply created the marker-only evidence file; preserved repo-visible files remain the authority."]

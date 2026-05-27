@@ -286,6 +286,125 @@ class CliTests(unittest.TestCase):
             self.assertIn("manifest-resolution-drift", rendered)
             self.assertIn("using .mylittleharness/project-workflow.toml", rendered)
 
+    def test_migrate_dry_run_previews_manifest_copy_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            before = snapshot_tree_bytes(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "migrate", "--dry-run"])
+            rendered = output.getvalue()
+
+            self.assertEqual(code, 0)
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            self.assertFalse((root / WORKFLOW_MANIFEST_REL).exists())
+            self.assertIn("migrate-dry-run", rendered)
+            self.assertIn(f"would create route {WORKFLOW_MANIFEST_REL}", rendered)
+            self.assertIn("migrate-legacy-preserved", rendered)
+
+            check_output = io.StringIO()
+            with redirect_stdout(check_output):
+                check_code = main(["--root", str(root), "check"])
+            self.assertEqual(check_code, 0)
+            self.assertIn("manifest-migrate-available", check_output.getvalue())
+            self.assertNotIn(f"missing required surface: {WORKFLOW_MANIFEST_REL}", check_output.getvalue())
+
+    def test_migrate_apply_copies_exact_manifest_and_preserves_legacy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            legacy_path = root / LEGACY_WORKFLOW_MANIFEST_REL
+            legacy_bytes = (
+                b'workflow = "workflow-core"\r\n'
+                b"version = 1\r\n"
+                b"\r\n"
+                b"[memory]\r\n"
+                b'state_file = "project/project-state.md"\r\n'
+                b'plan_file = "project/implementation-plan.md"\r\n'
+            )
+            legacy_path.write_bytes(legacy_bytes)
+            (root / ARTIFACT_DIR_REL).mkdir(parents=True)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "migrate", "--apply"])
+            rendered = output.getvalue()
+
+            self.assertEqual(code, 0)
+            self.assertEqual(legacy_bytes, legacy_path.read_bytes())
+            self.assertEqual(legacy_bytes, (root / WORKFLOW_MANIFEST_REL).read_bytes())
+            self.assertIn("migrate-copied", rendered)
+            self.assertIn(f"created route {WORKFLOW_MANIFEST_REL}", rendered)
+            self.assertIn("migrate-legacy-preserved", rendered)
+            self.assertIn("projection-cache-dirty", rendered)
+
+            second_output = io.StringIO()
+            with redirect_stdout(second_output):
+                second_code = main(["--root", str(root), "migrate", "--apply"])
+            self.assertEqual(second_code, 0)
+            self.assertIn("migrate-unchanged", second_output.getvalue())
+            self.assertEqual(legacy_bytes, legacy_path.read_bytes())
+
+    def test_migrate_apply_refuses_missing_legacy_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            (root / LEGACY_WORKFLOW_MANIFEST_REL).unlink()
+            before = snapshot_tree_bytes(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "migrate", "--apply"])
+            rendered = output.getvalue()
+
+            self.assertEqual(code, 2)
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            self.assertIn("migrate-refused", rendered)
+            self.assertIn(f"legacy workflow manifest is missing: {LEGACY_WORKFLOW_MANIFEST_REL}", rendered)
+            self.assertFalse((root / WORKFLOW_MANIFEST_REL).exists())
+
+    def test_migrate_apply_refuses_divergent_neutral_manifest_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            write_neutral_manifest_from_legacy(root)
+            neutral_path = root / WORKFLOW_MANIFEST_REL
+            neutral_path.write_text(
+                'workflow = "workflow-core"\nversion = 1\n\n[memory]\nstate_file = "project/other-state.md"\n',
+                encoding="utf-8",
+            )
+            before = snapshot_tree_bytes(root)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "migrate", "--apply"])
+            rendered = output.getvalue()
+
+            self.assertEqual(code, 2)
+            self.assertEqual(before, snapshot_tree_bytes(root))
+            self.assertIn("migrate-refused", rendered)
+            self.assertIn(f"neutral workflow manifest already exists and differs from legacy manifest: {WORKFLOW_MANIFEST_REL}", rendered)
+
+    def test_migrate_apply_refuses_symlinked_neutral_boundary_without_outside_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = make_live_root(base / "root")
+            outside = base / "outside"
+            outside.mkdir()
+            try:
+                os.symlink(outside, root / ".mylittleharness", target_is_directory=True)
+            except (NotImplementedError, OSError) as exc:
+                self.skipTest(f"directory symlinks are unavailable: {exc}")
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["--root", str(root), "migrate", "--apply"])
+            rendered = output.getvalue()
+
+            self.assertEqual(code, 2)
+            self.assertIn("migrate-refused", rendered)
+            self.assertIn("neutral manifest path contains a symlink segment: .mylittleharness", rendered)
+            self.assertFalse((outside / "project-workflow.toml").exists())
+            self.assertTrue((root / LEGACY_WORKFLOW_MANIFEST_REL).is_file())
+
     def test_status_report_sections_and_zero_exit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_root(Path(tmp), active=True, mirrors=True)
@@ -4049,10 +4168,12 @@ class CliTests(unittest.TestCase):
         self.assertIn("detach.", rendered)
         self.assertIn("init", rendered)
         self.assertIn("check", rendered)
+        self.assertIn("migrate", rendered)
         self.assertIn("repair", rendered)
         self.assertIn("detach", rendered)
         self.assertIn("Attach MyLittleHarness", rendered)
         self.assertIn("Run read-only status", rendered)
+        self.assertIn("Copy a legacy workflow config", rendered)
         self.assertIn("Preview harness detach", rendered)
         self.assertIn("Compatibility and advanced diagnostics", rendered)
         self.assertIn("{init,check,repair,detach,...}", rendered)

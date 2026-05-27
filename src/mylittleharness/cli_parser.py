@@ -59,6 +59,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     manifest.add_argument("--inspect", action="store_true", required=True, help="Inspect the route and role manifest without writing files.")
     manifest.add_argument("--json", action="store_true", help="Emit the route and role manifest as structured JSON.")
+    migrate = subparsers.add_parser(
+        "migrate",
+        help="Copy a legacy workflow config to the neutral workflow path.",
+        description="Preview or apply legacy .codex/project-workflow.toml migration to .mylittleharness/project-workflow.toml.",
+    )
+    migrate_mode = migrate.add_mutually_exclusive_group(required=True)
+    migrate_mode.add_argument("--dry-run", action="store_true", help="Preview migration without writing files.")
+    migrate_mode.add_argument("--apply", action="store_true", help="Copy the legacy workflow manifest to the neutral path.")
     dashboard = subparsers.add_parser(
         "dashboard",
         help=argparse.SUPPRESS,

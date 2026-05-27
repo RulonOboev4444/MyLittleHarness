@@ -2623,6 +2623,137 @@ def _detach_apply_recovery_findings() -> list[Finding]:
     ]
 
 
+def migrate_dry_run_findings(inventory: Inventory) -> list[Finding]:
+    findings = [
+        Finding("info", "migrate-dry-run", "migrate proposal only; no files were written"),
+        Finding(
+            "info",
+            "migrate-boundary",
+            (
+                f"migrate copies {LEGACY_WORKFLOW_MANIFEST_REL} to {WORKFLOW_MANIFEST_REL}; "
+                "legacy manifest deletion remains a separate manual or future gated action"
+            ),
+            WORKFLOW_MANIFEST_REL,
+        ),
+    ]
+    errors = _manifest_migrate_preflight_errors(inventory)
+    if errors:
+        findings.extend(_with_severity(errors, "warn"))
+        return findings
+    plan = _manifest_migrate_write_plan(inventory)
+    if plan.before_text == plan.after_text:
+        findings.append(Finding("info", "migrate-unchanged", f"neutral manifest already matches legacy manifest: {WORKFLOW_MANIFEST_REL}", WORKFLOW_MANIFEST_REL))
+    else:
+        findings.append(Finding("info", "migrate-plan", f"would copy legacy workflow manifest to neutral manifest: {LEGACY_WORKFLOW_MANIFEST_REL} -> {WORKFLOW_MANIFEST_REL}", WORKFLOW_MANIFEST_REL))
+        findings.extend(route_write_findings("migrate-route-write", (plan,), apply=False))
+    findings.append(Finding("info", "migrate-legacy-preserved", f"legacy manifest is preserved: {LEGACY_WORKFLOW_MANIFEST_REL}", LEGACY_WORKFLOW_MANIFEST_REL))
+    return findings
+
+
+def migrate_apply_findings(inventory: Inventory) -> list[Finding]:
+    findings = [Finding("info", "migrate-apply", "manifest migration apply started")]
+    errors = _manifest_migrate_preflight_errors(inventory)
+    if errors:
+        findings.extend(errors)
+        return findings
+    plan = _manifest_migrate_write_plan(inventory)
+    if plan.before_text == plan.after_text:
+        findings.append(Finding("info", "migrate-unchanged", f"neutral manifest already matches legacy manifest: {WORKFLOW_MANIFEST_REL}", WORKFLOW_MANIFEST_REL))
+        findings.append(Finding("info", "migrate-legacy-preserved", f"legacy manifest is preserved: {LEGACY_WORKFLOW_MANIFEST_REL}", LEGACY_WORKFLOW_MANIFEST_REL))
+        return findings
+    target = inventory.root / WORKFLOW_MANIFEST_REL
+    try:
+        cleanup_warnings = apply_file_transaction(
+            (
+                AtomicFileWrite(
+                    target,
+                    target.with_name(f".{target.name}.migrate.tmp"),
+                    plan.after_text or "",
+                    target.with_name(f".{target.name}.migrate.backup"),
+                ),
+            ),
+            root=inventory.root,
+        )
+    except (OSError, FileTransactionError) as exc:
+        findings.append(Finding("error", "migrate-refused", f"failed to write neutral workflow manifest before apply completed: {exc}", WORKFLOW_MANIFEST_REL))
+        return findings
+    findings.append(Finding("info", "migrate-copied", f"copied exact legacy workflow manifest to neutral manifest: {LEGACY_WORKFLOW_MANIFEST_REL} -> {WORKFLOW_MANIFEST_REL}", WORKFLOW_MANIFEST_REL))
+    findings.extend(route_write_findings("migrate-route-write", (plan,), apply=True))
+    for warning in cleanup_warnings:
+        findings.append(Finding("warn", "migrate-cleanup-warning", warning, WORKFLOW_MANIFEST_REL))
+    findings.append(Finding("info", "migrate-legacy-preserved", f"legacy manifest is preserved: {LEGACY_WORKFLOW_MANIFEST_REL}", LEGACY_WORKFLOW_MANIFEST_REL))
+    return findings
+
+
+def _manifest_migrate_preflight_errors(inventory: Inventory) -> list[Finding]:
+    errors: list[Finding] = []
+    if _is_product_source_inventory(inventory):
+        errors.append(Finding("error", "migrate-refused", "target is a product-source compatibility fixture; migrate --apply is refused", inventory.state.rel_path if inventory.state else None))
+    elif _is_fallback_or_archive_inventory(inventory):
+        errors.append(Finding("error", "migrate-refused", "target is fallback/archive or generated-output evidence; migrate --apply is refused", inventory.state.rel_path if inventory.state else None))
+    elif inventory.root_kind != "live_operating_root":
+        errors.append(Finding("error", "migrate-refused", f"target root kind is {inventory.root_kind}; migrate requires an explicit live operating root"))
+    if inventory.root.is_symlink():
+        errors.append(Finding("error", "migrate-refused", f"target root is a symlink: {inventory.root}"))
+
+    legacy_path = inventory.root / LEGACY_WORKFLOW_MANIFEST_REL
+    neutral_path = inventory.root / WORKFLOW_MANIFEST_REL
+    errors.extend(_manifest_migrate_path_conflicts(inventory.root, LEGACY_WORKFLOW_MANIFEST_REL, must_exist=True, label="legacy manifest"))
+    errors.extend(_manifest_migrate_path_conflicts(inventory.root, WORKFLOW_MANIFEST_REL, must_exist=False, label="neutral manifest"))
+
+    legacy = inventory.surface_by_rel.get(LEGACY_WORKFLOW_MANIFEST_REL)
+    neutral = inventory.surface_by_rel.get(WORKFLOW_MANIFEST_REL)
+    if legacy is None or not legacy.exists:
+        errors.append(Finding("error", "migrate-refused", f"legacy workflow manifest is missing: {LEGACY_WORKFLOW_MANIFEST_REL}", LEGACY_WORKFLOW_MANIFEST_REL))
+    elif legacy.read_error:
+        errors.append(Finding("error", "migrate-refused", f"legacy workflow manifest is unreadable: {legacy.read_error}", LEGACY_WORKFLOW_MANIFEST_REL))
+    for error in inventory.manifest_errors:
+        if inventory.manifest_surface and inventory.manifest_surface.rel_path == LEGACY_WORKFLOW_MANIFEST_REL:
+            errors.append(Finding("error", "migrate-refused", f"legacy workflow manifest is malformed: {error}", LEGACY_WORKFLOW_MANIFEST_REL))
+    if neutral and neutral.exists and neutral.read_error:
+        errors.append(Finding("error", "migrate-refused", f"neutral workflow manifest is unreadable: {neutral.read_error}", WORKFLOW_MANIFEST_REL))
+
+    if legacy_path.is_file() and neutral_path.is_file():
+        try:
+            legacy_text = legacy_path.read_bytes().decode("utf-8")
+            neutral_text = neutral_path.read_bytes().decode("utf-8")
+        except UnicodeDecodeError as exc:
+            errors.append(Finding("error", "migrate-refused", f"workflow manifest bytes are not valid UTF-8: {exc}", WORKFLOW_MANIFEST_REL))
+        except OSError as exc:
+            errors.append(Finding("error", "migrate-refused", f"could not compare workflow manifests: {exc}", WORKFLOW_MANIFEST_REL))
+        else:
+            if legacy_text != neutral_text:
+                errors.append(Finding("error", "migrate-refused", f"neutral workflow manifest already exists and differs from legacy manifest: {WORKFLOW_MANIFEST_REL}", WORKFLOW_MANIFEST_REL))
+    return errors
+
+
+def _manifest_migrate_path_conflicts(root: Path, rel_path: str, *, must_exist: bool, label: str) -> list[Finding]:
+    findings: list[Finding] = []
+    target = root / rel_path
+    for candidate in _root_relative_path_chain(root, rel_path):
+        candidate_rel = candidate.relative_to(root).as_posix()
+        if candidate.is_symlink():
+            findings.append(Finding("error", "migrate-refused", f"{label} path contains a symlink segment: {candidate_rel}", candidate_rel))
+            return findings
+        if candidate != target and candidate.exists() and not candidate.is_dir():
+            findings.append(Finding("error", "migrate-refused", f"{label} path contains a non-directory segment: {candidate_rel}", candidate_rel))
+            return findings
+    if not _path_stays_within_root(root, target):
+        findings.append(Finding("error", "migrate-refused", f"{label} path would escape the target root: {rel_path}", rel_path))
+    elif must_exist and not target.exists():
+        findings.append(Finding("error", "migrate-refused", f"{label} is missing: {rel_path}", rel_path))
+    elif target.exists() and not target.is_file():
+        findings.append(Finding("error", "migrate-refused", f"{label} path is not a regular file: {rel_path}", rel_path))
+    return findings
+
+
+def _manifest_migrate_write_plan(inventory: Inventory) -> RouteWriteEvidence:
+    target = inventory.root / WORKFLOW_MANIFEST_REL
+    legacy_text = (inventory.root / LEGACY_WORKFLOW_MANIFEST_REL).read_bytes().decode("utf-8")
+    neutral_text = target.read_bytes().decode("utf-8") if target.exists() else None
+    return RouteWriteEvidence(WORKFLOW_MANIFEST_REL, neutral_text, legacy_text)
+
+
 def _detach_boundary_findings(inventory: Inventory) -> list[Finding]:
     findings = [
         Finding("info", "detach-read-only", "detach --dry-run writes no files, reports, caches, generated outputs, snapshots, Git state, config, hooks, CI files, package artifacts, or workstation state"),
@@ -7458,6 +7589,17 @@ def _manifest_findings(inventory: Inventory) -> list[Finding]:
     manifest = inventory.manifest_surface
     if not manifest or not manifest.exists:
         return findings
+    neutral = inventory.surface_by_rel.get(WORKFLOW_MANIFEST_REL)
+    legacy = inventory.surface_by_rel.get(LEGACY_WORKFLOW_MANIFEST_REL)
+    if manifest.rel_path == LEGACY_WORKFLOW_MANIFEST_REL and (neutral is None or not neutral.exists) and legacy and legacy.exists:
+        findings.append(
+            Finding(
+                "info",
+                "manifest-migrate-available",
+                f"legacy-only workflow manifest selected; optional neutral migration: mylittleharness --root <root> migrate --dry-run",
+                LEGACY_WORKFLOW_MANIFEST_REL,
+            )
+        )
     for warning in inventory.manifest_warnings:
         findings.append(Finding("warn", "manifest-resolution-drift", warning, manifest.rel_path))
     for error in inventory.manifest_errors:

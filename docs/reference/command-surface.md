@@ -10,11 +10,16 @@ route contracts in `docs/specs/`.
 | --- | --- | --- | --- | --- | --- |
 | `init` | attach | yes | yes | target repository | high: creates operating scaffold |
 | `check` | diagnostic | no | no | any readable MLH root | low: advisory report |
+| `migrate` | manifest migration | yes | yes | live operating root with legacy manifest | medium: exact copy, legacy preserved |
 | `repair` | repair | yes | yes | live operating root | high: bounded repair only |
 | `detach` | detach marker | yes | yes | live operating root | medium: marker-only disable posture |
 
-The top-level help intentionally foregrounds these commands. Use `--dry-run`
-before every mutating default command.
+The top-level help intentionally foregrounds the small operator surface first.
+`migrate` is a public migration utility for legacy roots: dry-run writes
+nothing, apply copies `.codex/project-workflow.toml` to
+`.mylittleharness/project-workflow.toml`, preserves the legacy file, and
+refuses missing legacy files, divergent neutral manifests, symlinked targets,
+and root escapes. Use `--dry-run` before every mutating default command.
 
 ## Recovery and Lifecycle Commands
 

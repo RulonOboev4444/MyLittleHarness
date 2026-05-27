@@ -408,6 +408,7 @@ class PackageMetadataTests(unittest.TestCase):
             "python -m mylittleharness --root $ProductRoot bootstrap --package-smoke",
             "python -m mylittleharness --root $TargetRoot init --dry-run",
             "python -m mylittleharness --root $TargetRoot check",
+            "python -m mylittleharness --root $TargetRoot migrate --dry-run",
             "python -m mylittleharness --root $TargetRoot repair --dry-run",
             "python -m mylittleharness --root $TargetRoot detach --dry-run",
             "Apply modes stay explicit and target-bound",
@@ -435,7 +436,7 @@ class PackageMetadataTests(unittest.TestCase):
         for expected in (
             "The first-run operator path starts from source-checkout usage",
             "then points `--root` at the target repository",
-            "`init --dry-run`, `check`, `repair --dry-run`, and `detach --dry-run`",
+            "`init --dry-run`, `check`, optional legacy-manifest `migrate --dry-run`, `repair --dry-run`, and `detach --dry-run`",
         ):
             self.assertIn(expected, cli_spec)
 
@@ -1084,7 +1085,7 @@ class PackageMetadataTests(unittest.TestCase):
         cli_spec = (ROOT / "docs/specs/attach-repair-status-cli.md").read_text(encoding="utf-8")
         for expected in (
             "## Command Classification",
-            "| Public operator utility | `init`, `check`, `repair`, `detach` |",
+            "| Public operator utility | `init`, `check`, `migrate`, `repair`, `detach` |",
             "| Hidden compatibility diagnostics | `status`, `validate`, `audit-links`, `context-budget`, `doctor` |",
             "| Advanced and recovery diagnostics | `suggest --intent`, `intelligence`, `manifest --inspect`, `projection`, `snapshot`, `adapter`, `preflight` |",
             "| Closeout and reporting | `evidence`, `evidence --record --dry-run`, `evidence --record --apply`, `closeout` |",
@@ -1098,6 +1099,8 @@ class PackageMetadataTests(unittest.TestCase):
             "`check --deep` is read-only",
             "optional `project/roadmap.md` sequencing",
             "`check --focus validation|links|context|hygiene|grain` is read-only",
+            "`migrate --dry-run` is no-write",
+            "`migrate --apply` is the explicit legacy-to-neutral workflow manifest migration rail",
             "`suggest --intent \"<operator-action>\"`",
             "command intent suggestions are advisory",
             "manual external prompt drafting outside MyLittleHarness",
