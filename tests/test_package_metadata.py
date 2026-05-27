@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT / "build_backend"))
 from mylittleharness import __version__
 from mylittleharness.agent_roles import role_manifest as agent_role_manifest
 from mylittleharness.agent_roles import role_profile_for_id, roles_with_apply_authority
+from mylittleharness.checks import command_surface_manifest
 from mylittleharness.command_discovery import command_intent_registry, command_suggestions_for_intent
 from mylittleharness.inventory import EXPECTED_SPEC_NAMES
 from mylittleharness.routes import route_manifest, route_protocol_for_id
@@ -349,6 +350,7 @@ class PackageMetadataTests(unittest.TestCase):
         docs_readme = (ROOT / "docs/README.md").read_text(encoding="utf-8")
         command_surface = (ROOT / "docs/reference/command-surface.md").read_text(encoding="utf-8")
         security = (ROOT / "docs/security.md").read_text(encoding="utf-8")
+        layer_model = (ROOT / "docs/architecture/layer-model.md").read_text(encoding="utf-8")
         template = (ROOT / "src/mylittleharness/templates/operating-root/AGENTS.md").read_text(
             encoding="utf-8"
         )
@@ -379,6 +381,32 @@ class PackageMetadataTests(unittest.TestCase):
                 doc,
             )
         self.assertIn("The default command story is agent-neutral", command_surface)
+        for expected in (
+            "## Machine-Readable Audit Surface",
+            "`mylittleharness.command-surface.v1`",
+            "`read_write_class`",
+            "`apply_requirement`",
+            "`root_eligibility`",
+            "`write_path_posture`",
+            "`authority_risk`",
+            "`product-package-smoke`",
+        ):
+            self.assertIn(expected, command_surface)
+        for expected in (
+            "## Atomicity and Concurrency Boundary",
+            "atomic writes are not crash-proof multi-process transactions",
+            "work claims, handoff",
+            "packets, review tokens, route receipts",
+            "do not treat file replacement",
+        ):
+            self.assertIn(expected, security)
+        for expected in (
+            "machine-readable command-surface audit manifest",
+            "`command_surface` rows for read/write/apply/root/write-path posture",
+            "no hidden daemon authority",
+            "cache-truth authority",
+        ):
+            self.assertIn(expected, layer_model)
         self.assertIn("Core operation is agent-neutral", template)
 
     def test_release_readiness_docs_keep_publication_optional(self) -> None:
@@ -879,6 +907,39 @@ class PackageMetadataTests(unittest.TestCase):
         self.assertFalse(permission["apply"])
         self.assertIsInstance(permission["human_gate"]["allowed_decisions"], list)
         self.assertTrue(any(row["human_gate"]["required"] for row in roles["planner"]["permissions"]))
+
+    def test_command_surface_manifest_shape_is_package_stable(self) -> None:
+        rows = {row["surface_id"]: row for row in command_surface_manifest()}
+        self.assertEqual(
+            {
+                "read-only-status-navigation",
+                "explicit-dry-run-apply-rails",
+                "product-package-smoke",
+                "optional-runtime-helper",
+            },
+            set(rows),
+        )
+        for row in rows.values():
+            for key in (
+                "schema_version",
+                "surface_id",
+                "commands",
+                "read_write_class",
+                "apply_requirement",
+                "root_eligibility",
+                "write_path_posture",
+                "authority_risk",
+            ):
+                self.assertIn(key, row)
+            self.assertEqual("mylittleharness.command-surface.v1", row["schema_version"])
+            self.assertTrue(row["commands"])
+            self.assertIn("authority", row["authority_risk"])
+
+        self.assertIn("manifest --inspect", rows["read-only-status-navigation"]["commands"])
+        self.assertIn("writeback --dry-run|--apply", rows["explicit-dry-run-apply-rails"]["commands"])
+        self.assertIn("bootstrap --package-smoke", rows["product-package-smoke"]["commands"])
+        self.assertIn("temporary workspace outside the product root", rows["product-package-smoke"]["write_path_posture"])
+        self.assertIn("no hidden daemon authority", rows["optional-runtime-helper"]["authority_risk"])
 
     def test_command_discovery_registry_shape_is_package_stable(self) -> None:
         registry = {entry.intent_id: entry for entry in command_intent_registry()}

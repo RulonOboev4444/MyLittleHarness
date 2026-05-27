@@ -34,6 +34,21 @@ The authority stack is:
 If an advisory surface disagrees with repo-visible route files, trust the route
 files and rerun a source-bound check.
 
+## Atomicity and Concurrency Boundary
+
+MLH uses bounded file transactions, path-boundary checks, snapshots for selected
+existing-content repairs, and explicit dry-run/apply rails to reduce partial
+writes. These are local safety guardrails, not a distributed transaction system:
+atomic writes are not crash-proof multi-process transactions. A process crash,
+filesystem behavior, antivirus interference, or competing operator can still
+leave review work to do.
+
+Concurrency safety stays repo-visible and procedural. Use work claims, handoff
+packets, review tokens, route receipts, and final source checks to coordinate
+parallel work; do not treat file replacement, hook output, dashboard output,
+daemon state, generated cache, or JSON reports as a lock manager or fan-in
+approval.
+
 ## Session Helpers
 
 MLH can expose local helpers around the core workflow:

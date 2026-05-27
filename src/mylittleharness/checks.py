@@ -137,6 +137,113 @@ NONROUTE_PROJECT_MARKDOWN_EXEMPT_PREFIXES = (
 COMMAND_SURFACE_SENTINEL_COMMANDS = ("transition", "roadmap", "meta-feedback")
 COMMAND_SURFACE_PROBE_TIMEOUT_SECONDS = 5
 RETIRED_COMMAND_DOC_SURFACES = ("mirror", "research-prompt")
+COMMAND_SURFACE_SCHEMA_VERSION = "mylittleharness.command-surface.v1"
+COMMAND_SURFACE_ROWS: tuple[dict[str, object], ...] = (
+    {
+        "schema_version": COMMAND_SURFACE_SCHEMA_VERSION,
+        "surface_id": "read-only-status-navigation",
+        "commands": (
+            "check",
+            "check --deep",
+            "check --focus <area>",
+            "status",
+            "validate",
+            "audit-links",
+            "context-budget",
+            "doctor",
+            "dashboard --inspect",
+            "intelligence",
+            "manifest --inspect",
+            "suggest --intent",
+            "projection --inspect",
+            "snapshot --inspect",
+            "preflight",
+            "hooks --run",
+            "hooks --doctor",
+            "adapter --inspect",
+            "adapter --client-config",
+            "claim --status",
+            "handoff --status",
+            "approval-packet --status",
+            "closeout",
+            "evidence",
+            "review-token",
+            "semantic --inspect",
+            "semantic --evaluate",
+            "tasks --inspect",
+        ),
+        "read_write_class": "read-only-report",
+        "apply_requirement": "no --apply path for this report posture; any later mutation requires a separate reviewed dry-run/apply rail",
+        "root_eligibility": "any readable MLH root matching the command-specific root posture",
+        "write_path_posture": "writes no repo files, generated caches, package artifacts, hooks, Git state, user config, or workstation state",
+        "authority_risk": "advisory navigation/report data only and not authority; cannot approve lifecycle, archive, roadmap status, staging, commit, push, release, or provider routing",
+    },
+    {
+        "schema_version": COMMAND_SURFACE_SCHEMA_VERSION,
+        "surface_id": "explicit-dry-run-apply-rails",
+        "commands": (
+            "init --dry-run|--apply",
+            "attach --dry-run|--apply",
+            "detach --dry-run|--apply",
+            "repair --dry-run|--apply",
+            "migrate --dry-run|--apply",
+            "plan --dry-run|--apply",
+            "plan-cancel --dry-run|--apply",
+            "writeback --dry-run|--apply",
+            "transition --dry-run|--apply",
+            "roadmap --dry-run|--apply",
+            "memory-hygiene --dry-run|--apply",
+            "relationship-drift --dry-run|--apply",
+            "incubate --dry-run|--apply",
+            "incubation-reconcile --dry-run|--apply",
+            "intake --dry-run|--apply",
+            "research-import --dry-run|--apply",
+            "research-distill --dry-run|--apply",
+            "research-compare --dry-run|--apply",
+            "evidence --record --dry-run|--apply",
+            "claim --dry-run|--apply",
+            "handoff --dry-run|--apply",
+            "approval-packet --dry-run|--apply",
+            "meta-feedback --dry-run|--apply",
+            "projection --build|--rebuild|--delete|--warm-cache",
+            "hooks adapter --dry-run|--apply",
+            "hooks install --dry-run|--apply",
+            "adapter --install-client-config --dry-run|--apply",
+        ),
+        "read_write_class": "explicit-preview-then-write",
+        "apply_requirement": "dry-run is the reviewable preview; apply is explicit and command-owned, with source-hash or review-token guards where required",
+        "root_eligibility": "eligible live operating roots or explicitly supported command roots; product-source fixtures and archive roots are refused where unsafe",
+        "write_path_posture": "writes only command-owned route files, scaffold files, generated cache paths, or local config targets named by the reviewed rail",
+        "authority_risk": "apply writes evidence/state but still is not future authority and cannot approve future lifecycle decisions, archive, staging, commit, push, release, rollback, or provider routing",
+    },
+    {
+        "schema_version": COMMAND_SURFACE_SCHEMA_VERSION,
+        "surface_id": "product-package-smoke",
+        "commands": ("bootstrap --inspect", "bootstrap --package-smoke"),
+        "read_write_class": "product-verification",
+        "apply_requirement": "does not use --apply; package smoke is an explicit verification mode, not a lifecycle mutation rail",
+        "root_eligibility": "MyLittleHarness product source checkout for package smoke; readable root for bootstrap inspection",
+        "write_path_posture": "package smoke copies source to a temporary workspace outside the product root, creates an isolated venv without system site packages, and leaves no product-root build/dist/egg-info artifacts",
+        "authority_risk": "package/build success is verification evidence only and not authority; it does not publish, install globally, change PATH, write user config, add CI, stage, commit, push, release, or choose a license",
+    },
+    {
+        "schema_version": COMMAND_SURFACE_SCHEMA_VERSION,
+        "surface_id": "optional-runtime-helper",
+        "commands": (
+            "mlhd status",
+            "mlhd run-once --dry-run|--apply",
+            "mlhd start --dry-run|--apply",
+            "mlhd stop --dry-run|--apply",
+            "mlhd install --dry-run|--apply",
+            "mlhd uninstall --dry-run|--apply",
+        ),
+        "read_write_class": "optional-runtime-cache",
+        "apply_requirement": "runtime mutations require explicit dry-run/apply; status remains read-only",
+        "root_eligibility": "local MLH root with optional runtime cache boundary",
+        "write_path_posture": "writes only root-local disposable mlhd runtime/cache/autostart artifacts or generated projection refresh output",
+        "authority_risk": "no hidden daemon authority or provider gateway; runtime helpers cannot approve lifecycle movement, source truth, archive, Git, release, dispatcher work, or cache truth",
+    },
+)
 PRODUCT_DOC_COPY_DRIFT_SURFACES = (
     "README.md",
     "docs/README.md",
@@ -8125,6 +8232,43 @@ def _live_product_command_surface_findings(inventory: Inventory, state: Surface)
             state.rel_path,
         )
     ]
+
+
+def command_surface_manifest() -> tuple[dict[str, object], ...]:
+    return COMMAND_SURFACE_ROWS
+
+
+def command_surface_findings() -> list[Finding]:
+    findings: list[Finding] = []
+    for row in command_surface_manifest():
+        findings.append(
+            Finding(
+                "info",
+                "command-surface-entry",
+                (
+                    f"{row['surface_id']}: commands={list(row['commands'])}; "
+                    f"read_write_class={row['read_write_class']}; "
+                    f"apply_requirement={row['apply_requirement']}; "
+                    f"root_eligibility={row['root_eligibility']}; "
+                    f"write_path_posture={row['write_path_posture']}; "
+                    f"authority_risk={row['authority_risk']}"
+                ),
+                route_id="unclassified",
+            )
+        )
+    findings.append(
+        Finding(
+            "info",
+            "command-surface-boundary",
+            (
+                "command surface report names read/write/apply/root/write-path posture for auditability; "
+                "the manifest is protocol/report data only and cannot approve lifecycle movement, archive, "
+                "staging, commit, push, release, provider routing, or future mutations"
+            ),
+            route_id="unclassified",
+        )
+    )
+    return findings
 
 
 def _product_source_command_names(product_root: Path) -> set[str]:

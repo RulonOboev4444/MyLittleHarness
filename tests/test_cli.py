@@ -775,6 +775,17 @@ class CliTests(unittest.TestCase):
             roles = {row["role_id"]: row for row in payload["role_manifest"]}
             for role_id in ("intake-clerk", "planner", "coder", "verifier", "governor"):
                 self.assertIn(role_id, roles)
+            command_surface = {row["surface_id"]: row for row in payload["command_surface"]}
+            self.assertEqual("read-only-report", command_surface["read-only-status-navigation"]["read_write_class"])
+            self.assertIn("no --apply", command_surface["read-only-status-navigation"]["apply_requirement"])
+            self.assertIn("readable MLH root", command_surface["read-only-status-navigation"]["root_eligibility"])
+            self.assertIn("writes no repo files", command_surface["read-only-status-navigation"]["write_path_posture"])
+            self.assertEqual("explicit-preview-then-write", command_surface["explicit-dry-run-apply-rails"]["read_write_class"])
+            self.assertIn("dry-run", command_surface["explicit-dry-run-apply-rails"]["apply_requirement"])
+            self.assertIn("command-owned route files", command_surface["explicit-dry-run-apply-rails"]["write_path_posture"])
+            self.assertIn("bootstrap --package-smoke", command_surface["product-package-smoke"]["commands"])
+            self.assertIn("temporary workspace outside the product root", command_surface["product-package-smoke"]["write_path_posture"])
+            self.assertIn("no hidden daemon authority", command_surface["optional-runtime-helper"]["authority_risk"])
             coder = roles["coder"]
             for key in (
                 "permissions",
@@ -827,6 +838,8 @@ class CliTests(unittest.TestCase):
             self.assertIn("route-manifest-boundary", finding_codes)
             self.assertIn("agent-role-profile-entry", finding_codes)
             self.assertIn("agent-role-manifest-boundary", finding_codes)
+            self.assertIn("command-surface-entry", finding_codes)
+            self.assertIn("command-surface-boundary", finding_codes)
             state_finding = next(finding for finding in payload["findings"] if finding["route_id"] == "state")
             self.assertTrue(state_finding["finding_advisory"])
             self.assertFalse(state_finding["route_advisory"])

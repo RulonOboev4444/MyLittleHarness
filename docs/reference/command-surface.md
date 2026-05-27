@@ -64,6 +64,29 @@ only an explicit apply route writes repo-visible authority.
 Some navigation commands can report stale generated projection cache and suggest
 refresh commands. That suggestion is not cache truth or lifecycle approval.
 
+## Machine-Readable Audit Surface
+
+`manifest --inspect --json` includes a `command_surface` array with schema
+`mylittleharness.command-surface.v1`. Each row names the command family, the
+visible commands, `read_write_class`, `apply_requirement`, `root_eligibility`,
+`write_path_posture`, and `authority_risk`. The same data is rendered as
+`command-surface-entry` findings in text reports, so auditors can inspect the
+read/write/apply/root/write-path posture without scraping prose tables.
+
+Current command-surface rows are:
+
+| Surface id | Read/write class | Apply posture | Root posture | Write-path posture |
+| --- | --- | --- | --- | --- |
+| `read-only-status-navigation` | read-only report | no `--apply` path for this posture | any readable MLH root matching command posture | writes no repo files, generated caches, package artifacts, hooks, Git state, user config, or workstation state |
+| `explicit-dry-run-apply-rails` | explicit preview then write | dry-run is preview; apply is explicit and command-owned | eligible live operating roots or explicit command roots | writes only reviewed route files, scaffold files, generated cache paths, or local config targets |
+| `product-package-smoke` | product verification | no `--apply`; verification mode only | MyLittleHarness product source checkout | copies to a temporary workspace outside the product root and leaves no product-root build/dist/egg-info artifacts |
+| `optional-runtime-helper` | optional runtime cache | runtime mutations require dry-run/apply; status is read-only | local MLH root with runtime cache boundary | writes only root-local disposable mlhd runtime/cache/autostart artifacts or generated projection refresh output |
+
+The command-surface manifest is protocol/report data only. It can help review
+automation and release readiness, but it cannot approve lifecycle movement,
+archive, roadmap status, staging, commit, push, release, rollback, provider
+routing, or future mutations.
+
 When the intent asks for a context pack or adoption handoff, `suggest --intent`
 adds bootstrap pointers for any file-reading, shell-capable agent: read the
 operator contract, neutral or legacy workflow manifest, project state, roadmap,

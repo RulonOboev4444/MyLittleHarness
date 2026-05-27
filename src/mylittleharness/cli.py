@@ -32,6 +32,8 @@ from .checks import (
     attach_dry_run_findings,
     audit_link_findings,
     check_drift_findings,
+    command_surface_findings,
+    command_surface_manifest,
     context_budget_findings,
     doctor_findings,
     external_orchestrator_shell_preflight_findings,
@@ -409,13 +411,19 @@ def main(argv: list[str] | None = None) -> int:
     if command == "manifest":
         route_findings = _route_manifest_findings()
         role_findings = _agent_role_manifest_findings()
-        findings = [*route_findings, *role_findings]
+        command_surface_report_findings = command_surface_findings()
+        findings = [*route_findings, *role_findings, *command_surface_report_findings]
         result = _result_for(findings)
         report_name = "manifest --inspect"
-        sections = [("Route Manifest", route_findings), ("Role Profiles", role_findings)]
+        sections = [
+            ("Route Manifest", route_findings),
+            ("Role Profiles", role_findings),
+            ("Command Surface", command_surface_report_findings),
+        ]
         suggestions = _suggestions(command, findings)
         manifest_rows = route_manifest()
         role_rows = role_manifest()
+        command_surface_rows = command_surface_manifest()
         if args.json:
             emit_text(
                 _render_manifest_json_report(
@@ -428,6 +436,7 @@ def main(argv: list[str] | None = None) -> int:
                     sections,
                     manifest_rows,
                     role_rows,
+                    command_surface_rows,
                 )
             )
         else:
@@ -2038,9 +2047,11 @@ def _render_manifest_json_report(
     sections: list[tuple[str, list[Finding]]],
     route_rows: tuple[dict[str, object], ...],
     role_rows: tuple[dict[str, object], ...],
+    command_surface_rows: tuple[dict[str, object], ...],
 ) -> str:
     payload = json.loads(render_json_report(report_name, root, result, sources, findings, suggestions, sections, route_rows))
     payload["role_manifest"] = list(role_rows)
+    payload["command_surface"] = list(command_surface_rows)
     return json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=True)
 
 
