@@ -9,7 +9,7 @@ from .inventory import Inventory
 from .models import Finding
 from .parsing import parse_frontmatter
 from .reporting import RouteWriteEvidence
-from .root_boundary import source_path_boundary_violation
+from .root_boundary import root_relative_path_conflict, source_path_boundary_violation, windows_path_reference_reason
 
 
 DEFAULT_STATE_REL = "project/project-state.md"
@@ -256,6 +256,8 @@ def _required_target_resolution(inventory: Inventory, target: str) -> tuple[str 
         return None, "target is empty"
     if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", normalized) or normalized.startswith("mailto:"):
         return None, "target is external, not a root-relative route"
+    if windows_path_reference_reason(normalized, allow_uri=False, allow_rooted=False) is not None:
+        return normalized, "target is not a safe root-relative route"
     if _is_absolute_path(normalized):
         try:
             rel_path = Path(normalized).expanduser().resolve().relative_to(inventory.root.resolve()).as_posix()
@@ -310,9 +312,7 @@ def _is_absolute_path(value: str) -> bool:
 
 
 def _route_path_is_unsafe(rel_path: str) -> bool:
-    if not rel_path or rel_path.startswith(("/", "\\")) or _is_absolute_path(rel_path):
-        return True
-    return any(part in {"", ".", ".."} for part in Path(rel_path).parts)
+    return bool(root_relative_path_conflict(rel_path))
 
 
 def _frontmatter_key_line_from_text(text: str, key: str) -> int | None:

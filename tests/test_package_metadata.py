@@ -705,7 +705,7 @@ class PackageMetadataTests(unittest.TestCase):
             "claims, agent-run records, handoff packets, and session-scoped active work",
             "hooks are sensors, blockers, and context injectors",
             "dashboard and `mlhd` runtime surfaces are cockpit projections",
-            "dispatcher cannot start work until a handoff packet, active claim, and evidence path exist",
+            "dispatcher preflight cannot report launch-ready until a handoff packet, active non-stale claim, planned or recorded agent-run path",
         ):
             self.assertIn(expected, authority)
         for expected in (
@@ -914,7 +914,9 @@ class PackageMetadataTests(unittest.TestCase):
         self.assertEqual(
             {
                 "read-only-status-navigation",
+                "read-mostly-generated-cache-navigation",
                 "explicit-dry-run-apply-rails",
+                "direct-generated-cache-maintenance",
                 "product-package-smoke",
                 "optional-runtime-helper",
             },
@@ -934,10 +936,26 @@ class PackageMetadataTests(unittest.TestCase):
                 self.assertIn(key, row)
             self.assertEqual("mylittleharness.command-surface.v1", row["schema_version"])
             self.assertTrue(row["commands"])
-            self.assertIn("authority", row["authority_risk"])
+            self.assertTrue(
+                "authority" in row["authority_risk"] or "approve" in row["authority_risk"],
+                row["authority_risk"],
+            )
 
         self.assertIn("manifest --inspect", rows["read-only-status-navigation"]["commands"])
+        self.assertIn("intelligence", rows["read-mostly-generated-cache-navigation"]["commands"])
+        self.assertIn(
+            "disposable generated projection cache",
+            rows["read-mostly-generated-cache-navigation"]["write_path_posture"],
+        )
         self.assertIn("writeback --dry-run|--apply", rows["explicit-dry-run-apply-rails"]["commands"])
+        self.assertIn(
+            "projection --build|--rebuild|--delete|--warm-cache",
+            rows["direct-generated-cache-maintenance"]["commands"],
+        )
+        self.assertIn(
+            ".mylittleharness/generated/projection",
+            rows["direct-generated-cache-maintenance"]["write_path_posture"],
+        )
         self.assertIn("bootstrap --package-smoke", rows["product-package-smoke"]["commands"])
         self.assertIn("temporary workspace outside the product root", rows["product-package-smoke"]["write_path_posture"])
         self.assertIn("no hidden daemon authority", rows["optional-runtime-helper"]["authority_risk"])

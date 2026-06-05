@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .inventory import Inventory, Surface
 from .parsing import Frontmatter, extract_headings, extract_path_refs, parse_frontmatter
-from .root_boundary import source_path_boundary_violation
+from .root_boundary import source_path_boundary_violation, windows_path_reference_reason
 from .routes import classify_memory_route
 
 
@@ -37,6 +37,7 @@ HISTORICAL_LINK_CONTEXT_PREFIXES = (
     "project/verification/",
 )
 FRONTMATTER_RELATIONSHIP_FIELDS = {
+    "attachment_refs",
     "archived_plan",
     "archived_to",
     "covered_roadmap_items",
@@ -48,6 +49,7 @@ FRONTMATTER_RELATIONSHIP_FIELDS = {
     "rejected_by",
     "related_adr",
     "related_adrs",
+    "related_attachments",
     "related_decision",
     "related_decisions",
     "related_doc",
@@ -61,6 +63,7 @@ FRONTMATTER_RELATIONSHIP_FIELDS = {
     "related_specs",
     "related_verification",
     "source_incubation",
+    "source_attachments",
     "source_research",
     "source_roadmap",
     "split_from",
@@ -70,8 +73,11 @@ FRONTMATTER_RELATIONSHIP_FIELDS = {
     "target_artifacts",
 }
 ROADMAP_RELATIONSHIP_FIELDS = {
+    "attachment_refs",
     "source_research",
     "source_incubation",
+    "source_attachments",
+    "related_attachments",
     "related_specs",
     "related_plan",
     "archived_plan",
@@ -327,6 +333,9 @@ def resolve_link(root: Path, target: str, source_rel: str | None = None) -> Link
     path_part = clean.split("#", 1)[0]
     if not path_part:
         return LinkResolution("anchor", True)
+    unsafe_reason = windows_path_reference_reason(path_part, allow_uri=False, allow_rooted=False)
+    if unsafe_reason and unsafe_reason != "Windows drive-absolute path":
+        return LinkResolution("unsafe", False)
     base = _link_base(root, path_part, source_rel)
     if any(char in path_part for char in "*?[]{}<>"):
         patterns = _expand_brace_pattern(path_part)

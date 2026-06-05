@@ -21,6 +21,7 @@ from .projection_artifacts import (
 )
 from .projection_index import inspect_projection_index
 from .roadmap import roadmap_items_for_diagnostics
+from .reporting import command_action_report_dict
 from .root_boundary import PRODUCT_SOURCE_FIXTURE
 from .safe_commands import safe_item_id
 from .vcs import worktree_coordination_findings
@@ -60,6 +61,7 @@ def dashboard_sections(inventory: Inventory) -> list[tuple[str, list[Finding]]]:
 def dashboard_payload(inventory: Inventory, sections: list[tuple[str, list[Finding]]] | None = None) -> dict[str, object]:
     sections = dashboard_sections(inventory) if sections is None else sections
     findings = [finding for _section, section_findings in sections for finding in section_findings]
+    alert_findings = next((section_findings for section_name, section_findings in sections if section_name == "Alerts"), [])
     cache_posture = _cache_posture_payload(inventory)
     agent_packet = dashboard_agent_packet(inventory)
     accelerator_adoption = _accelerator_adoption_payload(inventory)
@@ -86,7 +88,7 @@ def dashboard_payload(inventory: Inventory, sections: list[tuple[str, list[Findi
         ),
         "nextLegalDryRun": _next_legal_dry_run_payload(inventory),
         "coordination": _coordination_payload(findings),
-        "alerts": _alert_payload(findings),
+        "alerts": _alert_payload(alert_findings),
         "sections": [
             {"name": name, "findings": [finding.to_dict() for finding in section_findings]}
             for name, section_findings in sections
@@ -161,7 +163,7 @@ def _lifecycle_findings(inventory: Inventory) -> list[Finding]:
             "dashboard-lifecycle",
             (
                 f"plan_status={_value(data, 'plan_status')}; active_plan={_value(data, 'active_plan')}; "
-                f"active_phase={_value(data, 'active_phase')}; phase_status={_value(data, 'phase_status')}; "
+                f"{_lifecycle_phase_summary(_lifecycle_payload(inventory))}; "
                 f"last_archived_plan={_value(data, 'last_archived_plan')}"
             ),
             source,
@@ -295,12 +297,55 @@ def _lifecycle_payload(inventory: Inventory) -> dict[str, object]:
         "operating_mode",
         "plan_status",
         "active_plan",
-        "active_phase",
-        "phase_status",
         "last_archived_plan",
         "product_source_root",
     )
-    return {key: data.get(key, "") for key in keys}
+    payload = {key: data.get(key, "") for key in keys}
+    payload.update(_lifecycle_phase_fields(data))
+    return payload
+
+
+def _lifecycle_active_plan_open(data: dict[str, object]) -> bool:
+    return str(data.get("plan_status") or "").strip().casefold() == "active" or bool(str(data.get("active_plan") or "").strip())
+
+
+def _lifecycle_phase_fields(data: dict[str, object]) -> dict[str, object]:
+    active_phase = str(data.get("active_phase") or "")
+    phase_status = str(data.get("phase_status") or "")
+    if _lifecycle_active_plan_open(data):
+        return {
+            "active_phase": active_phase,
+            "phase_status": phase_status,
+            "last_completed_phase": "",
+            "last_phase_status": "",
+        }
+    return {
+        "active_phase": "",
+        "phase_status": "",
+        "last_completed_phase": active_phase,
+        "last_phase_status": phase_status,
+    }
+
+
+def _agent_lifecycle_payload(data: dict[str, object]) -> dict[str, object]:
+    payload = {
+        "plan_status": str(data.get("plan_status") or ""),
+        "active_plan": str(data.get("active_plan") or ""),
+    }
+    payload.update(_lifecycle_phase_fields(data))
+    return payload
+
+
+def _lifecycle_phase_summary(lifecycle: dict[str, object]) -> str:
+    active_phase = str(lifecycle.get("active_phase") or "")
+    phase_status = str(lifecycle.get("phase_status") or "")
+    last_completed_phase = str(lifecycle.get("last_completed_phase") or "")
+    last_phase_status = str(lifecycle.get("last_phase_status") or "")
+    if active_phase or phase_status:
+        return f"active_phase={active_phase or '<none>'}; phase_status={phase_status or '<none>'}"
+    if last_completed_phase or last_phase_status:
+        return f"last_completed_phase={last_completed_phase or '<none>'}; last_phase_status={last_phase_status or '<none>'}"
+    return "active_phase=<none>; phase_status=<none>"
 
 
 def _roadmap_payload(inventory: Inventory) -> dict[str, object]:
@@ -408,6 +453,14 @@ def dashboard_agent_packet(inventory: Inventory) -> dict[str, object]:
     exact_verification = _exact_verification_payload()
     next_legal = _next_legal_dry_run_payload(inventory)
     authority_cards = _authority_cards_payload(inventory, next_legal)
+    recommended_commands = [
+        "mylittleharness --root <root> dashboard --inspect --json",
+        "mylittleharness --root <root> intelligence --query \"<task or route question>\"",
+        "mylittleharness --root <root> adapter --client-config --target mcp-read-projection",
+        "mylittleharness --root <root> adapter --install-client-config --target mcp-read-projection --dry-run",
+        _runtime_refresh_command(inventory),
+        "rg \"<exact symbol or route>\"",
+    ]
     return {
         "schema": "mylittleharness.dashboard-agent-packet.v1",
         "source_refs": [
@@ -424,13 +477,15 @@ def dashboard_agent_packet(inventory: Inventory) -> dict[str, object]:
             "project/roadmap.md",
             "project/implementation-plan.md when plan_status is active",
         ],
-        "recommendedCommands": [
-            "mylittleharness --root <root> dashboard --inspect --json",
-            "mylittleharness --root <root> intelligence --query \"<task or route question>\"",
-            "mylittleharness --root <root> adapter --client-config --target mcp-read-projection",
-            "mylittleharness --root <root> adapter --install-client-config --target mcp-read-projection --dry-run",
-            _runtime_refresh_command(inventory),
-            "rg \"<exact symbol or route>\"",
+        "recommendedCommands": recommended_commands,
+        "recommendedCommandActions": [
+            command_action_report_dict(
+                command,
+                source_code="dashboard-agent-packet",
+                source_field="recommendedCommands",
+                action_role="first-pass-command",
+            )
+            for command in recommended_commands
         ],
         "firstPassSequence": [
             "dashboard --inspect --json",
@@ -451,12 +506,7 @@ def dashboard_agent_packet(inventory: Inventory) -> dict[str, object]:
             agent_packet={"nextLegalDryRun": next_legal, "authorityCards": authority_cards},
             accelerator_adoption=adoption,
         ),
-        "lifecycle": {
-            "plan_status": str(data.get("plan_status") or ""),
-            "active_plan": str(data.get("active_plan") or ""),
-            "active_phase": str(data.get("active_phase") or ""),
-            "phase_status": str(data.get("phase_status") or ""),
-        },
+        "lifecycle": _agent_lifecycle_payload(data),
         "boundary": "agent packet is read-only navigation guidance and cannot approve lifecycle movement, repair, archive, staging, commit, or next-plan opening",
     }
 
@@ -488,14 +538,11 @@ def connect_readiness_packet(
         if isinstance(agent_packet, dict) and isinstance(agent_packet.get("authorityCards"), list)
         else _authority_cards_payload(inventory, next_legal)
     )
+    next_safe_command = _readiness_next_safe_command(next_legal, cache, repair_targets)
+    recovery_command = _readiness_recovery_command(cache, repair_targets)
     return {
         "schema": CONNECT_READINESS_SCHEMA,
-        "lifecycle": {
-            "plan_status": plan_status,
-            "active_plan": str(data.get("active_plan") or ""),
-            "active_phase": str(data.get("active_phase") or ""),
-            "phase_status": str(data.get("phase_status") or ""),
-        },
+        "lifecycle": _agent_lifecycle_payload(data),
         "hooks": {
             "firstContactCommand": str(adoption.get("firstContactHookCommand") or "mylittleharness --root <root> hooks --run session-start --json"),
             "codexAdapterDryRun": str(adoption.get("codexHookAdapterCommand") or "mylittleharness --root <root> hooks adapter --client codex --dry-run --scope project"),
@@ -510,7 +557,19 @@ def connect_readiness_packet(
             "artifacts": _component_status(components, "artifacts"),
             "sqlite_index": _component_status(components, "sqlite_index"),
             "selfHealCommand": str(cache.get("self_heal_command") or "mylittleharness --root <root> projection --warm-cache --target all"),
+            "selfHealAction": command_action_report_dict(
+                str(cache.get("self_heal_command") or "mylittleharness --root <root> projection --warm-cache --target all"),
+                source_code="connect-readiness-cache",
+                source_field="cache.selfHealCommand",
+                action_role="cache-recovery",
+            ),
             "manualRecoveryCommand": str(cache.get("manual_recovery_command") or "mylittleharness --root <root> projection --warm-cache --target all"),
+            "manualRecoveryAction": command_action_report_dict(
+                str(cache.get("manual_recovery_command") or "mylittleharness --root <root> projection --warm-cache --target all"),
+                source_code="connect-readiness-cache",
+                source_field="cache.manualRecoveryCommand",
+                action_role="cache-recovery",
+            ),
             "readOnlyPayload": cache.get("read_only") is True,
             "readOnlySurfacesExecuteRefresh": cache.get("read_only_surfaces_execute_refresh") is True,
             "displayedCommandsOnly": cache.get("displayed_commands_only") is True,
@@ -530,6 +589,12 @@ def connect_readiness_packet(
             "dirtyCount": int(mlhd.get("dirty_count") or 0),
             "changedPathCount": int(mlhd.get("changed_path_count") or 0),
             "nextSafeCommand": str(mlhd.get("next_safe_command") or "mylittleharness --root <root> mlhd run-once --dry-run"),
+            "nextSafeAction": command_action_report_dict(
+                str(mlhd.get("next_safe_command") or "mylittleharness --root <root> mlhd run-once --dry-run"),
+                source_code="connect-readiness-mlhd",
+                source_field="mlhd.nextSafeCommand",
+                action_role="runtime-next-safe",
+            ),
         },
         "contextMemory": {
             "status": str(context_memory.get("status") or "unknown"),
@@ -537,6 +602,12 @@ def connect_readiness_packet(
             "capsuleId": str(context_memory.get("capsule_id") or ""),
             "sourceRefCount": int(context_memory.get("source_ref_count") or 0),
             "nextSafeCommand": _context_memory_next_safe_command(inventory, context_memory),
+            "nextSafeAction": command_action_report_dict(
+                _context_memory_next_safe_command(inventory, context_memory),
+                source_code="connect-readiness-context-memory",
+                source_field="contextMemory.nextSafeCommand",
+                action_role="context-memory-next-safe",
+            ),
         },
         "docs": docmap,
         "repairTargets": repair_targets,
@@ -544,10 +615,28 @@ def connect_readiness_packet(
         "writeback": {
             "requiredWhenPlanStatusActive": plan_status.casefold() == "active",
             "dryRunCommand": str(next_legal.get("command") or ""),
+            "dryRunAction": command_action_report_dict(
+                str(next_legal.get("command") or "mylittleharness --root <root> check"),
+                source_code="connect-readiness-writeback",
+                source_field="writeback.dryRunCommand",
+                action_role="writeback-dry-run",
+            ),
             "reason": str(next_legal.get("reason") or ""),
         },
-        "nextSafeCommand": _readiness_next_safe_command(next_legal, cache, repair_targets),
-        "recoveryCommand": _readiness_recovery_command(cache, repair_targets),
+        "nextSafeCommand": next_safe_command,
+        "nextSafeAction": command_action_report_dict(
+            next_safe_command,
+            source_code="connect-readiness",
+            source_field="nextSafeCommand",
+            action_role="readiness-next-safe",
+        ),
+        "recoveryCommand": recovery_command,
+        "recoveryAction": command_action_report_dict(
+            recovery_command,
+            source_code="connect-readiness",
+            source_field="recoveryCommand",
+            action_role="readiness-recovery",
+        ),
         "boundary": (
             "connect readiness is an LLM-compact action packet only; it cannot approve lifecycle movement, repair, "
             "archive, roadmap status, staging, commit, push, release, provider routing, source mutation, or cache truth"
@@ -572,8 +661,8 @@ def connect_readiness_findings(inventory: Inventory, code_prefix: str = "connect
             f"{code_prefix}-action-packet",
             (
                 "compact action packet: "
-                f"plan_status={lifecycle['plan_status'] or '<none>'}; active_phase={lifecycle['active_phase'] or '<none>'}; "
-                f"phase_status={lifecycle['phase_status'] or '<none>'}; hooks={hooks['projectHookStatus']}; "
+                f"plan_status={lifecycle['plan_status'] or '<none>'}; {_lifecycle_phase_summary(lifecycle)}; "
+                f"hooks={hooks['projectHookStatus']}; "
                 f"mcp={mcp['status']}; cache artifacts={cache['artifacts']}; sqlite_index={cache['sqlite_index']}; "
                 f"mlhd={mlhd['controlStatus']}; dirty_count={mlhd['dirtyCount']}; "
                 f"context_memory={context_memory['status']}; "
@@ -716,17 +805,48 @@ def _authority_cards_finding(inventory: Inventory, code_prefix: str) -> Finding:
 
 def _accelerator_adoption_payload(inventory: Inventory) -> dict[str, object]:
     runtime_refresh_allowed = _runtime_refresh_allowed(inventory)
+    mlhd_refresh_command = MLHD_RUN_ONCE_APPLY_COMMAND if runtime_refresh_allowed else ""
+    codex_hook_adapter_command = "mylittleharness --root <root> hooks adapter --client codex --dry-run --scope project"
+    first_contact_hook_command = "mylittleharness --root <root> hooks --run session-start --json"
     return {
         "schema": "mylittleharness.agent-accelerator-adoption.v1",
         "dashboardPacketAvailable": True,
         "mcp": codex_mcp_adoption_payload(inventory),
         "mcpToolCoverage": _mcp_tool_coverage_payload(),
-        "firstContactHookCommand": "mylittleharness --root <root> hooks --run session-start --json",
-        "codexHookAdapterCommand": "mylittleharness --root <root> hooks adapter --client codex --dry-run --scope project",
-        "mlhdRefreshCommand": MLHD_RUN_ONCE_APPLY_COMMAND if runtime_refresh_allowed else "",
+        "firstContactHookCommand": first_contact_hook_command,
+        "firstContactHookAction": command_action_report_dict(
+            first_contact_hook_command,
+            source_code="accelerator-adoption",
+            source_field="firstContactHookCommand",
+            action_role="first-contact-hook",
+        ),
+        "codexHookAdapterCommand": codex_hook_adapter_command,
+        "codexHookAdapterAction": command_action_report_dict(
+            codex_hook_adapter_command,
+            source_code="accelerator-adoption",
+            source_field="codexHookAdapterCommand",
+            action_role="hook-adapter-dry-run",
+        ),
+        "mlhdRefreshCommand": mlhd_refresh_command,
+        "mlhdRefreshAction": (
+            command_action_report_dict(
+                mlhd_refresh_command,
+                source_code="accelerator-adoption",
+                source_field="mlhdRefreshCommand",
+                action_role="runtime-refresh",
+            )
+            if mlhd_refresh_command
+            else {}
+        ),
         "runtimeRefreshAllowed": runtime_refresh_allowed,
         "runtimeRefreshRefusalReason": "" if runtime_refresh_allowed else "product-source roots refuse mlhd runtime writes",
         "projectionWarmCacheCommand": PROJECTION_CACHE_MANUAL_RECOVERY_COMMAND,
+        "projectionWarmCacheAction": command_action_report_dict(
+            PROJECTION_CACHE_MANUAL_RECOVERY_COMMAND,
+            source_code="accelerator-adoption",
+            source_field="projectionWarmCacheCommand",
+            action_role="projection-warm-cache-recovery",
+        ),
         "exactVerification": _exact_verification_payload(),
         "rgVerificationRequired": True,
         "sequence": [

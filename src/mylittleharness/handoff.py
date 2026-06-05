@@ -15,7 +15,7 @@ from .evidence import AGENT_RUN_SCHEMA, AGENT_RUNS_DIR_REL
 from .inventory import Inventory
 from .models import Finding
 from .parsing import parse_frontmatter
-from .root_boundary import source_path_boundary_violation
+from .root_boundary import record_id_conflict, root_relative_path_conflict, source_path_boundary_violation
 
 
 HANDOFF_PACKET_SCHEMA = "mylittleharness.handoff-packet.v1"
@@ -28,19 +28,47 @@ HANDOFF_PACKET_REF_LISTS = ("approval_packet_refs",)
 HANDOFF_WORKER_FORBIDDEN_ROUTES = {
     "attach",
     "detach",
+    "git",
     "incubate",
     "init",
     "memory-hygiene",
     "meta-feedback",
+    "provider",
     "plan",
     "repair",
     "roadmap",
     "transition",
     "writeback",
 }
+SYMPHONY_QUEUE_DIR_REL = "project/symphony/queue"
+SYMPHONY_QUEUE_READY_STATES = {
+    "assigned",
+    "assigned_to_worker",
+    "pending",
+    "queued",
+    "ready",
+    "todo",
+}
+SYMPHONY_QUEUE_BLOCKED_STATES = {
+    "blocked",
+    "paused",
+    "waiting",
+}
+SYMPHONY_QUEUE_TERMINAL_STATES = {
+    "cancelled",
+    "canceled",
+    "closed",
+    "complete",
+    "completed",
+    "done",
+    "failed",
+    "skipped",
+    "succeeded",
+    "terminal",
+}
 DISPATCHER_LAUNCH_REQUIRED_MESSAGE = (
     "dispatcher cannot start work without a repo-visible handoff packet, compatible active claim, "
-    "and planned agent-run evidence path"
+    "planned agent-run evidence path, and ready Symphony queue item with terminal upstream blockers"
 )
 
 
@@ -365,13 +393,22 @@ def _dispatcher_packet_findings(root: Path, rel_path: str, data: dict[str, objec
         blockers.append("role_id is missing")
     elif role_profile_for_id(role_id) is None:
         blockers.append(f"role_id is not in the advisory role manifest: {role_id}")
+    forbidden_allowed_routes = _forbidden_allowed_routes(_json_list(data.get("allowed_routes")))
+    if forbidden_allowed_routes:
+        blockers.append(f"handoff allows lifecycle/provider-authority routes: {', '.join(forbidden_allowed_routes)}")
 
     claim_findings, claim_blockers = _dispatcher_claim_findings(root, data, rel_path, code_prefix)
     evidence_findings, evidence_blockers = _dispatcher_evidence_findings(root, data, rel_path, code_prefix)
+    queue_findings, queue_blockers = _dispatcher_queue_findings(root, data, rel_path, code_prefix)
+    scope_findings, scope_blockers = _dispatcher_scope_conflict_findings(root, data, rel_path, code_prefix)
     findings.extend(claim_findings)
     findings.extend(evidence_findings)
+    findings.extend(queue_findings)
+    findings.extend(scope_findings)
     blockers.extend(claim_blockers)
     blockers.extend(evidence_blockers)
+    blockers.extend(queue_blockers)
+    blockers.extend(scope_blockers)
 
     if blockers:
         findings.append(
@@ -393,7 +430,8 @@ def _dispatcher_packet_findings(root: Path, rel_path: str, data: dict[str, objec
             f"{code_prefix}-ready",
             (
                 f"handoff_id={handoff_id}; worker_id={worker_id}; role_id={role_id}; execution_slice={execution_slice}; "
-                "repo-visible handoff, compatible active claim, and planned/recorded agent-run evidence path are present; "
+                "repo-visible handoff, compatible active claim, planned/recorded agent-run evidence path, "
+                "non-conflicting dispatch scope, and ready queue dependencies are present; "
                 "this read-only status report did not start a worker"
             ),
             rel_path,
@@ -474,6 +512,301 @@ def _dispatcher_claim_record_blockers(handoff_data: dict[str, object], claim_dat
     if write_scope and claimed_paths and not any(_paths_overlap(scope, claimed) for scope in write_scope for claimed in claimed_paths):
         blockers.append("claim claimed_paths do not overlap handoff write_scope")
     return blockers
+
+
+def _dispatcher_queue_findings(root: Path, data: dict[str, object], rel_path: str, code_prefix: str) -> tuple[list[Finding], list[str]]:
+    findings: list[Finding] = []
+    blockers: list[str] = []
+    directory = root / SYMPHONY_QUEUE_DIR_REL
+    if not directory.exists() or not directory.is_dir():
+        findings.append(
+            Finding(
+                "warn",
+                f"{code_prefix}-queue-missing",
+                f"no Symphony queue item directory exists at {SYMPHONY_QUEUE_DIR_REL}; dispatch preflight requires repo-visible queue readiness",
+                rel_path,
+            )
+        )
+        return findings, ["no ready Symphony queue item is repo-visible"]
+
+    records, warnings = _dispatcher_queue_records(root, code_prefix)
+    findings.extend(warnings)
+    if not records:
+        findings.append(Finding("warn", f"{code_prefix}-queue-missing", "no readable Symphony queue item records were found", rel_path))
+        return findings, ["no readable Symphony queue item is repo-visible"]
+
+    current_by_key = _dispatcher_queue_current_item_index(records)
+    matches = _dispatcher_queue_matching_records(records, rel_path, data)
+    if not matches:
+        findings.append(
+            Finding(
+                "warn",
+                f"{code_prefix}-queue-unmatched",
+                "no Symphony queue item references this handoff/claim/agent-run contract; dispatch preflight remains refused",
+                rel_path,
+            )
+        )
+        return findings, ["no Symphony queue item matches the handoff contract"]
+
+    ready_count = 0
+    for queue_rel, queue_data in matches:
+        item_blockers = _dispatcher_queue_item_blockers(root, current_by_key, queue_rel, queue_data)
+        if item_blockers:
+            blockers.extend(f"{queue_rel}: {blocker}" for blocker in item_blockers)
+            findings.append(
+                Finding(
+                    "warn",
+                    f"{code_prefix}-queue-not-ready",
+                    f"queue item is not dispatch-ready: {'; '.join(item_blockers)}",
+                    queue_rel,
+                )
+            )
+            continue
+        ready_count += 1
+        findings.append(
+            Finding(
+                "info",
+                f"{code_prefix}-queue-ready",
+                "queue item is dispatch-ready from current repo-visible state; embedded blocked_by snapshots are not authority",
+                queue_rel,
+            )
+        )
+
+    if ready_count:
+        return findings, []
+    return findings, blockers or ["no matched Symphony queue item passed readiness"]
+
+
+def _dispatcher_queue_records(root: Path, code_prefix: str) -> tuple[list[tuple[str, dict[str, object]]], list[Finding]]:
+    records: list[tuple[str, dict[str, object]]] = []
+    findings: list[Finding] = []
+    for path in sorted((root / SYMPHONY_QUEUE_DIR_REL).glob("*.json")):
+        rel_path = _to_rel_path(root, path)
+        if path.is_symlink() or not path.is_file():
+            findings.append(Finding("warn", f"{code_prefix}-queue-malformed", "queue item path is not a regular file", rel_path))
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            findings.append(Finding("warn", f"{code_prefix}-queue-malformed", f"queue item could not be read as JSON: {exc}", rel_path))
+            continue
+        if not isinstance(data, dict):
+            findings.append(Finding("warn", f"{code_prefix}-queue-malformed", "queue item JSON root must be an object", rel_path))
+            continue
+        records.append((rel_path, data))
+    return records, findings
+
+
+def _dispatcher_queue_matching_records(
+    records: list[tuple[str, dict[str, object]]],
+    handoff_rel: str,
+    handoff_data: dict[str, object],
+) -> list[tuple[str, dict[str, object]]]:
+    handoff_id = str(handoff_data.get("handoff_id") or Path(handoff_rel).stem).strip()
+    worker_id = str(handoff_data.get("worker_id") or "").strip()
+    execution_slice = str(handoff_data.get("execution_slice") or "").strip()
+    handoff_refs = {handoff_rel, _normalize_ref(handoff_rel), handoff_id}
+    claim_refs = set(_json_list(handoff_data.get("claim_refs")))
+    evidence_refs = set(_json_list(handoff_data.get("evidence_refs")))
+    matches: list[tuple[str, dict[str, object]]] = []
+    for queue_rel, queue_data in records:
+        queue_refs = set(_dispatcher_queue_ref_values(queue_rel, queue_data))
+        if handoff_refs.intersection(queue_refs):
+            matches.append((queue_rel, queue_data))
+            continue
+        if claim_refs.intersection(queue_refs) or evidence_refs.intersection(queue_refs):
+            matches.append((queue_rel, queue_data))
+            continue
+        queue_worker = str(queue_data.get("assigned_to_worker") or queue_data.get("worker_id") or "").strip()
+        queue_slice = str(queue_data.get("execution_slice") or queue_data.get("slice") or "").strip()
+        if worker_id and execution_slice and queue_worker == worker_id and queue_slice == execution_slice:
+            matches.append((queue_rel, queue_data))
+    return matches
+
+
+def _dispatcher_queue_ref_values(rel_path: str, data: dict[str, object]) -> tuple[str, ...]:
+    values: list[str] = [rel_path, Path(rel_path).stem]
+    for field in (
+        "id",
+        "identifier",
+        "queue_item_id",
+        "item_id",
+        "handoff_id",
+        "handoff_ref",
+        "handoff",
+        "claim_ref",
+        "agent_run_ref",
+        "evidence_ref",
+        "execution_slice",
+    ):
+        value = data.get(field)
+        if isinstance(value, str) and value.strip():
+            values.append(_normalize_ref(value))
+    for field in ("handoff_refs", "claim_refs", "agent_run_refs", "evidence_refs"):
+        values.extend(_normalize_ref(value) for value in _json_list(data.get(field)))
+    return tuple(dict.fromkeys(value for value in values if value))
+
+
+def _dispatcher_queue_current_item_index(records: list[tuple[str, dict[str, object]]]) -> dict[str, tuple[str, dict[str, object]]]:
+    current_by_key: dict[str, tuple[str, dict[str, object]]] = {}
+    for rel_path, data in records:
+        for value in _dispatcher_queue_ref_values(rel_path, data):
+            key = _dispatcher_queue_key(value)
+            if key:
+                current_by_key.setdefault(key, (rel_path, data))
+    return current_by_key
+
+
+def _dispatcher_queue_item_blockers(
+    root: Path,
+    current_by_key: dict[str, tuple[str, dict[str, object]]],
+    rel_path: str,
+    data: dict[str, object],
+) -> list[str]:
+    blockers: list[str] = []
+    state = _dispatcher_queue_state(data)
+    if state in SYMPHONY_QUEUE_BLOCKED_STATES:
+        blockers.append(f"queue state is blocked: {state}")
+    elif state in SYMPHONY_QUEUE_TERMINAL_STATES:
+        blockers.append(f"queue state is already terminal: {state}")
+    elif state and state not in SYMPHONY_QUEUE_READY_STATES:
+        blockers.append(f"queue state is not dispatch-ready: {state}")
+    assigned = data.get("assigned_to_worker")
+    if assigned is False or str(assigned).strip().casefold() in {"false", "none", "null", "unassigned"}:
+        blockers.append("queue item is not assigned to a worker")
+    planning_reliance = str(data.get("planning_reliance") or "").strip().casefold()
+    if planning_reliance == "blocked":
+        blockers.append("planning_reliance is blocked")
+    for dependency in _dispatcher_queue_blocked_by_items(data.get("blocked_by")):
+        current = _dispatcher_queue_resolve_dependency(root, current_by_key, dependency)
+        label = _dispatcher_queue_dependency_label(dependency)
+        if current is None:
+            blockers.append(f"blocked_by dependency {label} is unresolved")
+            continue
+        current_rel, current_data = current
+        current_state = _dispatcher_queue_state(current_data)
+        if current_state not in SYMPHONY_QUEUE_TERMINAL_STATES:
+            blockers.append(f"blocked_by dependency {label} resolves to non-terminal state {current_state or '<missing>'} from {current_rel}")
+    return blockers
+
+
+def _dispatcher_queue_blocked_by_items(value: object) -> tuple[dict[str, object], ...]:
+    if isinstance(value, list):
+        blockers: list[dict[str, object]] = []
+        for item in value:
+            if isinstance(item, dict):
+                blockers.append(dict(item))
+            elif str(item).strip():
+                blockers.append({"id": str(item).strip()})
+        return tuple(blockers)
+    if isinstance(value, dict):
+        return (dict(value),)
+    if isinstance(value, str) and value.strip():
+        return ({"id": value.strip()},)
+    return ()
+
+
+def _dispatcher_queue_resolve_dependency(
+    root: Path,
+    current_by_key: dict[str, tuple[str, dict[str, object]]],
+    dependency: dict[str, object],
+) -> tuple[str, dict[str, object]] | None:
+    for field in ("id", "identifier", "queue_item_id", "item_id", "path", "ref", "url"):
+        value = dependency.get(field)
+        key = _dispatcher_queue_key(value)
+        if key and key in current_by_key:
+            return current_by_key[key]
+        rel = _dispatcher_queue_ref_to_rel(root, value)
+        if rel and rel in current_by_key:
+            return current_by_key[rel]
+    return None
+
+
+def _dispatcher_queue_ref_to_rel(root: Path, value: object) -> str:
+    text = str(value or "").replace("\\", "/").strip()
+    if not text or "://" in text:
+        return ""
+    while text.startswith("./"):
+        text = text[2:]
+    conflict = root_relative_path_conflict(text)
+    if conflict:
+        return ""
+    path = Path(text)
+    if path.is_absolute():
+        try:
+            return path.resolve().relative_to(root.resolve()).as_posix().casefold()
+        except (OSError, RuntimeError, ValueError):
+            return ""
+    return text.strip("/").casefold()
+
+
+def _dispatcher_queue_key(value: object) -> str:
+    return str(value or "").replace("\\", "/").strip().strip("/").casefold()
+
+
+def _dispatcher_queue_state(data: dict[str, object]) -> str:
+    return str(data.get("state") or data.get("status") or "").strip().casefold()
+
+
+def _dispatcher_queue_dependency_label(dependency: dict[str, object]) -> str:
+    for field in ("id", "identifier", "queue_item_id", "item_id", "path", "ref", "url"):
+        value = str(dependency.get(field) or "").strip()
+        if value:
+            return f"{field}={value}"
+    return "<unlabeled>"
+
+
+def _dispatcher_scope_conflict_findings(root: Path, data: dict[str, object], rel_path: str, code_prefix: str) -> tuple[list[Finding], list[str]]:
+    findings: list[Finding] = []
+    blockers: list[str] = []
+    write_scope = _json_list(data.get("write_scope"))
+    claim_refs = set(_normalize_ref(ref) for ref in _json_list(data.get("claim_refs")))
+    if not write_scope:
+        return findings, ["handoff write_scope is missing"]
+    directory = root / WORK_CLAIMS_DIR_REL
+    if not directory.exists() or not directory.is_dir():
+        return findings, blockers
+    for path in sorted(directory.glob("*.json")):
+        claim_rel = _to_rel_path(root, path)
+        if claim_rel in claim_refs:
+            continue
+        try:
+            claim_data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(claim_data, dict):
+            continue
+        if claim_data.get("schema") != WORK_CLAIM_SCHEMA or claim_data.get("record_type") != "work-claim":
+            continue
+        if str(claim_data.get("status") or "").strip() != "active":
+            continue
+        claim_kind = str(claim_data.get("claim_kind") or "").strip()
+        if claim_kind not in {"write", "lifecycle", "route", "path", "resource", "port", "database", "external_service"}:
+            continue
+        claimed_paths = _json_list(claim_data.get("claimed_paths"))
+        overlap = next((f"{scope}<->{claimed}" for scope in write_scope for claimed in claimed_paths if _paths_overlap(scope, claimed)), "")
+        if not overlap:
+            continue
+        blockers.append(f"overlapping active claim {claim_rel}: {overlap}")
+        findings.append(
+            Finding(
+                "warn",
+                f"{code_prefix}-scope-conflict",
+                f"handoff write_scope conflicts with another active exclusive work claim: {overlap}; release or narrow the claim before dispatch",
+                claim_rel,
+            )
+        )
+    return findings, blockers
+
+
+def _forbidden_allowed_routes(routes: tuple[str, ...]) -> tuple[str, ...]:
+    forbidden: list[str] = []
+    for route in routes:
+        normalized = route.strip().casefold()
+        command = normalized.split()[0] if normalized.split() else normalized
+        if command in HANDOFF_WORKER_FORBIDDEN_ROUTES or "--apply" in normalized or "archive" in normalized:
+            forbidden.append(route)
+    return tuple(dict.fromkeys(forbidden))
 
 
 def _dispatcher_evidence_findings(root: Path, data: dict[str, object], rel_path: str, code_prefix: str) -> tuple[list[Finding], list[str]]:
@@ -562,6 +895,8 @@ def _request_findings(inventory: Inventory, request: HandoffPacketRequest, *, ap
             findings.append(Finding("error", "handoff-packet-refused", "--handoff-id is required"))
         elif not ID_RE.match(request.handoff_id):
             findings.append(Finding("error", "handoff-packet-refused", "--handoff-id may contain only letters, digits, dot, underscore, or dash"))
+        elif record_id_conflict(request.handoff_id):
+            findings.append(Finding("error", "handoff-packet-refused", f"--handoff-id {record_id_conflict(request.handoff_id)}"))
         if not request.accepted_by:
             findings.append(Finding("error", "handoff-packet-refused", "--accepted-by is required for --action accept"))
         if request.handoff_id:
@@ -592,6 +927,8 @@ def _request_findings(inventory: Inventory, request: HandoffPacketRequest, *, ap
             findings.append(Finding("error", "handoff-packet-refused", f"{field} is required"))
     if request.handoff_id and not ID_RE.match(request.handoff_id):
         findings.append(Finding("error", "handoff-packet-refused", "--handoff-id may contain only letters, digits, dot, underscore, or dash"))
+    elif request.handoff_id and record_id_conflict(request.handoff_id):
+        findings.append(Finding("error", "handoff-packet-refused", f"--handoff-id {record_id_conflict(request.handoff_id)}"))
     if not request.allowed_routes:
         findings.append(Finding("error", "handoff-packet-refused", "--allowed-route must be supplied at least once"))
     if not request.write_scope:
@@ -604,7 +941,7 @@ def _request_findings(inventory: Inventory, request: HandoffPacketRequest, *, ap
         findings.append(Finding("error", "handoff-packet-refused", "--evidence-ref must be supplied at least once"))
     if not request.claim_refs:
         findings.append(Finding("error", "handoff-packet-refused", "--claim-ref must be supplied at least once"))
-    forbidden_routes = sorted(route for route in request.allowed_routes if route in HANDOFF_WORKER_FORBIDDEN_ROUTES)
+    forbidden_routes = sorted(_forbidden_allowed_routes(request.allowed_routes))
     if forbidden_routes:
         findings.append(
             Finding(
@@ -646,6 +983,8 @@ def _handoff_packet_metadata_findings(data: dict[str, object], rel_path: str, co
     handoff_id = str(data.get("handoff_id") or "").strip()
     if handoff_id and not ID_RE.match(handoff_id):
         findings.append(Finding("warn", f"{code_prefix}-malformed", "handoff packet handoff_id may contain only letters, digits, dot, underscore, or dash", rel_path))
+    elif handoff_id and record_id_conflict(handoff_id):
+        findings.append(Finding("warn", f"{code_prefix}-malformed", f"handoff packet handoff_id {record_id_conflict(handoff_id)}", rel_path))
     status = str(data.get("status") or "").strip()
     if status and status not in HANDOFF_PACKET_STATUSES:
         findings.append(Finding("warn", f"{code_prefix}-malformed", f"handoff packet status is unsupported: {status}", rel_path))
@@ -904,14 +1243,7 @@ def _json_list(value: object) -> tuple[str, ...]:
 
 
 def _root_relative_path_conflict(rel_path: str) -> str:
-    normalized = _normalize_ref(rel_path)
-    if not normalized:
-        return "must be a non-empty root-relative path"
-    if re.match(r"^[A-Za-z]:[\\/]", normalized) or normalized.startswith("/"):
-        return "must be root-relative, not absolute"
-    if any(part in {"..", ".", ""} for part in normalized.split("/")):
-        return "must not contain parent traversal, current-directory, or empty path segments"
-    return ""
+    return root_relative_path_conflict(_normalize_ref(rel_path))
 
 
 def _normalize_ref(value: str) -> str:

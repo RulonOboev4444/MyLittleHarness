@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from .atomic_files import AtomicFileWrite, FileTransactionError, apply_file_transaction
 from .inventory import Inventory
 from .models import Finding
+from .root_boundary import record_id_conflict, root_relative_path_conflict
 
 
 APPROVAL_PACKET_SCHEMA = "mylittleharness.approval-packet.v1"
@@ -144,6 +145,8 @@ def _request_findings(inventory: Inventory, request: ApprovalPacketRequest, *, a
             findings.append(Finding("error", "approval-packet-refused", f"{field} is required"))
     if request.approval_id and not ID_RE.match(request.approval_id):
         findings.append(Finding("error", "approval-packet-refused", "--approval-id may contain only letters, digits, dot, underscore, or dash"))
+    elif request.approval_id and record_id_conflict(request.approval_id):
+        findings.append(Finding("error", "approval-packet-refused", f"--approval-id {record_id_conflict(request.approval_id)}"))
     if request.status not in APPROVAL_STATUSES:
         findings.append(Finding("error", "approval-packet-refused", f"--status must be one of {', '.join(sorted(APPROVAL_STATUSES))}"))
     if not request.input_refs:
@@ -272,14 +275,7 @@ def _tuple_values(values: object, *, path_like: bool = True) -> tuple[str, ...]:
 
 
 def _root_relative_path_conflict(rel_path: str) -> str:
-    normalized = _normalize_ref(rel_path)
-    if not normalized:
-        return "must be a non-empty root-relative path"
-    if re.match(r"^[A-Za-z]:[\\/]", normalized) or normalized.startswith("/"):
-        return "must be root-relative, not absolute"
-    if any(part in {"..", ".", ""} for part in normalized.split("/")):
-        return "must not contain parent traversal, current-directory, or empty path segments"
-    return ""
+    return root_relative_path_conflict(_normalize_ref(rel_path))
 
 
 def _normalize_ref(value: str) -> str:

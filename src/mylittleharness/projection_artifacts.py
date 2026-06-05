@@ -553,6 +553,9 @@ def projection_cache_posture_payload(
         "schema": "mylittleharness.projection-cache-posture.v1",
         "read_only": True,
         "read_only_surfaces_execute_refresh": False,
+        "navigation_surfaces_may_refresh_generated_cache": True,
+        "navigation_refresh_write_class": "disposable-generated-cache-only",
+        "navigation_refresh_boundary": ARTIFACT_DIR_REL,
         "displayed_commands_only": True,
         "authority": "repo-visible source files and in-memory projection remain authoritative",
         "refreshable_by_adapter": False,
@@ -586,8 +589,23 @@ def _cache_command_boundary(*, runtime_refresh_allowed: bool = True) -> dict[str
     return {
         "readOnlyPayload": True,
         "readOnlySurfacesExecuteRefresh": False,
+        "navigationSurfacesMayRefreshGeneratedCache": True,
         "displayedCommandsOnly": True,
         "recommendedRefreshCommandsAreSuggestionsOnly": True,
+        "navigationCacheRefresh": {
+            "commands": [
+                "intelligence --query",
+                "intelligence --path",
+                "intelligence --full-text",
+            ],
+            "requiresExplicitCommand": True,
+            "requiresExplicitApply": False,
+            "invokedByReadOnlySurfaces": False,
+            "invokedByNavigationSurfaces": True,
+            "writeClass": "disposable-generated-cache-only",
+            "writeBoundary": ARTIFACT_DIR_REL,
+            "cannotApprove": list(PROJECTION_CACHE_CANNOT_APPROVE),
+        },
         "selfHealCommand": {
             "command": self_heal_command,
             "requiresExplicitApply": runtime_refresh_allowed,
@@ -814,6 +832,102 @@ def projection_artifact_path_query_findings(inventory: Inventory, projection: Pr
 
 def artifact_dir(root: Path) -> Path:
     return root / ARTIFACT_DIR_REL
+
+
+def quick_projection_cache_posture_findings(inventory: Inventory) -> tuple[list[Finding], list[Finding]]:
+    """Inspect cache presence/dirty markers without rebuilding a projection."""
+    artifact_findings = _quick_projection_artifact_findings(inventory)
+    index_findings = _quick_projection_index_findings(inventory)
+    return artifact_findings, index_findings
+
+
+def _quick_projection_artifact_findings(inventory: Inventory) -> list[Finding]:
+    findings = _boundary_preflight(inventory.root, create=False)
+    if _has_errors(findings):
+        return findings
+
+    projection_dir = artifact_dir(inventory.root)
+    findings.append(Finding("info", "projection-artifact-boundary", f"owned generated-output boundary: {ARTIFACT_DIR_REL}", ARTIFACT_DIR_REL))
+    findings.extend(projection_cache_operation_marker_findings(inventory.root))
+    if not projection_dir.exists():
+        findings.append(
+            Finding(
+                "info",
+                "projection-artifact-missing",
+                "projection artifacts are missing; direct source reads and degraded MCP projection summary remain authoritative",
+                ARTIFACT_DIR_REL,
+            )
+        )
+        return findings
+
+    findings.extend(
+        projection_cache_dirty_marker_findings(
+            inventory.root,
+            ARTIFACT_DIRTY_MARKER_NAME,
+            "projection-artifact-dirty",
+            f"generated projection artifacts were marked dirty by a mutating workflow command; rebuild recommended; {PROJECTION_REBUILD_NEXT_SAFE_COMMAND}",
+        )
+    )
+    missing = [name for name in ARTIFACT_NAMES if (projection_dir / name).is_symlink() or not (projection_dir / name).is_file()]
+    for name in missing[:3]:
+        findings.append(
+            Finding(
+                "warn",
+                "projection-artifact-incomplete",
+                f"expected generated artifact is missing and can be rebuilt: {name}",
+                f"{ARTIFACT_DIR_REL}/{name}",
+            )
+        )
+    if missing:
+        return findings
+
+    findings.append(
+        Finding(
+            "warn",
+            "projection-artifact-quick-unverified",
+            (
+                "bounded degraded MCP projection packet inspected generated artifact presence but did not "
+                "hash-verify it against a rebuilt in-memory projection; request detail=full or run projection --inspect when exact cache proof is needed"
+            ),
+            ARTIFACT_DIR_REL,
+        )
+    )
+    return findings
+
+
+def _quick_projection_index_findings(inventory: Inventory) -> list[Finding]:
+    projection_dir = artifact_dir(inventory.root)
+    index_rel = f"{ARTIFACT_DIR_REL}/search-index.sqlite3"
+    findings = projection_cache_dirty_marker_findings(
+        inventory.root,
+        INDEX_DIRTY_MARKER_NAME,
+        "projection-index-dirty",
+        f"SQLite projection index was marked dirty by a mutating workflow command; rebuild recommended; {PROJECTION_REBUILD_NEXT_SAFE_COMMAND}",
+    )
+    index_file = projection_dir / "search-index.sqlite3"
+    if index_file.is_symlink() or not index_file.is_file():
+        findings.append(
+            Finding(
+                "info",
+                "projection-index-missing",
+                "SQLite projection index is missing; exact/path source reads remain available and full-text can refresh through explicit cache rails",
+                index_rel,
+            )
+        )
+        return findings
+
+    findings.append(
+        Finding(
+            "warn",
+            "projection-index-quick-unverified",
+            (
+                "bounded degraded MCP projection packet inspected SQLite index presence but did not "
+                "hash-verify it against a rebuilt in-memory projection; request detail=full or run projection --inspect when exact cache proof is needed"
+            ),
+            index_rel,
+        )
+    )
+    return findings
 
 
 def artifact_payloads(inventory: Inventory, projection: Projection) -> dict[str, Any]:

@@ -12,12 +12,18 @@ from pathlib import Path
 from .inventory import Inventory, RootLoadError, Surface, load_inventory
 from .models import Finding
 from .parsing import parse_frontmatter
+from .root_boundary import windows_path_reference_reason
 
 
 GIT_TIMEOUT_SECONDS = 5
 CHANGED_SAMPLE_LIMIT = 10
 TRAILER_SAMPLE_LIMIT = 10
 COORDINATION_ROOT_ENV_VAR = "MLH_COORDINATION_ROOT"
+UNSAFE_COORDINATION_ROOT_REFERENCE_REASONS = {
+    "Windows drive-relative path",
+    "Windows alternate data stream path",
+    "reserved Windows device basename",
+}
 PRODUCT_COMPATIBILITY_FIXTURE_SCOPES = {
     ".agents/docmap.yaml",
     ".codex/project-workflow.toml",
@@ -308,6 +314,34 @@ def product_diff_write_scope_findings(
             source,
         )
     ]
+
+
+def product_diff_scope_proof(inventory: Inventory, closeout_values: dict[str, str] | None = None) -> dict[str, object] | None:
+    scope = _product_diff_scope(inventory)
+    if scope is None:
+        return None
+
+    proof = dict(scope)
+    problem = str(proof.get("problem") or "")
+    if problem:
+        severity = str(proof.get("problem_severity") or "info")
+        proof["status"] = "blocked" if severity == "error" else "unavailable"
+        return proof
+
+    dirty_paths = tuple(str(path) for path in proof.get("dirty_paths", ()) if str(path))
+    out_of_scope = tuple(str(path) for path in proof.get("out_of_scope", ()) if str(path))
+    if not dirty_paths:
+        proof["status"] = "clean"
+    elif out_of_scope:
+        disclosed = _closeout_disclaims_out_of_scope_product_diff(closeout_values or {}, out_of_scope)
+        proof["status"] = "disclosed-out-of-scope" if disclosed else "out-of-scope"
+        proof["disclosed"] = disclosed
+    else:
+        proof["status"] = "within-scope"
+    proof["dirty_paths"] = dirty_paths
+    proof["out_of_scope"] = out_of_scope
+    proof["allowed_paths"] = tuple(str(path) for path in proof.get("allowed_paths", ()) if str(path))
+    return proof
 
 
 def parse_head_commit_trailers(root: Path) -> VcsTrailerParseResult:
@@ -712,6 +746,9 @@ def _resolve_coordination_root(value: str, root: Path) -> tuple[Path, str]:
     raw = value.strip()
     if not raw:
         return root, f"{COORDINATION_ROOT_ENV_VAR} is empty"
+    conflict = _coordination_root_reference_conflict(raw)
+    if conflict:
+        return root, f"{COORDINATION_ROOT_ENV_VAR} must not use {conflict}: {raw!r}"
     path = Path(raw).expanduser()
     if not path.is_absolute():
         return root, f"{COORDINATION_ROOT_ENV_VAR} must be an absolute path, got {raw!r}"
@@ -811,10 +848,22 @@ def _worktree_coordination_record_root_pair_findings(
     coordination_root: str,
     edit_worktree_root: str,
 ) -> list[Finding]:
+    findings: list[Finding] = []
+    for label, value in (("coordination_root", coordination_root), ("edit_worktree_root", edit_worktree_root)):
+        conflict = _coordination_root_reference_conflict(value)
+        if conflict:
+            findings.append(
+                Finding(
+                    "warn",
+                    f"{code_prefix}-record-root-unsafe",
+                    f"{record_kind} {record_id} names unsafe {label}: {conflict}",
+                    rel_path,
+                )
+            )
     if not coordination_root and not edit_worktree_root:
-        return []
+        return findings
     if coordination_root and edit_worktree_root:
-        return [
+        findings.append(
             Finding(
                 "info",
                 f"{code_prefix}-record-root-pair",
@@ -824,16 +873,23 @@ def _worktree_coordination_record_root_pair_findings(
                 ),
                 rel_path,
             )
-        ]
+        )
+        return findings
     missing = "edit_worktree_root" if coordination_root else "coordination_root"
-    return [
+    findings.append(
         Finding(
             "warn",
             f"{code_prefix}-record-root-pair-missing",
             f"{record_kind} {record_id} names only one coordination/edit root; missing {missing}",
             rel_path,
         )
-    ]
+    )
+    return findings
+
+
+def _coordination_root_reference_conflict(value: object) -> str:
+    reason = windows_path_reference_reason(value, allow_uri=False, allow_rooted=True)
+    return reason if reason in UNSAFE_COORDINATION_ROOT_REFERENCE_REASONS else ""
 
 
 def _worktree_coordination_boundary_findings(code_prefix: str) -> list[Finding]:

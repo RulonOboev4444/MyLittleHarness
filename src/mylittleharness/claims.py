@@ -11,7 +11,8 @@ from pathlib import Path
 from .atomic_files import AtomicFileWrite, FileTransactionError, apply_file_transaction
 from .inventory import Inventory
 from .models import Finding
-from .root_boundary import source_path_boundary_violation
+from .parsing import parse_frontmatter
+from .root_boundary import record_id_conflict, root_relative_path_conflict, source_path_boundary_violation
 
 
 WORK_CLAIM_SCHEMA = "mylittleharness.work-claim.v1"
@@ -34,6 +35,59 @@ WORK_CLAIM_REQUIRED_SCALARS = ("claim_id", "claim_kind", "owner_role", "owner_ac
 WORK_CLAIM_SCOPE_FIELDS = ("claimed_routes", "claimed_paths", "claimed_resources")
 WORK_CLAIM_MUTATION_LOCK_NAME = ".work-claim-mutation.lock"
 ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+FAN_IN_HANDOFFS_DIR_REL = "project/verification/handoffs"
+FAN_IN_AGENT_RUNS_DIR_REL = "project/verification/agent-runs"
+FAN_IN_HANDOFF_SCHEMA = "mylittleharness.handoff-packet.v1"
+FAN_IN_AGENT_RUN_SCHEMA = "mylittleharness.agent-run.v1"
+FAN_IN_AGENT_RUN_SUCCESS_STATUSES = {"succeeded"}
+FAN_IN_AGENT_RUN_DOCS_DECISIONS = {"updated", "not-needed", "uncertain"}
+FAN_IN_AGENT_RUN_REQUIRED_LISTS = ("input_refs", "output_refs", "claimed_paths", "changed_files", "commands", "verification_refs", "source_hashes")
+FAN_IN_HIGH_BLAST_DIRTY_PATH_THRESHOLD = 8
+FAN_IN_HIGH_BLAST_CLUSTER_THRESHOLD = 4
+FAN_IN_HIGH_BLAST_EXCLUDED_PREFIXES = (".agents/", ".codex/", ".mylittleharness/")
+FAN_IN_BOOLEAN_METADATA_FIELDS = (
+    "fan_in_required",
+    "fan_in_evidence_required",
+    "coordination_required",
+    "delegated",
+    "concurrent",
+    "multi_agent",
+    "parallel_agents",
+    "high_blast",
+)
+FAN_IN_MODE_METADATA_FIELDS = (
+    "agent_topology",
+    "blast_radius",
+    "coordination_mode",
+    "execution_mode",
+    "work_mode",
+)
+FAN_IN_ACTIVATING_MODE_TERMS = {
+    "delegated",
+    "concurrent",
+    "high",
+    "high-blast",
+    "high blast",
+    "multi-agent",
+    "multiagent",
+    "parallel",
+    "worker",
+    "workers",
+}
+FAN_IN_SOURCE_HASH_RE = re.compile(r"^(.+?)\s+(?:sha256=([a-fA-F0-9]{64})|(missing)|(unreadable)|(invalid-path))$")
+FAN_IN_BLOCKING_RESIDUAL_TERMS = {
+    "blocker",
+    "blocking",
+    "blocked",
+    "danger",
+    "failed",
+    "failure",
+    "must-fix",
+    "regression",
+    "unresolved",
+    "unsafe",
+}
+FAN_IN_NONBLOCKING_RESIDUALS = {"", "n/a", "no", "none", "not-needed", "not needed"}
 
 
 @dataclass(frozen=True)
@@ -89,6 +143,30 @@ class WorkClaimRecord:
 
 
 @dataclass(frozen=True)
+class FanInEvidenceGate:
+    activated: bool
+    reasons: tuple[str, ...]
+    missing: tuple[str, ...]
+    claim_refs: tuple[str, ...] = ()
+    handoff_refs: tuple[str, ...] = ()
+    agent_run_refs: tuple[str, ...] = ()
+    blockers: tuple[str, ...] = ()
+
+    @property
+    def status(self) -> str:
+        if not self.activated:
+            return "not-required"
+        reason_text = _sample_text(self.reasons)
+        if self.missing:
+            blocker_text = f"; blockers={_sample_text(self.blockers)}" if self.blockers else ""
+            return f"missing:{','.join(self.missing)}; activated_by={reason_text}{blocker_text}"
+        return (
+            f"present; claims={len(self.claim_refs)}; handoffs={len(self.handoff_refs)}; "
+            f"agent_runs={len(self.agent_run_refs)}; activated_by={reason_text}"
+        )
+
+
+@dataclass(frozen=True)
 class _WorkClaimMutationLock:
     path: Path
     fd: int
@@ -96,6 +174,41 @@ class _WorkClaimMutationLock:
 
 class WorkClaimMutationLockError(OSError):
     pass
+
+
+def fan_in_evidence_gate(
+    root: Path,
+    plan_data: dict[str, object],
+    *,
+    product_diff_proof: dict[str, object] | None = None,
+) -> FanInEvidenceGate:
+    execution_slice = _fan_in_execution_slice(plan_data)
+    reasons = _fan_in_activation_reasons(plan_data, product_diff_proof)
+    if not reasons:
+        return FanInEvidenceGate(activated=False, reasons=(), missing=())
+
+    claim_refs, claim_blockers = _fan_in_matching_claim_refs(root, execution_slice)
+    handoff_refs, handoff_blockers = _fan_in_matching_handoff_refs(root, execution_slice)
+    agent_run_refs, agent_run_blockers = _fan_in_matching_agent_run_refs(root, execution_slice, claim_refs, handoff_refs)
+    overlap_blockers = _fan_in_active_overlap_blockers(root)
+    missing = []
+    if not claim_refs:
+        missing.append("released-work-claim" if claim_blockers else "work-claim")
+    if not handoff_refs:
+        missing.append("accepted-handoff" if handoff_blockers else "handoff")
+    if not agent_run_refs:
+        missing.append("fresh-agent-run" if agent_run_blockers else "agent-run")
+    if overlap_blockers:
+        missing.append("overlap-claim")
+    return FanInEvidenceGate(
+        activated=True,
+        reasons=reasons,
+        missing=tuple(missing),
+        claim_refs=claim_refs,
+        handoff_refs=handoff_refs,
+        agent_run_refs=agent_run_refs,
+        blockers=tuple((*claim_blockers, *handoff_blockers, *agent_run_blockers, *overlap_blockers)),
+    )
 
 
 def make_work_claim_request(args: object) -> WorkClaimRequest:
@@ -345,6 +458,8 @@ def work_claim_record_metadata_findings(data: dict[str, object], rel_path: str, 
     claim_id = str(data.get("claim_id") or "").strip()
     if claim_id and not ID_RE.match(claim_id):
         findings.append(Finding("warn", f"{code_prefix}-malformed", "work claim claim_id may contain only letters, digits, dot, underscore, or dash", rel_path))
+    elif claim_id and record_id_conflict(claim_id):
+        findings.append(Finding("warn", f"{code_prefix}-malformed", f"work claim claim_id {record_id_conflict(claim_id)}", rel_path))
     claim_kind = str(data.get("claim_kind") or "").strip()
     if claim_kind and claim_kind not in WORK_CLAIM_KINDS:
         findings.append(Finding("warn", f"{code_prefix}-malformed", f"unsupported work claim kind: {claim_kind}", rel_path))
@@ -410,6 +525,8 @@ def _request_findings(inventory: Inventory, request: WorkClaimRequest, *, apply:
         findings.append(Finding("error", "work-claim-refused", "--claim-id is required"))
     elif not ID_RE.match(request.claim_id):
         findings.append(Finding("error", "work-claim-refused", "--claim-id may contain only letters, digits, dot, underscore, or dash"))
+    elif record_id_conflict(request.claim_id):
+        findings.append(Finding("error", "work-claim-refused", f"--claim-id {record_id_conflict(request.claim_id)}"))
     lease_findings = _lease_request_findings(request)
     findings.extend(lease_findings)
     if request.action == "release":
@@ -822,6 +939,266 @@ def _boundary_findings(code_prefix: str = "work-claim") -> list[Finding]:
     ]
 
 
+def _fan_in_execution_slice(plan_data: dict[str, object]) -> str:
+    for field in ("execution_slice", "primary_roadmap_item", "related_roadmap_item", "plan_id"):
+        value = str(plan_data.get(field) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _fan_in_activation_reasons(plan_data: dict[str, object], product_diff_proof: dict[str, object] | None) -> tuple[str, ...]:
+    reasons: list[str] = []
+    for field in FAN_IN_BOOLEAN_METADATA_FIELDS:
+        if _metadata_truthy(plan_data.get(field)):
+            reasons.append(f"metadata:{field}")
+
+    for field in FAN_IN_MODE_METADATA_FIELDS:
+        for value in _metadata_values(plan_data.get(field)):
+            if _metadata_mode_activates(field, value):
+                reasons.append(f"metadata:{field}={value}")
+                break
+
+    dirty_paths = tuple(str(path) for path in (product_diff_proof or {}).get("dirty_paths", ()) if str(path))
+    out_of_scope = {str(path) for path in (product_diff_proof or {}).get("out_of_scope", ()) if str(path)}
+    in_scope_dirty = tuple(path for path in dirty_paths if path not in out_of_scope)
+    high_blast_dirty = tuple(path for path in in_scope_dirty if _fan_in_high_blast_path(path))
+    if len(high_blast_dirty) >= FAN_IN_HIGH_BLAST_DIRTY_PATH_THRESHOLD:
+        reasons.append(f"observed-diff:in-scope-dirty-paths>={FAN_IN_HIGH_BLAST_DIRTY_PATH_THRESHOLD}")
+    clusters = {_path_cluster(path) for path in high_blast_dirty if _path_cluster(path)}
+    if len(clusters) >= FAN_IN_HIGH_BLAST_CLUSTER_THRESHOLD:
+        reasons.append(f"observed-diff:dirty-clusters>={FAN_IN_HIGH_BLAST_CLUSTER_THRESHOLD}")
+    return tuple(dict.fromkeys(reasons))
+
+
+def _metadata_truthy(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value > 0
+    if isinstance(value, list):
+        return any(_metadata_truthy(item) for item in value)
+    text = str(value or "").strip().casefold()
+    return text in {"1", "true", "yes", "y", "required", "enabled", "on"}
+
+
+def _metadata_values(value: object) -> tuple[str, ...]:
+    if isinstance(value, list):
+        return tuple(str(item).strip() for item in value if str(item).strip())
+    text = str(value or "").strip()
+    return (text,) if text else ()
+
+
+def _metadata_mode_activates(field: str, value: str) -> bool:
+    text = value.strip().casefold().replace("_", "-")
+    if not text:
+        return False
+    if field == "blast_radius":
+        return text in {"high", "high-blast", "broad", "wide", "large"}
+    return text in FAN_IN_ACTIVATING_MODE_TERMS or any(f" {term} " in f" {text} " for term in FAN_IN_ACTIVATING_MODE_TERMS)
+
+
+def _fan_in_high_blast_path(path: str) -> bool:
+    normalized = _normalize_ref(path).strip("/").casefold()
+    if not normalized:
+        return False
+    return not normalized.startswith(FAN_IN_HIGH_BLAST_EXCLUDED_PREFIXES)
+
+
+def _path_cluster(path: str) -> str:
+    normalized = _normalize_ref(path).strip("/")
+    if not normalized:
+        return ""
+    if "/" not in normalized:
+        return normalized
+    first, second, *_rest = normalized.split("/")
+    if first in {"src", "tests", "docs", "project"} and second:
+        return f"{first}/{second}"
+    return first
+
+
+def _fan_in_matching_claim_refs(root: Path, execution_slice: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    refs: list[str] = []
+    blockers: list[str] = []
+    for path in sorted((root / WORK_CLAIMS_DIR_REL).glob("*.json")):
+        rel_path = _to_rel_path(root, path)
+        data = _read_json_object(path)
+        if data is None:
+            continue
+        if data.get("schema") != WORK_CLAIM_SCHEMA or data.get("record_type") != "work-claim":
+            continue
+        if execution_slice and str(data.get("execution_slice") or "").strip() != execution_slice:
+            continue
+        status = str(data.get("status") or "").strip()
+        if status != "released":
+            blockers.append(f"{rel_path}: claim status is {status or '<missing>'}, not released")
+            continue
+        refs.append(rel_path)
+    return tuple(refs), tuple(blockers)
+
+
+def _fan_in_matching_handoff_refs(root: Path, execution_slice: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    refs: list[str] = []
+    blockers: list[str] = []
+    for path in sorted((root / FAN_IN_HANDOFFS_DIR_REL).glob("*.json")):
+        rel_path = _to_rel_path(root, path)
+        data = _read_json_object(path)
+        if data is None:
+            continue
+        if data.get("schema") != FAN_IN_HANDOFF_SCHEMA or data.get("record_type") != "handoff-packet":
+            continue
+        if execution_slice and str(data.get("execution_slice") or "").strip() != execution_slice:
+            continue
+        status = str(data.get("status") or "").strip()
+        if status != "accepted":
+            blockers.append(f"{rel_path}: handoff status is {status or '<missing>'}, not accepted")
+            continue
+        refs.append(rel_path)
+    return tuple(refs), tuple(blockers)
+
+
+def _fan_in_matching_agent_run_refs(
+    root: Path,
+    execution_slice: str,
+    claim_refs: tuple[str, ...],
+    handoff_refs: tuple[str, ...],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    refs: list[str] = []
+    blockers: list[str] = []
+    for path in sorted((root / FAN_IN_AGENT_RUNS_DIR_REL).glob("*.md")):
+        rel_path = _to_rel_path(root, path)
+        if path.is_symlink() or not path.is_file():
+            continue
+        try:
+            frontmatter = parse_frontmatter(path.read_text(encoding="utf-8"))
+        except OSError:
+            continue
+        data = frontmatter.data
+        if data.get("schema") != FAN_IN_AGENT_RUN_SCHEMA or data.get("record_type") != "agent-run":
+            continue
+        if execution_slice and str(data.get("assigned_scope") or data.get("execution_slice") or "").strip() != execution_slice:
+            continue
+        record_blockers = _fan_in_agent_run_blockers(root, rel_path, data, claim_refs, handoff_refs)
+        if record_blockers:
+            blockers.extend(record_blockers)
+            continue
+        refs.append(rel_path)
+    return tuple(refs), tuple(blockers)
+
+
+def _fan_in_agent_run_blockers(
+    root: Path,
+    rel_path: str,
+    data: dict[str, object],
+    claim_refs: tuple[str, ...],
+    handoff_refs: tuple[str, ...],
+) -> list[str]:
+    blockers: list[str] = []
+    status = str(data.get("status") or "").strip()
+    if status not in FAN_IN_AGENT_RUN_SUCCESS_STATUSES:
+        blockers.append(f"{rel_path}: agent-run status is {status or '<missing>'}, not succeeded")
+    docs_decision = str(data.get("docs_decision") or "").strip()
+    if docs_decision not in FAN_IN_AGENT_RUN_DOCS_DECISIONS:
+        blockers.append(f"{rel_path}: docs_decision is missing or unsupported")
+    residual = str(data.get("residual_risk") or "").strip().casefold()
+    if residual not in FAN_IN_NONBLOCKING_RESIDUALS and any(term in residual for term in FAN_IN_BLOCKING_RESIDUAL_TERMS):
+        blockers.append(f"{rel_path}: residual_risk contains blocking risk")
+    for field in FAN_IN_AGENT_RUN_REQUIRED_LISTS:
+        if not _string_tuple(data.get(field)):
+            blockers.append(f"{rel_path}: agent-run missing required evidence list {field}")
+    agent_claim_refs = set(_normalize_ref(ref) for ref in _string_tuple(data.get("claim_refs")))
+    expected_claim_refs = set(_normalize_ref(ref) for ref in claim_refs)
+    if expected_claim_refs and not expected_claim_refs.intersection(agent_claim_refs):
+        blockers.append(f"{rel_path}: agent-run does not cite released work-claim refs")
+    agent_handoff_refs = set(_normalize_ref(ref) for ref in _string_tuple(data.get("handoff_refs")))
+    expected_handoff_refs = set(_normalize_ref(ref) for ref in handoff_refs)
+    if expected_handoff_refs and not expected_handoff_refs.intersection(agent_handoff_refs):
+        blockers.append(f"{rel_path}: agent-run does not cite accepted handoff refs")
+    blockers.extend(f"{rel_path}: {blocker}" for blocker in _fan_in_source_hash_blockers(root, data))
+    return blockers
+
+
+def _fan_in_source_hash_blockers(root: Path, data: dict[str, object]) -> list[str]:
+    blockers: list[str] = []
+    for entry in _string_tuple(data.get("source_hashes")):
+        match = FAN_IN_SOURCE_HASH_RE.match(entry.strip())
+        if not match:
+            blockers.append(f"malformed source_hashes entry: {entry}")
+            continue
+        source_rel = match.group(1).strip()
+        expected_hash = match.group(2)
+        expected_missing = bool(match.group(3))
+        expected_unreadable = bool(match.group(4))
+        expected_invalid = bool(match.group(5))
+        conflict = _root_relative_path_conflict(source_rel)
+        if conflict:
+            blockers.append(f"source hash path {conflict}: {source_rel}")
+            continue
+        source_path = root / source_rel
+        if expected_missing:
+            if source_path.exists():
+                blockers.append(f"source hash recorded missing path now exists: {source_rel}")
+            continue
+        if expected_unreadable or expected_invalid:
+            blockers.append(f"source hash entry records degraded evidence for {source_rel}")
+            continue
+        if not source_path.exists():
+            blockers.append(f"source hash target is now missing: {source_rel}")
+            continue
+        if not source_path.is_file():
+            blockers.append(f"source hash target is no longer a regular file: {source_rel}")
+            continue
+        try:
+            current_hash = hashlib.sha256(source_path.read_bytes()).hexdigest()
+        except OSError as exc:
+            blockers.append(f"source hash target is now unreadable: {source_rel}: {exc}")
+            continue
+        if expected_hash and current_hash.lower() != expected_hash.lower():
+            blockers.append(f"source hash mismatch for {source_rel}: expected={expected_hash[:12]} current={current_hash[:12]}")
+    return blockers
+
+
+def _fan_in_active_overlap_blockers(root: Path) -> tuple[str, ...]:
+    records: list[WorkClaimRecord] = []
+    for path in sorted((root / WORK_CLAIMS_DIR_REL).glob("*.json")):
+        data = _read_json_object(path)
+        if data is None:
+            continue
+        if data.get("schema") != WORK_CLAIM_SCHEMA or data.get("record_type") != "work-claim":
+            continue
+        records.append(WorkClaimRecord(_to_rel_path(root, path), data))
+    blockers: list[str] = []
+    for left_index, left in enumerate(records):
+        if left.status != "active" or left.claim_kind not in EXCLUSIVE_CLAIM_KINDS:
+            continue
+        for right in records[left_index + 1 :]:
+            if right.status != "active" or right.claim_kind not in EXCLUSIVE_CLAIM_KINDS:
+                continue
+            overlap = _claim_overlap_records(left, right)
+            if overlap:
+                blockers.append(f"overlapping active work claims {left.claim_id} and {right.claim_id}: {overlap}")
+    return tuple(blockers)
+
+
+def _read_json_object(path: Path) -> dict[str, object] | None:
+    if path.is_symlink() or not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _sample_text(values: tuple[str, ...], limit: int = 4) -> str:
+    if not values:
+        return "<none>"
+    head = ", ".join(values[:limit])
+    if len(values) > limit:
+        return f"{head}, +{len(values) - limit} more"
+    return head
+
+
 def _tuple_values(values: object) -> tuple[str, ...]:
     if not values:
         return ()
@@ -844,14 +1221,7 @@ def _string_tuple(value: object) -> tuple[str, ...]:
 
 
 def _root_relative_path_conflict(rel_path: str) -> str:
-    normalized = _normalize_ref(rel_path)
-    if not normalized:
-        return "must be a non-empty root-relative path"
-    if re.match(r"^[A-Za-z]:[\\/]", normalized) or normalized.startswith("/"):
-        return "must be root-relative, not absolute"
-    if any(part in {"..", ".", ""} for part in normalized.split("/")):
-        return "must not contain parent traversal, current-directory, or empty path segments"
-    return ""
+    return root_relative_path_conflict(_normalize_ref(rel_path))
 
 
 def _normalize_ref(value: str) -> str:

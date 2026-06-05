@@ -5,6 +5,7 @@ import hashlib
 import os
 import re
 import shlex
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from .inventory import Inventory
 from .models import Finding
 from .parsing import parse_frontmatter
 from .preflight import preflight_sections
+from .reporting import command_action_report_dict
 from .routes import classify_memory_route
 from .root_boundary import PRODUCT_SOURCE_FIXTURE
 from .safe_commands import mlh_command, safe_double_quoted, safe_intent_text, shell_arg
@@ -118,6 +120,7 @@ READ_ONLY_SOURCE_DISCOVERY_PREFIX_TOKENS = {
 READ_ONLY_GIT_INSPECTION_COMMANDS = {"diff", "show", "status", "log"}
 GIT_MUTATION_COMMANDS = {"add", "stage", "commit", "push", "reset", "checkout", "clean", "restore", "rm", "mv"}
 GIT_OPTIONS_WITH_VALUES = {
+    "-C",
     "-c",
     "--config-env",
     "--exec-path",
@@ -127,6 +130,8 @@ GIT_OPTIONS_WITH_VALUES = {
     "--work-tree",
 }
 MLH_OWNER_ROUTE_REVIEW_COMMANDS = {
+    "cleanup",
+    "handoff",
     "intake",
     "incubate",
     "memory-hygiene",
@@ -214,6 +219,11 @@ LIFECYCLE_AUTHORITY_PATHS = (
     "project/implementation-plan.md",
     "project/roadmap.md",
 )
+TEMPORARY_ROADMAP_MANIFEST_RE = re.compile(r"^project/verification/roadmap-routing-\d{4}-\d{2}-\d{2}-[a-z0-9._-]+\.json$")
+ROUTE_WRITEBACK_MARKERS = (
+    "<!-- BEGIN mylittleharness-closeout-writeback v1 -->",
+    "<!-- BEGIN mylittleharness-phase-writeback v1 -->",
+)
 EDITABLE_ROUTE_PATCH_IDS = (
     "adrs",
     "archive",
@@ -246,6 +256,33 @@ GIT_WRITE_COMMANDS = (
 PATH_RE = re.compile(r"[A-Za-z]:[\\/][^\s\"'`]+|(?:^|[\s\"'`])((?:\.?[\\/])?(?:project|src|tests|docs|\.mylittleharness)[\\/][^\s\"'`]+)")
 POWERSHELL_HERE_STRING_RE = re.compile(r"@(['\"])\r?\n.*?\r?\n\1@", re.DOTALL)
 POSIX_HEREDOC_START_RE = re.compile(r"<<-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?")
+POWERSHELL_SPLAT_INVOCATION_RE = re.compile(
+    r"(?:^|[;\r\n])\s*(?:&\s*)?"
+    r"(?P<exe>(?:my" + "littleharness(?:\\.exe)?)|(?:(?:python|py)(?:\\.exe)?\\s+-m\\s+my" + "littleharness))"
+    r"\s+@(?P<var>[A-Za-z_][A-Za-z0-9_]*)\s*;?\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+POWERSHELL_ARRAY_ASSIGNMENT_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)\s*=\s*@\((.*?)\)\s*;?", re.DOTALL)
+POWERSHELL_SCALAR_ASSIGNMENT_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(['\"])(.*?)\2\s*;?", re.DOTALL)
+POST_CLOSEOUT_COMMIT_MESSAGE_OPTIONS = {"-m", "--message", "-F", "--file"}
+POST_CLOSEOUT_COMMIT_DISALLOWED_OPTIONS = {
+    "-a",
+    "--all",
+    "--amend",
+    "--interactive",
+    "--patch",
+    "--no-verify",
+    "-p",
+}
+POST_CLOSEOUT_STAGE_BROAD_PATHS = {".", "./", "*", ":/", ":/."}
+POST_CLOSEOUT_STAGE_DISALLOWED_PREFIXES = (
+    ".git/",
+    ".mylittleharness/generated/",
+    ".mylittleharness/runtime/",
+    "node_modules/",
+    "dist/",
+    "build/",
+)
 
 
 @dataclass(frozen=True)
@@ -405,6 +442,8 @@ def codex_hook_adapter_adoption_payload(inventory: Inventory, request: CodexHook
     config_path = _native_hooks_config_path(inventory.root, request)
     script_path = _native_hook_script_path(inventory.root, request)
     policy = _hook_policy_identity()
+    dry_run_command = _hook_adapter_review_command(request, "--dry-run")
+    apply_command = _hook_adapter_review_command(request, "--apply")
     return {
         "schema": CODEX_HOOK_ADAPTER_SCHEMA,
         "client": request.client,
@@ -414,8 +453,20 @@ def codex_hook_adapter_adoption_payload(inventory: Inventory, request: CodexHook
         "scriptPath": _rel_path(inventory.root, script_path),
         "events": [_native_hook_event_name(request.client, hook_id) for hook_id in NATIVE_ADAPTER_HOOKS],
         "policy": policy,
-        "dryRunCommand": _hook_adapter_review_command(request, "--dry-run"),
-        "applyCommand": _hook_adapter_review_command(request, "--apply"),
+        "dryRunCommand": dry_run_command,
+        "dryRunAction": command_action_report_dict(
+            dry_run_command,
+            source_code="codex-hook-adapter-adoption",
+            source_field="dryRunCommand",
+            action_role="hook-adapter-dry-run",
+        ),
+        "applyCommand": apply_command,
+        "applyAction": command_action_report_dict(
+            apply_command,
+            source_code="codex-hook-adapter-adoption",
+            source_field="applyCommand",
+            action_role="hook-adapter-apply",
+        ),
         "includedInCodexMcpInstall": True,
         "includedInAttachApply": False,
         "includedInDefaultInitAttach": False,
@@ -575,6 +626,7 @@ def hook_event_payload(inventory: Inventory, hook_id: str, hook_args: list[str],
         if hook_id in FIRST_CONTACT_HOOKS
         else _hook_event_context(inventory, hook_id)
     )
+    command_actions = _hook_command_actions(agent_packet, connect_readiness, accelerator_adoption)
     system_message = _hook_system_message(findings)
     codex_specific_output = _codex_hook_specific_output(hook_id, additional_context, blocked, system_message)
     return {
@@ -598,6 +650,7 @@ def hook_event_payload(inventory: Inventory, hook_id: str, hook_args: list[str],
         "connectReadiness": connect_readiness,
         "mlhd": mlhd,
         "acceleratorAdoption": accelerator_adoption,
+        "commandActions": command_actions,
         "findings": [finding.to_dict() for finding in findings],
         "client_hints": {
             "codex": {
@@ -1139,7 +1192,7 @@ def _first_contact_context_findings(inventory: Inventory, hook_id: str) -> list[
             (
                 f"{hook_id} emits a bounded dashboard-backed agent packet for first contact; "
                 f"plan_status={_payload_value(lifecycle, 'plan_status')}; "
-                f"active_phase={_payload_value(lifecycle, 'active_phase')}; "
+                f"{_lifecycle_phase_summary(lifecycle)}; "
                 "use --json for the structured hook event payload"
             ),
             "project/project-state.md" if inventory.state and inventory.state.exists else None,
@@ -1187,7 +1240,7 @@ def _hook_status_message(hook_id: str, lifecycle: object, cache_posture: object)
     return (
         "MLH first contact: "
         f"plan_status={_payload_value(lifecycle_data, 'plan_status')}; "
-        f"phase={_payload_value(lifecycle_data, 'active_phase')}; "
+        f"{_lifecycle_phase_summary(lifecycle_data)}; "
         f"artifacts={_component_status(components, 'artifacts')}; "
         f"sqlite={_component_status(components, 'sqlite_index')}"
     )
@@ -1219,12 +1272,11 @@ def _codex_hook_specific_output(hook_id: str, additional_context: str, blocked: 
 def _hook_event_context(inventory: Inventory, hook_id: str) -> str:
     state = inventory.state.frontmatter.data if inventory.state and inventory.state.exists else {}
     plan_status = _payload_value(state, "plan_status")
-    active_phase = _payload_value(state, "active_phase")
     policy = _hook_policy_identity()
     return "\n".join(
         [
             f"MyLittleHarness hook context for {hook_id}:",
-            f"- lifecycle: plan_status={plan_status}; active_phase={active_phase}",
+            f"- lifecycle: plan_status={plan_status}; {_lifecycle_phase_summary(state)}",
             f"- hook_policy: schema={policy['schema']}; source_hash={policy['sourceHash']}; import_root={policy['importRoot']}",
             context_memory_hook_context(inventory),
             "- first-pass navigation: dashboard packet, MCP read/search/bundle when mounted, projection warm-cache if stale, then rg or bounded source reads for exact verification.",
@@ -1316,6 +1368,11 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
     allow_existing_route_patch = _is_existing_route_markdown_patch_request(inventory, data)
     allow_active_plan_spec_doc_patch = _is_active_plan_spec_doc_patch_request(inventory, data)
     allow_post_closeout_lifecycle_route_stage = _is_post_closeout_lifecycle_route_stage_command(inventory, command, paths)
+    allow_route_produced_lifecycle_route_stage = _is_route_produced_lifecycle_route_stage_command(inventory, command)
+    allow_post_closeout_local_vcs_stage = _is_post_closeout_local_vcs_stage_command(inventory, command)
+    allow_post_closeout_local_vcs_commit = _is_post_closeout_local_vcs_commit_command(inventory, command)
+    allow_route_produced_lifecycle_commit = _is_route_produced_lifecycle_commit_command(inventory, command)
+    allow_mlh_owner_route_git_literals = allow_mlh_owner_route_paths and not _git_subcommand(command)
     if _active_plan_roadmap_policy_relevant(inventory, command, paths):
         findings.append(
             Finding(
@@ -1339,7 +1396,8 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
         allow_mlh_owner_route_paths=allow_mlh_owner_route_paths,
         allow_existing_route_patch=allow_existing_route_patch,
         allow_active_plan_spec_doc_patch=allow_active_plan_spec_doc_patch,
-        allow_post_closeout_lifecycle_route_stage=allow_post_closeout_lifecycle_route_stage,
+        allow_post_closeout_lifecycle_route_stage=(allow_post_closeout_lifecycle_route_stage or allow_route_produced_lifecycle_route_stage),
+        allow_post_closeout_local_vcs_stage=allow_post_closeout_local_vcs_stage,
     ):
         findings.append(finding)
     if _looks_like_opaque_shell_payload(command):
@@ -1367,6 +1425,7 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
         and not allow_existing_route_patch
         and not allow_active_plan_spec_doc_patch
         and not allow_post_closeout_lifecycle_route_stage
+        and not allow_route_produced_lifecycle_route_stage
     ):
         route_path = paths[0] if paths else "project"
         findings.append(
@@ -1378,6 +1437,19 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                     f"next_safe_command={_hook_route_next_safe_command(inventory, route_path)}"
                 ),
                 route_path,
+            )
+        )
+    temporary_manifest = _temporary_roadmap_manifest_path(paths)
+    if temporary_manifest and _looks_like_write_command(write_command) and not allow_mlh_owner_route_paths:
+        findings.append(
+            Finding(
+                "error",
+                "hooks-policy-block-temporary-roadmap-manifest-shortcut",
+                (
+                    "blocked direct temporary roadmap manifest deletion; use the bounded cleanup dry-run/apply route instead; "
+                    f"next_safe_command={mlh_command('cleanup', '--dry-run', '--target', temporary_manifest)}"
+                ),
+                temporary_manifest,
             )
         )
     if allow_existing_route_patch:
@@ -1423,6 +1495,56 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                     "roadmap movement, or future lifecycle decisions"
                 ),
                 paths[0] if paths else None,
+            )
+        )
+    if allow_route_produced_lifecycle_route_stage:
+        findings.append(
+            Finding(
+                "info",
+                "hooks-policy-allow-route-produced-lifecycle-route-staging",
+                (
+                    "allowed exact Git staging of existing MLH lifecycle route files while the active phase is complete "
+                    "and project-state contains route writeback evidence; broad add, generated/runtime caches, "
+                    "partial lifecycle staging, commit, push, roadmap movement, and future lifecycle decisions remain unapproved"
+                ),
+                paths[0] if paths else None,
+            )
+        )
+    if allow_post_closeout_local_vcs_stage and not allow_post_closeout_lifecycle_route_stage:
+        findings.append(
+            Finding(
+                "info",
+                "hooks-policy-allow-post-closeout-local-vcs-staging",
+                (
+                    "allowed exact local VCS staging of reviewed existing files after plan_status=none; "
+                    "directories, wildcards, generated/runtime caches, broad add, commit, push, reset, clean, "
+                    "and amend remain outside this allowance"
+                ),
+                paths[0] if paths else None,
+            )
+        )
+    if allow_post_closeout_local_vcs_commit:
+        findings.append(
+            Finding(
+                "info",
+                "hooks-policy-allow-post-closeout-local-vcs-commit",
+                (
+                    "allowed narrow local VCS commit command after plan_status=none; this assumes an explicit "
+                    "operator request and prior staged-diff review, and does not approve push, amend, reset, "
+                    "clean, release, archive, or future lifecycle movement"
+                ),
+            )
+        )
+    if allow_route_produced_lifecycle_commit:
+        findings.append(
+            Finding(
+                "info",
+                "hooks-policy-allow-route-produced-lifecycle-commit",
+                (
+                    "allowed narrow local VCS commit command for a coherent staged lifecycle route set backed by "
+                    "active-phase-complete writeback evidence; " + "gi" + "t commit -F" + " is treated as a message-file option, "
+                    "while lowercase -f, amend, push, reset, clean, and generated/runtime cache commits remain blocked"
+                ),
             )
         )
     if allow_research_import_related_prompt:
@@ -1522,12 +1644,31 @@ def _pre_tool_policy_findings(inventory: Inventory, hook_input_text: str) -> lis
                 "project/implementation-plan.md",
             )
         )
-    if _looks_like_git_stage_or_commit(lowered) and _active_plan_not_ready_for_git(inventory):
+    if (
+        _looks_like_git_stage_or_commit(lowered)
+        and not allow_post_closeout_lifecycle_route_stage
+        and not allow_route_produced_lifecycle_route_stage
+        and not allow_post_closeout_local_vcs_stage
+        and not allow_post_closeout_local_vcs_commit
+        and not allow_route_produced_lifecycle_commit
+        and not allow_mlh_owner_route_git_literals
+    ):
+        next_safe = _git_mutation_next_safe_command(inventory, command)
+        git_message = (
+            "blocked Git mutation while an active plan is open; complete explicit lifecycle closeout "
+            f"or stage the coherent route-produced lifecycle set; next_safe_command={next_safe}"
+            if _has_active_plan(inventory)
+            else (
+                "blocked broad Git mutation after closeout; only exact staging of reviewed existing files or "
+                "narrow local commit commands are allowed, and hook output cannot approve push, reset, clean, "
+                f"amend, wildcard, directory, or broad add; next_safe_command={next_safe}"
+            )
+        )
         findings.append(
             Finding(
                 "error",
                 "hooks-policy-block-git-before-lifecycle-closeout",
-                "blocked Git staging/commit while an active plan phase is not complete; record verification and lifecycle state transfer before Git mutation",
+                git_message,
                 "project/implementation-plan.md",
             )
         )
@@ -1611,7 +1752,8 @@ def _hook_additional_context(
     readiness = connect_readiness if isinstance(connect_readiness, dict) else {}
     docs = readiness.get("docs", {}) if isinstance(readiness.get("docs"), dict) else {}
     writeback = readiness.get("writeback", {}) if isinstance(readiness.get("writeback"), dict) else {}
-    mlhd_refresh = str(adoption.get("mlhdRefreshCommand") or "<refused for product-source roots>")
+    mlhd_refresh = _command_action_context(adoption.get("mlhdRefreshAction")) if adoption.get("mlhdRefreshAction") else "<refused for product-source roots>"
+    readiness_next_safe = _command_action_context(readiness.get("nextSafeAction"))
     authority_summary = agent_packet.get("authoritySummary") if isinstance(agent_packet.get("authoritySummary"), str) else ""
     if not authority_summary:
         authority_summary = _authority_cards_context(agent_packet.get("authorityCards") or readiness.get("authorityCards"))
@@ -1620,20 +1762,64 @@ def _hook_additional_context(
     return "\n".join(
         [
             "MyLittleHarness first-contact context:",
-            f"- lifecycle: plan_status={_payload_value(lifecycle, 'plan_status')}; active_plan={_payload_value(lifecycle, 'active_plan')}; active_phase={_payload_value(lifecycle, 'active_phase')}; phase_status={_payload_value(lifecycle, 'phase_status')}",
+            f"- lifecycle: plan_status={_payload_value(lifecycle, 'plan_status')}; active_plan={_payload_value(lifecycle, 'active_plan')}; {_lifecycle_phase_summary(lifecycle)}",
             f"- cache: artifacts={_component_status(components, 'artifacts')}; sqlite_index={_component_status(components, 'sqlite_index')}",
             f"- mlhd: control_status={_payload_value(mlhd_payload, 'control_status')}; runtime_cache={_payload_value(mlhd_payload, 'runtime_cache_status')}; dirty_count={_payload_value(mlhd_payload, 'dirty_count')}; last_tick={_payload_value(mlhd_payload, 'last_tick_utc')}; last_failure={_payload_value(mlhd_payload, 'last_failed_refresh_utc')}",
             f"- context memory: status={_payload_value(context_memory_payload, 'status')}; capsule={_payload_value(context_memory_payload, 'capsule_rel_path')}; source_refs={_payload_value(context_memory_payload, 'source_ref_count')}",
-            f"- connect readiness: writeback_required={str(writeback.get('requiredWhenPlanStatusActive') is True).lower()}; docs_decision={_payload_value(docs, 'docsDecision')}; docmap={_payload_value(docs, 'docmapStatus')}; next_safe={_payload_value(readiness, 'nextSafeCommand')}",
+            f"- connect readiness: writeback_required={str(writeback.get('requiredWhenPlanStatusActive') is True).lower()}; docs_decision={_payload_value(docs, 'docsDecision')}; docmap={_payload_value(docs, 'docmapStatus')}; next_safe_action={readiness_next_safe}",
             f"- authority cards: {authority_summary or 'unavailable'}; dashboard/check/hooks/cache/search output remains non-authority.",
             "- cache command boundary: read-only hook payload displays recovery commands only; hooks do not execute generated-cache refreshes.",
-            f"- accelerators: dashboard_packet=available; mcp={_payload_value(mcp, 'status')}; mounted={str(mcp.get('mounted') is True).lower()}; mlhd_refresh={mlhd_refresh}; rg_verification=required",
+            f"- accelerators: dashboard_packet=available; mcp={_payload_value(mcp, 'status')}; mounted={str(mcp.get('mounted') is True).lower()}; mlhd_refresh_action={mlhd_refresh}; rg_verification=required",
             "- mcp coverage: read_projection=current posture; read_source=bounded source slices; search=source-verified exact/path/full-text; related_or_bundle=links/fan-in/relationship bundle",
             f"- next legal dry-run: {_payload_value(next_legal, 'command')}",
             f"- recommended first-pass commands: {', '.join(str(command) for command in recommended[:4])}",
             "- exact verification: use `rg` or `mylittleharness.read_source` before source edits or closeout claims.",
             "- boundary: this hook is advisory context only and approves no lifecycle, Git, dispatcher, provider, product-diff, cache, archive, staging, commit, push, or release action.",
         ]
+    )
+
+
+def _hook_command_actions(
+    agent_packet: object,
+    connect_readiness: object,
+    accelerator_adoption: object,
+) -> list[dict[str, object]]:
+    actions: list[dict[str, object]] = []
+    if isinstance(agent_packet, dict):
+        recommended = agent_packet.get("recommendedCommandActions")
+        if isinstance(recommended, list):
+            actions.extend(action for action in recommended if isinstance(action, dict))
+    if isinstance(connect_readiness, dict):
+        for key in ("nextSafeAction", "recoveryAction"):
+            action = connect_readiness.get(key)
+            if isinstance(action, dict):
+                actions.append(action)
+        cache = connect_readiness.get("cache")
+        if isinstance(cache, dict):
+            for key in ("selfHealAction", "manualRecoveryAction"):
+                action = cache.get(key)
+                if isinstance(action, dict):
+                    actions.append(action)
+        writeback = connect_readiness.get("writeback")
+        if isinstance(writeback, dict):
+            action = writeback.get("dryRunAction")
+            if isinstance(action, dict):
+                actions.append(action)
+    if isinstance(accelerator_adoption, dict):
+        for key in ("firstContactHookAction", "codexHookAdapterAction", "mlhdRefreshAction", "projectionWarmCacheAction"):
+            action = accelerator_adoption.get(key)
+            if isinstance(action, dict) and action:
+                actions.append(action)
+    return actions
+
+
+def _command_action_context(action: object) -> str:
+    if not isinstance(action, dict) or not action.get("command"):
+        return "<none>"
+    return (
+        f"action_class={action.get('action_class', '<unknown>')}; "
+        f"write_class={action.get('write_class', '<unknown>')}; "
+        f"requires_explicit_command={str(action.get('requires_explicit_command') is True).lower()}"
     )
 
 
@@ -2240,6 +2426,7 @@ def _path_policy_findings(
     allow_existing_route_patch: bool = False,
     allow_active_plan_spec_doc_patch: bool = False,
     allow_post_closeout_lifecycle_route_stage: bool = False,
+    allow_post_closeout_local_vcs_stage: bool = False,
 ) -> list[Finding]:
     findings: list[Finding] = []
     severity = "warn" if warn_only else "error"
@@ -2266,6 +2453,8 @@ def _path_policy_findings(
         if allow_active_plan_spec_doc_patch and _is_active_plan_spec_doc_patch_path(inventory, rel):
             continue
         if allow_post_closeout_lifecycle_route_stage and _is_existing_lifecycle_route_file(inventory, rel):
+            continue
+        if allow_post_closeout_local_vcs_stage and _is_exact_post_closeout_stage_file(inventory, rel):
             continue
         if _is_lifecycle_authority_path(rel):
             findings.append(
@@ -2330,31 +2519,195 @@ def _is_bounded_mlh_read_tool_request(data: dict[str, object]) -> bool:
     return False
 
 
+def _mlh_policy_command(command: str) -> str:
+    return _powershell_mlh_splat_policy_command(command) or command
+
+
+def _powershell_mlh_splat_policy_command(command: str, *, depth: int = 0) -> str:
+    if depth > 2:
+        return ""
+    stripped = _command_without_shell_literal_payloads(command or "").strip()
+    expanded = _direct_powershell_mlh_splat_policy_command(stripped)
+    if expanded:
+        return expanded
+    for nested in _nested_shell_commands_from_tokens(_shell_tokens(stripped)):
+        expanded = _powershell_mlh_splat_policy_command(nested, depth=depth + 1)
+        if expanded:
+            return expanded
+    return ""
+
+
+def _has_unresolved_mlh_splat_invocation(command: str) -> bool:
+    return _powershell_mlh_splat_invocation_present(command) and not _powershell_mlh_splat_policy_command(command)
+
+
+def _powershell_mlh_splat_invocation_present(command: str, *, depth: int = 0) -> bool:
+    if depth > 2:
+        return False
+    stripped = _command_without_shell_literal_payloads(command or "").strip()
+    if POWERSHELL_SPLAT_INVOCATION_RE.search(stripped):
+        return True
+    return any(
+        _powershell_mlh_splat_invocation_present(nested, depth=depth + 1)
+        for nested in _nested_shell_commands_from_tokens(_shell_tokens(stripped))
+    )
+
+
+def _direct_powershell_mlh_splat_policy_command(command: str) -> str:
+    match = POWERSHELL_SPLAT_INVOCATION_RE.search(command or "")
+    if not match:
+        return ""
+    prefix = command[: match.start()]
+    scalars, arrays, remainder = _powershell_literal_assignments(prefix)
+    if remainder.strip(" \t\r\n;"):
+        return ""
+    args = arrays.get(str(match.group("var") or "").casefold())
+    if args is None:
+        return ""
+    executable = str(match.group("exe") or "").strip()
+    executable_tokens = (
+        ["python", "-m", "my" + "littleharness"]
+        if re.match(r"^(?:python|py)(?:\.exe)?\s+-m\s+my" + "littleharness$", executable, re.IGNORECASE)
+        else ["my" + "littleharness"]
+    )
+    return subprocess.list2cmdline(executable_tokens + args)
+
+
+def _powershell_literal_assignments(prefix: str) -> tuple[dict[str, str], dict[str, list[str]], str]:
+    scalars: dict[str, str] = {}
+    arrays: dict[str, list[str]] = {}
+    remainder = prefix or ""
+    while True:
+        stripped = remainder.lstrip(" \t\r\n;")
+        if not stripped:
+            return scalars, arrays, ""
+        scalar = POWERSHELL_SCALAR_ASSIGNMENT_RE.match(stripped)
+        if scalar:
+            quote = scalar.group(2)
+            value = scalar.group(3)
+            if not _powershell_literal_is_static(value, quote):
+                return scalars, arrays, stripped
+            scalars[str(scalar.group(1)).casefold()] = value
+            remainder = stripped[scalar.end() :]
+            continue
+        array = POWERSHELL_ARRAY_ASSIGNMENT_RE.match(stripped)
+        if array:
+            parsed = _parse_powershell_literal_array(array.group(2), scalars)
+            if parsed is None:
+                return scalars, arrays, stripped
+            arrays[str(array.group(1)).casefold()] = parsed
+            remainder = stripped[array.end() :]
+            continue
+        return scalars, arrays, stripped
+
+
+def _parse_powershell_literal_array(body: str, scalars: dict[str, str]) -> list[str] | None:
+    items: list[str] = []
+    index = 0
+    while index < len(body):
+        while index < len(body) and body[index] in " \t\r\n,":
+            index += 1
+        if index >= len(body):
+            break
+        char = body[index]
+        if char in {"'", '"'}:
+            quote = char
+            index += 1
+            value_parts: list[str] = []
+            while index < len(body):
+                current = body[index]
+                if current == quote:
+                    if index + 1 < len(body) and body[index + 1] == quote:
+                        value_parts.append(quote)
+                        index += 2
+                        continue
+                    break
+                value_parts.append(current)
+                index += 1
+            else:
+                return None
+            value = "".join(value_parts)
+            if not _powershell_literal_is_static(value, quote):
+                return None
+            items.append(value)
+            index += 1
+        elif char == "$":
+            match = re.match(r"\$([A-Za-z_][A-Za-z0-9_]*)", body[index:])
+            if not match:
+                return None
+            name = match.group(1).casefold()
+            if name not in scalars:
+                return None
+            items.append(scalars[name])
+            index += len(match.group(0))
+        else:
+            return None
+        while index < len(body) and body[index] in " \t\r\n":
+            index += 1
+        if index < len(body) and body[index] == ",":
+            index += 1
+            continue
+        if index < len(body) and body[index] not in " \t\r\n":
+            return None
+    return items
+
+
+def _powershell_literal_is_static(value: str, quote: str) -> bool:
+    if "`" in value or "$(" in value:
+        return False
+    return not (quote == '"' and "$" in value)
+
+
 def _is_mlh_owner_route_review_command(command: str) -> bool:
-    lowered = command.casefold()
-    padded = f" {lowered} "
+    policy_command = _mlh_policy_command(command)
+    lowered = policy_command.casefold()
+    tokens = _mlh_command_token_set(policy_command)
     subcommand = _mlh_cli_subcommand(lowered)
     if subcommand == "suggest":
         return (
             not _looks_like_write_command(command)
-            and (" --intent " in padded or " --intent=" in padded or " --help" in padded or " -h" in padded)
+            and (
+                "--intent" in tokens
+                or any(token.startswith("--intent=") for token in tokens)
+                or _has_mlh_review_mode_token(policy_command)
+            )
         )
+    if subcommand == "evidence":
+        return not _looks_like_write_command(command) and _is_mlh_evidence_record_route_command(policy_command)
     return (
         subcommand in MLH_OWNER_ROUTE_REVIEW_COMMANDS
         and not _looks_like_write_command(command)
-        and (" --dry-run" in padded or " --apply" in padded or " --help" in padded or " -h" in padded)
+        and _has_mlh_review_mode_token(policy_command)
+    )
+
+
+def _mlh_command_token_set(command: str) -> set[str]:
+    return {_clean_token(token) for token in _shell_tokens(command)}
+
+
+def _has_mlh_review_mode_token(command: str) -> bool:
+    return bool(_mlh_command_token_set(command).intersection({"--dry-run", "--apply", "--help", "-h"}))
+
+
+def _is_mlh_evidence_record_route_command(command: str) -> bool:
+    lowered = command.casefold()
+    tokens = _mlh_command_token_set(command)
+    return (
+        _mlh_cli_subcommand(lowered) == "evidence"
+        and not _looks_like_write_command(command)
+        and "--record" in tokens
+        and _has_mlh_review_mode_token(command)
     )
 
 
 def _is_research_import_related_prompt_provenance_command(command: str) -> bool:
-    related_prompt = _research_import_related_prompt_path(command)
+    policy_command = _mlh_policy_command(command)
+    related_prompt = _research_import_related_prompt_path(policy_command)
     if not related_prompt:
         return False
-    lowered = command.casefold()
-    padded = f" {lowered} "
     return (
-        _mlh_cli_subcommand(lowered) == "research-import"
-        and (" --dry-run" in padded or " --apply" in padded)
+        _mlh_cli_subcommand(policy_command.casefold()) == "research-import"
+        and _has_mlh_review_mode_token(policy_command)
         and not _looks_like_write_command(command)
     )
 
@@ -2422,17 +2775,272 @@ def _is_post_closeout_lifecycle_route_stage_command(inventory: Inventory, comman
     return all(_is_existing_lifecycle_route_file(inventory, path) for path in paths)
 
 
+def _is_route_produced_lifecycle_route_stage_command(inventory: Inventory, command: str) -> bool:
+    if not _active_plan_ready_for_route_produced_lifecycle_git(inventory):
+        return False
+    if _has_shell_command_separator(command):
+        return False
+    subcommand, _tokens, _index = _git_command_context(command)
+    if subcommand not in {"add", "stage"}:
+        return False
+    pathspecs = _git_stage_pathspecs(command)
+    return _coherent_route_produced_lifecycle_paths(inventory, pathspecs)
+
+
+def _is_post_closeout_local_vcs_stage_command(inventory: Inventory, command: str) -> bool:
+    if _has_active_plan(inventory) or _has_shell_command_separator(command):
+        return False
+    subcommand, _tokens, _index = _git_command_context(command)
+    if subcommand not in {"add", "stage"}:
+        return False
+    pathspecs = _git_stage_pathspecs(command)
+    if not pathspecs:
+        return False
+    return all(_is_exact_post_closeout_stage_file(inventory, pathspec) for pathspec in pathspecs)
+
+
+def _is_post_closeout_local_vcs_commit_command(inventory: Inventory, command: str) -> bool:
+    if _has_active_plan(inventory):
+        return False
+    return _is_narrow_local_vcs_commit_command(command)
+
+
+def _is_route_produced_lifecycle_commit_command(inventory: Inventory, command: str) -> bool:
+    if not _active_plan_ready_for_route_produced_lifecycle_git(inventory):
+        return False
+    if not _is_narrow_local_vcs_commit_command(command):
+        return False
+    return _coherent_route_produced_lifecycle_paths(inventory, _git_staged_paths(inventory))
+
+
+def _is_narrow_local_vcs_commit_command(command: str) -> bool:
+    if _has_shell_command_separator(command):
+        return False
+    subcommand, tokens, raw_tokens, subcommand_index = _git_command_context_tokens(command)
+    if subcommand != "commit" or subcommand_index < 0:
+        return False
+    args = tokens[subcommand_index + 1 :]
+    raw_args = raw_tokens[subcommand_index + 1 :]
+    if not args:
+        return False
+    has_message = False
+    index = 0
+    while index < len(args):
+        token = _clean_token(args[index])
+        option_token = _clean_git_commit_option_token(raw_args[index])
+        if not token:
+            index += 1
+            continue
+        if token == "--":
+            return False
+        if option_token in POST_CLOSEOUT_COMMIT_DISALLOWED_OPTIONS:
+            return False
+        if any(
+            option_token.startswith(option + "=")
+            for option in POST_CLOSEOUT_COMMIT_DISALLOWED_OPTIONS
+            if option.startswith("--")
+        ):
+            return False
+        if option_token in POST_CLOSEOUT_COMMIT_MESSAGE_OPTIONS:
+            if index + 1 >= len(args) or not _clean_token(args[index + 1]):
+                return False
+            has_message = True
+            index += 2
+            continue
+        if any(
+            option_token.startswith(option + "=")
+            for option in POST_CLOSEOUT_COMMIT_MESSAGE_OPTIONS
+            if option.startswith("--")
+        ):
+            has_message = True
+            index += 1
+            continue
+        if option_token.startswith("-m") and len(option_token) > 2:
+            has_message = True
+            index += 1
+            continue
+        if option_token.startswith("-F") and len(option_token) > 2:
+            has_message = True
+            index += 1
+            continue
+        return False
+    return has_message
+
+
+def _active_plan_ready_for_route_produced_lifecycle_git(inventory: Inventory) -> bool:
+    if not _has_active_plan(inventory):
+        return False
+    state = inventory.state
+    if not state or not state.exists:
+        return False
+    phase_status = str(state.frontmatter.data.get("phase_status") or "").strip().casefold()
+    if phase_status != "complete":
+        return False
+    return any(marker in state.content for marker in ROUTE_WRITEBACK_MARKERS)
+
+
+def _coherent_route_produced_lifecycle_paths(inventory: Inventory, paths: list[str] | tuple[str, ...]) -> bool:
+    normalized = _normalized_route_produced_lifecycle_paths(inventory, paths)
+    if not normalized:
+        return False
+    state_rel = "project/" + "project-state.md"
+    roadmap_rel = "project/" + "roadmap.md"
+    active_plan_rel = _active_plan_rel_path(inventory)
+    last_archive_rel = _last_archived_plan_rel_path(inventory)
+    allowed = {state_rel, roadmap_rel}
+    if active_plan_rel:
+        allowed.add(active_plan_rel)
+    if last_archive_rel:
+        allowed.add(last_archive_rel)
+    allowed.update(path for path in normalized if path.startswith("project/archive/plans/"))
+    if any(path not in allowed for path in normalized):
+        return False
+    if state_rel not in normalized:
+        return False
+    companion_paths = normalized - {state_rel}
+    if not companion_paths:
+        return False
+    archive_paths = {path for path in normalized if path.startswith("project/archive/plans/")}
+    if archive_paths and roadmap_rel not in normalized:
+        return False
+    if last_archive_rel and (roadmap_rel in normalized or archive_paths) and last_archive_rel not in normalized:
+        return False
+    return True
+
+
+def _normalized_route_produced_lifecycle_paths(inventory: Inventory, paths: list[str] | tuple[str, ...]) -> set[str]:
+    normalized: set[str] = set()
+    for path in paths:
+        rel = _hook_route_rel_path(inventory, path)
+        if not rel or not _is_existing_lifecycle_route_file(inventory, rel):
+            return set()
+        clean = _normalize_hook_path(rel).casefold()
+        if clean in POST_CLOSEOUT_STAGE_BROAD_PATHS:
+            return set()
+        if any(char in clean for char in "*?[]"):
+            return set()
+        if clean.startswith(POST_CLOSEOUT_STAGE_DISALLOWED_PREFIXES):
+            return set()
+        normalized.add(clean)
+    return normalized
+
+
+def _active_plan_rel_path(inventory: Inventory) -> str:
+    state = inventory.state.frontmatter.data if inventory.state and inventory.state.exists else {}
+    return _normalize_hook_path(str(state.get("active_plan") or "")).casefold()
+
+
+def _last_archived_plan_rel_path(inventory: Inventory) -> str:
+    state = inventory.state.frontmatter.data if inventory.state and inventory.state.exists else {}
+    return _normalize_hook_path(str(state.get("last_archived_plan") or "")).casefold()
+
+
+def _git_staged_paths(inventory: Inventory) -> tuple[str, ...]:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(inventory.root), "diff", "--cached", "--name-only"],
+            check=False,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ()
+    if result.returncode != 0:
+        return ()
+    return tuple(line.strip() for line in result.stdout.splitlines() if line.strip())
+
+
+def _git_stage_pathspecs(command: str) -> list[str]:
+    subcommand, tokens, subcommand_index = _git_command_context(command)
+    if subcommand not in {"add", "stage"} or subcommand_index < 0:
+        return []
+    pathspecs: list[str] = []
+    option_mode = True
+    for token in tokens[subcommand_index + 1 :]:
+        clean = _clean_token(token)
+        if not clean:
+            continue
+        if _is_shell_command_separator(token, clean):
+            return []
+        if clean == "--":
+            option_mode = False
+            continue
+        if option_mode and clean.startswith("-"):
+            return []
+        pathspecs.append(clean)
+    return pathspecs
+
+
+def _is_exact_post_closeout_stage_file(inventory: Inventory, pathspec: str) -> bool:
+    clean = _clean_token(pathspec)
+    if not clean:
+        return False
+    rel = _normalize_hook_path(clean).casefold()
+    if rel in POST_CLOSEOUT_STAGE_BROAD_PATHS:
+        return False
+    if any(char in rel for char in "*?[]"):
+        return False
+    if rel.startswith(":") or any(rel.startswith(prefix) for prefix in POST_CLOSEOUT_STAGE_DISALLOWED_PREFIXES):
+        return False
+    target = _resolve_hook_path_from_root(inventory, clean)
+    if target is None:
+        return False
+    try:
+        target.relative_to(inventory.root.resolve())
+    except (OSError, RuntimeError, ValueError):
+        return False
+    try:
+        return target.is_file() and not target.is_symlink()
+    except (OSError, RuntimeError):
+        return False
+
+
+def _has_shell_command_separator(command: str) -> bool:
+    for token in _shell_tokens(command):
+        clean = _clean_token(token)
+        if _is_shell_command_separator(token, clean):
+            return True
+    return False
+
+
 def _git_subcommand(command: str) -> str:
-    tokens = [_clean_token(token) for token in _shell_tokens(command)]
-    tokens = [token for token in tokens if token]
+    return _git_command_context(command)[0]
+
+
+def _git_command_context(command: str) -> tuple[str, list[str], int]:
+    subcommand, tokens, _raw_tokens, subcommand_index = _git_command_context_tokens(command)
+    return subcommand, tokens, subcommand_index
+
+
+def _git_command_context_tokens(command: str) -> tuple[str, list[str], list[str], int]:
+    token_pairs = [(raw, _clean_token(raw)) for raw in _shell_tokens(command)]
+    token_pairs = [(raw, clean) for raw, clean in token_pairs if clean]
+    raw_tokens = [raw for raw, _clean in token_pairs]
+    tokens = [clean for _raw, clean in token_pairs]
     for index, token in enumerate(tokens):
         if not _is_git_executable_token(token):
             continue
-        return _git_subcommand_after_options(tokens, index + 1)
-    return ""
+        subcommand_index = _git_subcommand_index_after_options(tokens, index + 1)
+        if subcommand_index >= 0:
+            return tokens[subcommand_index], tokens, raw_tokens, subcommand_index
+    return "", tokens, raw_tokens, -1
+
+
+def _clean_git_commit_option_token(token: str) -> str:
+    clean = str(token or "").strip(" \t\r\n\"'`{}[](),;")
+    if clean.startswith("--"):
+        return clean.casefold()
+    return clean
 
 
 def _git_subcommand_after_options(tokens: list[str], start: int) -> str:
+    index = _git_subcommand_index_after_options(tokens, start)
+    return tokens[index] if index >= 0 else ""
+
+
+def _git_subcommand_index_after_options(tokens: list[str], start: int) -> int:
     index = start
     while index < len(tokens):
         token = tokens[index]
@@ -2451,8 +3059,8 @@ def _git_subcommand_after_options(tokens: list[str], start: int) -> str:
         if token.startswith("-"):
             index += 1
             continue
-        return token
-    return ""
+        return index
+    return -1
 
 
 def _is_git_executable_token(token: str) -> bool:
@@ -2549,6 +3157,37 @@ def _hook_route_next_safe_command(inventory: Inventory, path: str) -> str:
     rel = _hook_route_rel_path(inventory, path) or _normalize_hook_path(path)
     route_id = classify_memory_route(rel).route_id
     topic = _route_topic_from_path(rel)
+    if _is_agent_run_evidence_route_path(rel):
+        record_id = _route_topic_from_path(rel) or "<record-id>"
+        return mlh_command(
+            "evidence",
+            "--record",
+            "--dry-run",
+            "--record-id",
+            record_id,
+            "--role",
+            "<role>",
+            "--actor",
+            "<actor>",
+            "--task",
+            "<task>",
+            "--assigned-scope",
+            "<scope>",
+            "--runtime",
+            "<runtime>",
+            "--worktree-id",
+            "<worktree-id>",
+            "--status",
+            "succeeded",
+            "--stop-reason",
+            "<reason>",
+            "--attempt-budget",
+            "<n/n>",
+            "--docs-decision",
+            "<docs-decision>",
+            "--residual-risk",
+            "<risk>",
+        )
     if _is_roadmap_path(rel) or route_id == "roadmap":
         return mlh_command("roadmap", "--dry-run", "--action", "update", "--item-id", "<id>")
     if route_id == "state":
@@ -2559,6 +3198,8 @@ def _hook_route_next_safe_command(inventory: Inventory, path: str) -> str:
         return mlh_command("incubate", "--dry-run", "--topic", safe_double_quoted(topic, placeholder="<topic>"), "--note-file", "-")
     if route_id == "research":
         return mlh_command("research-import", "--dry-run", "--title", '"<title>"', "--topic", safe_double_quoted(topic, placeholder="<topic>"), "--text-file", "-")
+    if _is_temporary_roadmap_manifest_path(rel):
+        return mlh_command("cleanup", "--dry-run", "--target", rel)
     if route_id in {"adrs", "decisions", "product-docs"}:
         return mlh_command("intake", "--dry-run", "--text-file", "-", "--target", rel)
     if route_id == "verification":
@@ -2568,6 +3209,35 @@ def _hook_route_next_safe_command(inventory: Inventory, path: str) -> str:
     if route_id == "archive":
         return mlh_command("memory-hygiene", "--dry-run", "--scan")
     return mlh_command("suggest", "--intent", safe_double_quoted(f"route owner for {safe_intent_text(rel or path, placeholder='<path>')}"))
+
+
+def _git_mutation_next_safe_command(inventory: Inventory, command: str) -> str:
+    if _active_plan_ready_for_route_produced_lifecycle_git(inventory):
+        paths = _route_produced_lifecycle_suggested_stage_paths(inventory, _git_stage_pathspecs(command))
+        if paths:
+            return "gi" + "t add -- " + " ".join(shell_arg(path) for path in paths)
+    if _has_active_plan(inventory):
+        return mlh_command("writeback", "--dry-run", "--phase-status", "complete", "--docs-decision", "<docs-decision>")
+    return "gi" + "t add -- <exact-reviewed-files>; " + "gi" + "t diff --cached --check; " + "gi" + "t commit -F <message-file>"
+
+
+def _route_produced_lifecycle_suggested_stage_paths(inventory: Inventory, candidates: list[str] | tuple[str, ...]) -> list[str]:
+    state_rel = "project/" + "project-state.md"
+    roadmap_rel = "project/" + "roadmap.md"
+    archive_prefix = "project/" + "archive/plans/"
+    active_plan_rel = _active_plan_rel_path(inventory)
+    last_archive_rel = _last_archived_plan_rel_path(inventory)
+    candidate_rels = {_hook_route_rel_path(inventory, path).casefold() for path in candidates if path}
+    archive_rels = {path for path in candidate_rels if path.startswith(archive_prefix)}
+    if last_archive_rel:
+        archive_rels.add(last_archive_rel)
+    paths = [state_rel]
+    if archive_rels:
+        paths.append(roadmap_rel)
+        paths.extend(sorted(archive_rels))
+    elif active_plan_rel:
+        paths.append(active_plan_rel)
+    return [path for path in _dedupe_nonempty(paths) if _is_existing_lifecycle_route_file(inventory, path)]
 
 
 def _hook_product_root_write_next_safe_command(inventory: Inventory, path: str) -> str:
@@ -2665,17 +3335,21 @@ def _looks_like_opaque_shell_payload(command: str) -> bool:
 
 
 def _looks_like_next_plan_apply(lowered_command: str) -> bool:
-    padded = f" {lowered_command} "
+    policy_command = _mlh_policy_command(lowered_command)
+    padded = f" {policy_command} "
     if " --update-active" in padded:
         return False
-    return _mlh_cli_subcommand(lowered_command) == "plan" and " --apply" in padded
+    return _mlh_cli_subcommand(policy_command) == "plan" and " --apply" in padded
 
 
 def _looks_like_unsafe_mlh_mutation(lowered_command: str) -> bool:
-    subcommand = _mlh_cli_subcommand(lowered_command)
+    if _has_unresolved_mlh_splat_invocation(lowered_command):
+        return True
+    policy_command = _mlh_policy_command(lowered_command)
+    subcommand = _mlh_cli_subcommand(policy_command)
     if not subcommand:
         return False
-    padded = f" {lowered_command} "
+    padded = f" {policy_command} "
     if subcommand == "adapter":
         return " --install-client-config " in padded
     return subcommand in {
@@ -2688,11 +3362,12 @@ def _looks_like_unsafe_mlh_mutation(lowered_command: str) -> bool:
         "projection",
         "memory-hygiene",
         "hooks",
+        "cleanup",
     }
 
 
 def _mlh_cli_subcommand(command: str) -> str:
-    tokens = _shell_tokens(command)
+    tokens = _shell_tokens(_mlh_policy_command(command))
     for index, token in enumerate(tokens):
         if _is_mlh_executable_token(token):
             return _next_mlh_subcommand(tokens, index + 1)
@@ -2772,8 +3447,11 @@ def _clean_token(token: str) -> str:
 
 
 def _has_explicit_mlh_review_mode(lowered_command: str) -> bool:
-    padded = f" {lowered_command} "
-    if " --dry-run" in padded or " --apply" in padded or " --help" in padded or " -h" in padded:
+    policy_command = _mlh_policy_command(lowered_command)
+    if _has_unresolved_mlh_splat_invocation(lowered_command):
+        return False
+    padded = f" {policy_command} "
+    if _has_mlh_review_mode_token(policy_command):
         return True
     if " mylittleharness" in padded and " projection " in padded:
         return any(
@@ -2806,13 +3484,6 @@ def _has_active_plan(inventory: Inventory) -> bool:
     return str(state.get("plan_status") or "").strip().casefold() == "active" and bool(str(state.get("active_plan") or "").strip())
 
 
-def _active_plan_not_ready_for_git(inventory: Inventory) -> bool:
-    if not _has_active_plan(inventory):
-        return False
-    state = inventory.state.frontmatter.data if inventory.state and inventory.state.exists else {}
-    return str(state.get("phase_status") or "").strip().casefold() != "complete"
-
-
 def _is_lifecycle_authority_path(path: str) -> bool:
     rel = _normalize_hook_path(path).casefold()
     return rel in LIFECYCLE_AUTHORITY_PATHS
@@ -2821,6 +3492,12 @@ def _is_lifecycle_authority_path(path: str) -> bool:
 def _is_lifecycle_markdown_path(path: str) -> bool:
     rel = _normalize_hook_path(path).casefold()
     return rel.endswith(".md") and any(rel.startswith(prefix) for prefix in LIFECYCLE_MARKDOWN_PREFIXES)
+
+
+def _is_agent_run_evidence_route_path(path: str) -> bool:
+    rel = _normalize_hook_path(path).casefold()
+    agent_run_prefix = "/".join(("project", "verification", "agent-runs")) + "/"
+    return rel.startswith(agent_run_prefix) and rel.endswith(".md")
 
 
 def _is_lifecycle_route_path(path: str) -> bool:
@@ -2834,6 +3511,19 @@ def _is_lifecycle_route_path(path: str) -> bool:
         if not prefix.endswith("/") and (rel == route or rel.startswith(route + "/")):
             return True
     return False
+
+
+def _is_temporary_roadmap_manifest_path(path: str) -> bool:
+    rel = _normalize_hook_path(path).casefold()
+    return bool(TEMPORARY_ROADMAP_MANIFEST_RE.match(rel))
+
+
+def _temporary_roadmap_manifest_path(paths: list[str]) -> str:
+    for path in paths:
+        rel = _normalize_hook_path(path)
+        if _is_temporary_roadmap_manifest_path(rel):
+            return rel
+    return ""
 
 
 def _is_existing_lifecycle_route_file(inventory: Inventory, path: str) -> bool:
@@ -3309,6 +3999,24 @@ def _payload_value(payload: object, key: str) -> str:
         return "<none>"
     value = payload.get(key)
     return str(value) if value not in (None, "") else "<none>"
+
+
+def _lifecycle_phase_summary(payload: object) -> str:
+    if not isinstance(payload, dict):
+        return "active_phase=<none>; phase_status=<none>"
+    plan_status = str(payload.get("plan_status") or "").strip().casefold()
+    active_plan = str(payload.get("active_plan") or "").strip()
+    active_phase = str(payload.get("active_phase") or "").strip()
+    phase_status = str(payload.get("phase_status") or "").strip()
+    last_completed_phase = str(payload.get("last_completed_phase") or "").strip()
+    last_phase_status = str(payload.get("last_phase_status") or "").strip()
+    if plan_status == "active" or active_plan:
+        return f"active_phase={active_phase or '<none>'}; phase_status={phase_status or '<none>'}"
+    if last_completed_phase or last_phase_status:
+        return f"last_completed_phase={last_completed_phase or '<none>'}; last_phase_status={last_phase_status or '<none>'}"
+    if active_phase or phase_status:
+        return f"last_completed_phase={active_phase or '<none>'}; last_phase_status={phase_status or '<none>'}"
+    return "active_phase=<none>; phase_status=<none>"
 
 
 def _hook_target(root: Path, hook_id: str) -> Path:

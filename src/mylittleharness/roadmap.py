@@ -18,6 +18,7 @@ from .models import Finding
 from .reporting import RouteWriteEvidence, route_write_findings
 from .research_distill import research_distill_quality_problem
 from .route_reference_guards import route_reference_transaction_guard_findings
+from .routes import route_destination_matches, route_destination_policy_for_field
 from .safe_commands import safe_item_id
 
 
@@ -3848,27 +3849,10 @@ def _path_relationship_errors(
 
 
 def _route_destination_allowed(field: str, rel_path: str) -> bool:
-    if field == "source_incubation":
-        return rel_path.startswith("project/plan-incubation/") or rel_path.startswith("project/archive/reference/incubation/")
-    if field == RELATED_INCUBATION_FIELD:
-        return rel_path.startswith("project/plan-incubation/") or rel_path.startswith("project/archive/reference/incubation/")
-    if field == "source_research":
-        return rel_path.startswith("project/research/") or rel_path.startswith("project/archive/reference/research/")
-    if field == SOURCE_MEMBERS_FIELD:
-        return rel_path.startswith(
-            (
-                "project/plan-incubation/",
-                "project/archive/reference/incubation/",
-                "project/research/",
-                "project/archive/reference/research/",
-                "project/verification/",
-            )
-        )
-    if field == "related_specs":
-        return rel_path.startswith("project/specs/") or rel_path.startswith("docs/specs/")
-    if field in {"related_plan", "archived_plan"}:
-        return rel_path == "project/implementation-plan.md" or rel_path.startswith("project/archive/plans/")
-    return True
+    policy = route_destination_policy_for_field(field)
+    if policy is None:
+        return True
+    return route_destination_matches(policy, rel_path)
 
 
 def _batch_plan_findings(inventory: Inventory, batch_plan: RoadmapBatchPlan, apply: bool) -> list[Finding]:

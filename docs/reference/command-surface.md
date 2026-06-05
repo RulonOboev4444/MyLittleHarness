@@ -35,6 +35,7 @@ and root escapes. Use `--dry-run` before every mutating default command.
 | `transition` | reviewed lifecycle composition | yes | yes plus review token | composes phase completion, archive, and next-plan opening only when reviewed |
 | `roadmap` | accepted-work sequencing | yes | yes | writes `project/roadmap.md` and explicit relationship metadata |
 | `memory-hygiene` | research/incubation cleanup | yes | yes | bounded route cleanup, archive coverage, and link repair |
+| `attachment-import` | incoming binary artifact route | yes | yes | copies one reviewed binary into `project/attachments/**` and writes a sidecar metadata card |
 | `research-import` | research provenance | yes | yes | writes one non-authority research artifact |
 | `research-distill` | research distillate | yes | yes | writes reviewed synthesis with quality and planning gates |
 | `research-compare` | research comparison | yes | yes | writes reviewed comparison and optional source cleanup |
@@ -43,6 +44,10 @@ and root escapes. Use `--dry-run` before every mutating default command.
 
 These commands are advanced by design. Their output can guide an operator, but
 only an explicit apply route writes repo-visible authority.
+`attachment-import` is the route for incoming PDFs, DOCX, XLSX, images, and
+ZIPs. It writes the original binary beside `artifact.md`; the binary remains
+source evidence, and the Markdown card is the metadata authority for hash,
+provenance, related research, docs decision, and lifecycle boundaries.
 
 ## Read-Only Helpers
 
@@ -50,7 +55,7 @@ only an explicit apply route writes repo-visible authority.
 | --- | --- | --- | --- |
 | `status` / `validate` | compatibility diagnostics | no | advisory reports |
 | `dashboard --inspect` | cockpit projection | no | starts no server and approves no mutation |
-| `intelligence` | source-verified navigation | no by default | may use disposable projection inputs for navigation |
+| `intelligence` | source-verified navigation | may refresh disposable cache | path/full-text/query modes may refresh only `.mylittleharness/generated/projection/` |
 | `manifest --inspect` | route/role protocol report | no | advisory orchestration metadata |
 | `closeout` | closeout cue report | no | may suggest trailers, never stages or commits |
 | bare `evidence` | evidence cue report | no | report only |
@@ -78,7 +83,9 @@ Current command-surface rows are:
 | Surface id | Read/write class | Apply posture | Root posture | Write-path posture |
 | --- | --- | --- | --- | --- |
 | `read-only-status-navigation` | read-only report | no `--apply` path for this posture | any readable MLH root matching command posture | writes no repo files, generated caches, package artifacts, hooks, Git state, user config, or workstation state |
+| `read-mostly-generated-cache-navigation` | read-mostly report with disposable cache refresh | no `--apply`; path/full-text navigation may refresh disposable cache | any readable MLH root matching intelligence posture | writes no repo source, lifecycle, package, hook, Git, user config, workstation, or runtime state; may refresh only `.mylittleharness/generated/projection/` |
 | `explicit-dry-run-apply-rails` | explicit preview then write | dry-run is preview; apply is explicit and command-owned | eligible live operating roots or explicit command roots | writes only reviewed route files, scaffold files, generated cache paths, or local config targets |
+| `direct-generated-cache-maintenance` | direct disposable generated-cache mutation | no matching dry-run/apply rail is implied | readable MLH roots with projection cache support | writes only disposable projection cache files or markers under `.mylittleharness/generated/projection/` |
 | `product-package-smoke` | product verification | no `--apply`; verification mode only | MyLittleHarness product source checkout | copies to a temporary workspace outside the product root and leaves no product-root build/dist/egg-info artifacts |
 | `optional-runtime-helper` | optional runtime cache | runtime mutations require dry-run/apply; status is read-only | local MLH root with runtime cache boundary | writes only root-local disposable mlhd runtime/cache/autostart artifacts or generated projection refresh output |
 

@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import hashlib
 from pathlib import Path
 import re
+import shlex
 
 from .atomic_files import AtomicFileWrite, FileTransactionError, apply_file_transaction
 from .command_discovery import rails_not_cognition_boundary_finding
@@ -13,7 +14,7 @@ from .inventory import Inventory, Surface
 from .models import Finding
 from .evidence_cues import CLOSEOUT_FIELD_NAMES, closeout_field_cues, cue_findings, find_cues
 from .parsing import Frontmatter, parse_frontmatter
-from .root_boundary import source_path_boundary_violation
+from .root_boundary import record_id_conflict, root_relative_path_conflict, source_path_boundary_violation
 from .writeback import (
     WritebackFact,
     acceptance_evidence_findings,
@@ -86,6 +87,26 @@ AGENT_RUN_STATUSES = {
     "needs-human-review",
 }
 AGENT_RUN_DOCS_DECISIONS = {"updated", "not-needed", "uncertain"}
+AGENT_RUN_ROUTE_PROPOSAL_FIELDS = ("route_proposals", "recommended_next_routes", "recommended_next_route")
+ROUTE_PROPOSAL_FORBIDDEN_TERMS = {
+    "--apply",
+    "--model",
+    "--model-id",
+    "--provider",
+    "apply",
+    "archive",
+    "commit",
+    "git",
+    "launch",
+    "model",
+    "provider",
+    "push",
+    "roadmap",
+    "stage",
+    "staging",
+    "worker",
+    "writeback",
+}
 RECORD_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 SOURCE_HASH_RE = re.compile(r"^(.+?)\s+(?:sha256=([a-fA-F0-9]{64})|(missing)|(unreadable)|(invalid-path))$")
 
@@ -317,11 +338,33 @@ def agent_run_record_findings(inventory: Inventory, code_prefix: str = "agent-ru
                 rel_path,
             )
         )
-        findings.extend(_agent_run_record_metadata_findings(rel_path, frontmatter, data, code_prefix))
+        metadata_findings = _agent_run_record_metadata_findings(rel_path, frontmatter, data, code_prefix)
+        findings.extend(metadata_findings)
+        if any(finding.severity == "warn" for finding in metadata_findings):
+            findings.append(agent_run_record_template_finding(rel_path, code_prefix))
         findings.extend(_agent_run_source_hash_findings(inventory.root, rel_path, data, code_prefix))
+        findings.extend(_agent_run_route_proposal_findings(rel_path, data, code_prefix))
 
     findings.extend(_agent_run_record_boundary_findings(code_prefix))
     return findings
+
+
+def agent_run_record_template_finding(rel_path: str, code_prefix: str = "agent-run") -> Finding:
+    record_id = Path(rel_path).stem or "run-id"
+    handoff_ref = f"project/verification/handoffs/{record_id}.md"
+    example = (
+        "minimal valid agent-run frontmatter example: --- | "
+        f"schema: \"{AGENT_RUN_SCHEMA}\" | record_type: \"agent-run\" | record_id: \"{record_id}\" | "
+        "role: \"reviewer\" | actor: \"codex\" | task: \"review evidence\" | assigned_scope: \"current slice\" | "
+        "runtime: \"local-shell\" | worktree_id: \"main\" | status: \"succeeded\" | "
+        "stop_reason: \"verification-passed\" | attempt_budget: \"1/1\" | docs_decision: \"not-needed\" | "
+        f"residual_risk: \"none\" | input_refs: [\"project/implementation-plan.md\"] | output_refs: [\"{handoff_ref}\"] | "
+        f"claimed_paths: [\"{handoff_ref}\"] | changed_files: [\"{handoff_ref}\"] | "
+        f"commands: [\"mylittleharness --root <root> check\"] | verification_refs: [\"{handoff_ref}\"] | "
+        f"source_hashes: [\"{handoff_ref} missing\"] | ---; scaffold with "
+        "`mylittleharness --root <root> evidence --record --dry-run ...`"
+    )
+    return Finding("info", f"{code_prefix}-record-template", example, rel_path)
 
 
 def lifecycle_mutation_provenance_findings(inventory: Inventory, code_prefix: str = "lifecycle-provenance") -> list[Finding]:
@@ -622,6 +665,8 @@ def _agent_run_request_findings(inventory: Inventory, request: AgentRunRecordReq
         findings.append(Finding("error", "agent-run-record-refused", "--record-id is required"))
     elif not RECORD_ID_RE.match(request.record_id):
         findings.append(Finding("error", "agent-run-record-refused", "--record-id may contain only letters, digits, dot, underscore, or dash"))
+    elif record_id_conflict(request.record_id):
+        findings.append(Finding("error", "agent-run-record-refused", f"--record-id {record_id_conflict(request.record_id)}"))
 
     for field, value in (
         ("--role", request.role),
@@ -949,6 +994,11 @@ def _agent_run_record_metadata_findings(
         findings.append(Finding("warn", code, f"agent run record schema should be {AGENT_RUN_SCHEMA}", rel_path))
     if data.get("record_type") != "agent-run":
         findings.append(Finding("warn", code, "agent run record record_type should be agent-run", rel_path))
+    record_id = str(data.get("record_id") or "").strip()
+    if record_id and not RECORD_ID_RE.match(record_id):
+        findings.append(Finding("warn", code, "agent run record record_id may contain only letters, digits, dot, underscore, or dash", rel_path))
+    elif record_id and record_id_conflict(record_id):
+        findings.append(Finding("warn", code, f"agent run record record_id {record_id_conflict(record_id)}", rel_path))
     status = str(data.get("status") or "").strip()
     if status and status not in AGENT_RUN_STATUSES:
         findings.append(Finding("warn", code, f"agent run record status is unsupported: {status}", rel_path))
@@ -1021,6 +1071,101 @@ def _agent_run_source_hash_findings(root: Path, rel_path: str, data: dict[str, o
     return findings
 
 
+def _agent_run_route_proposal_findings(rel_path: str, data: dict[str, object], code_prefix: str) -> list[Finding]:
+    proposals: list[str] = []
+    for field in AGENT_RUN_ROUTE_PROPOSAL_FIELDS:
+        proposals.extend(_frontmatter_string_list(data.get(field)))
+    proposals = list(dict.fromkeys(proposal for proposal in proposals if proposal.strip()))
+    if not proposals:
+        return []
+
+    findings: list[Finding] = []
+    for proposal in proposals:
+        allowed, reason = _route_proposal_allowed(proposal)
+        if allowed:
+            findings.append(
+                Finding(
+                    "info",
+                    f"{code_prefix}-route-proposal",
+                    f"route proposal is advisory and allowed for operator review only: {proposal}",
+                    rel_path,
+                )
+            )
+        else:
+            findings.append(
+                Finding(
+                    "warn",
+                    f"{code_prefix}-route-proposal-refused",
+                    f"route proposal refused: {proposal}; {reason}",
+                    rel_path,
+                )
+            )
+    findings.append(
+        Finding(
+            "info",
+            f"{code_prefix}-route-proposal-boundary",
+            "route proposals are packet evidence only; MLH does not execute commands, approve apply/archive/Git/provider/writeback routes, or mutate lifecycle from them",
+            rel_path,
+        )
+    )
+    return findings
+
+
+def _route_proposal_allowed(proposal: str) -> tuple[bool, str]:
+    text = proposal.strip()
+    if not text:
+        return False, "empty proposal"
+    try:
+        tokens = shlex.split(text, posix=False)
+    except ValueError as exc:
+        return False, f"proposal could not be tokenized: {exc}"
+    normalized = [_strip_quotes(token).casefold() for token in tokens if _strip_quotes(token)]
+    if not normalized:
+        return False, "empty proposal"
+    for term in ROUTE_PROPOSAL_FORBIDDEN_TERMS:
+        if term in normalized:
+            return False, f"contains forbidden lifecycle/provider/writeback/Git term `{term}`"
+    command_tokens = _route_proposal_command_tokens(normalized)
+    if not command_tokens:
+        return False, "missing MLH command"
+    command = command_tokens[0]
+    if command == "check":
+        return True, ""
+    if command == "plan":
+        if "--dry-run" in command_tokens and "--apply" not in command_tokens:
+            return True, ""
+        return False, "plan proposals must include --dry-run and must not include --apply"
+    return False, "only check and plan --dry-run route proposals are allowed"
+
+
+def _route_proposal_command_tokens(tokens: list[str]) -> list[str]:
+    remaining = list(tokens)
+    if remaining and Path(remaining[0]).name.casefold() in {"mylittleharness", "mylittleharness.exe", "python", "python.exe", "uv", "uv.exe"}:
+        remaining = remaining[1:]
+    if remaining and remaining[0] == "-m":
+        remaining = remaining[2:] if len(remaining) > 1 and remaining[1] == "mylittleharness" else remaining[1:]
+    if remaining and remaining[0] in {"mylittleharness", "mylittleharness.exe"}:
+        remaining = remaining[1:]
+    index = 0
+    while index < len(remaining):
+        token = remaining[index]
+        if token == "--root":
+            index += 2
+            continue
+        if token.startswith("--root="):
+            index += 1
+            continue
+        break
+    return remaining[index:]
+
+
+def _strip_quotes(value: str) -> str:
+    text = str(value or "").strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
+        return text[1:-1].strip()
+    return text
+
+
 def _frontmatter_string_list(value: object) -> tuple[str, ...]:
     if isinstance(value, list):
         return tuple(str(item).strip() for item in value if str(item).strip())
@@ -1069,6 +1214,8 @@ def _agent_run_record_refresh_plan(root: Path, target_rel: str, severity: str) -
         return None, [Finding(severity, "agent-run-record-refused", "existing agent run record record_type should be agent-run", target_rel)]
     record_id = str(data.get("record_id") or "").strip()
     expected_record_id = Path(target_rel).stem
+    if record_id_conflict(record_id):
+        return None, [Finding(severity, "agent-run-record-refused", f"existing agent run record_id {record_id!r} is unsafe: {record_id_conflict(record_id)}", target_rel)]
     if record_id != expected_record_id:
         return None, [Finding(severity, "agent-run-record-refused", f"existing agent run record_id {record_id!r} does not match route target {expected_record_id!r}", target_rel)]
 
@@ -1220,14 +1367,7 @@ def _agent_run_record_boundary_findings(code_prefix: str = "agent-run-record") -
 
 
 def _root_relative_path_conflict(rel_path: str) -> str:
-    normalized = str(rel_path or "").replace("\\", "/").strip()
-    if not normalized:
-        return "must be a non-empty root-relative path"
-    if re.match(r"^[A-Za-z]:[\\/]", normalized) or normalized.startswith("/"):
-        return "must be root-relative, not absolute"
-    if any(part in {"..", ""} for part in normalized.split("/")):
-        return "must not contain parent traversal or empty path segments"
-    return ""
+    return root_relative_path_conflict(str(rel_path or "").replace("\\", "/").strip())
 
 
 def _to_rel_path(root: Path, path: Path) -> str:

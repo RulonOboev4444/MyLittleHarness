@@ -31,6 +31,30 @@ class ProjectionTests(unittest.TestCase):
             self.assertGreater(state.line_count, 0)
             self.assertGreater(state.link_count, 0)
 
+    def test_projection_includes_nested_coordination_evidence_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_operating_root(Path(tmp))
+            handoff_dir = root / "project/verification/handoffs"
+            agent_run_dir = root / "project/verification/agent-runs"
+            queue_dir = root / "project/symphony/queue"
+            handoff_dir.mkdir(parents=True)
+            agent_run_dir.mkdir(parents=True)
+            queue_dir.mkdir(parents=True)
+            handoff_rel = "project/verification/handoffs/rm-site-01-operator-site-sdk-research.md"
+            agent_run_rel = "project/verification/agent-runs/rm-site-01-operator-site-sdk-research.md"
+            queue_rel = "project/symphony/queue/rm-site-01-operator-site-sdk-20260531-review.json"
+            (root / handoff_rel).write_text("# Research handoff\n\noperator-site-sdk-research evidence\n", encoding="utf-8")
+            (root / agent_run_rel).write_text("# Research run\n\noperator-site-sdk-research run\n", encoding="utf-8")
+            (root / queue_rel).write_text('{"id": "review", "state": "Todo"}\n', encoding="utf-8")
+
+            projection = build_projection(load_inventory(root))
+
+            self.assertIn(handoff_rel, projection.source_by_path)
+            self.assertIn(agent_run_rel, projection.source_by_path)
+            self.assertIn(queue_rel, projection.source_by_path)
+            self.assertEqual("handoff-note", projection.source_by_path[handoff_rel].role)
+            self.assertIn("operator-site-sdk-research", projection.source_by_path[handoff_rel].content)
+
     def test_projection_records_links_and_fan_in(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_root(Path(tmp), active=False, mirrors=False)
@@ -105,6 +129,53 @@ class ProjectionTests(unittest.TestCase):
             )
             self.assertGreater(projection.summary.relationship_node_count, 0)
             self.assertGreater(projection.summary.relationship_edge_count, 0)
+
+    def test_projection_records_attachment_relationship_edges(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_root(Path(tmp), active=False, mirrors=False)
+            attachment_rel = "project/attachments/vendor-proposals/2026-06-02-mts-internet/artifact.md"
+            (root / attachment_rel).parent.mkdir(parents=True)
+            (root / attachment_rel).write_text(
+                "---\n"
+                'type: "attachment"\n'
+                'kind: "vendor-proposal"\n'
+                'status: "imported"\n'
+                'title: "MTS internet commercial proposal"\n'
+                'source_file: "original.pdf"\n'
+                "---\n"
+                "# Attachment\n",
+                encoding="utf-8",
+            )
+            (root / "project/research").mkdir(exist_ok=True)
+            (root / "project/research/mts-review.md").write_text(
+                "---\n"
+                'status: "imported"\n'
+                "source_attachments:\n"
+                f'  - "{attachment_rel}"\n'
+                "---\n"
+                "# Research\n",
+                encoding="utf-8",
+            )
+            (root / "project/plan-incubation").mkdir(exist_ok=True)
+            (root / "project/plan-incubation/attachment-followup.md").write_text(
+                "---\n"
+                'status: "incubating"\n'
+                "attachment_refs:\n"
+                f'  - "{attachment_rel}"\n'
+                "---\n"
+                "# Incubation\n",
+                encoding="utf-8",
+            )
+
+            projection = build_projection(load_inventory(root))
+
+            edges = {
+                (edge.source, edge.relation, edge.target): edge.status
+                for edge in projection.relationship_edges
+                if edge.target == attachment_rel
+            }
+            self.assertEqual("present", edges[("project/research/mts-review.md", "source_attachments", attachment_rel)])
+            self.assertEqual("present", edges[("project/plan-incubation/attachment-followup.md", "attachment_refs", attachment_rel)])
 
     def test_projection_classifies_live_root_product_target_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

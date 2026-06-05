@@ -31,7 +31,11 @@ DISCOVERY_PACKET_SCHEMA = "mylittleharness.discovery-packet.v1"
 DISCOVERY_PACKET_SOURCE_TYPE = "pre-plan-discovery-packet"
 _VALID_QUALITY_STATUSES = {QUALITY_STATUS_SUFFICIENT, QUALITY_STATUS_PROVISIONAL}
 _VALID_PLANNING_RELIANCE = {PLANNING_RELIANCE_ALLOWED, PLANNING_RELIANCE_BLOCKED}
+_DISCOVERY_PACKET_READY_STATUS = "ready-for-plan"
 _DISCOVERY_PACKET_BLOCKED_STATUSES = {"blocked", "contested", "draft"}
+_VALID_DISCOVERY_STATUSES = {_DISCOVERY_PACKET_READY_STATUS, *_DISCOVERY_PACKET_BLOCKED_STATUSES}
+_DISCOVERY_PACKET_REF_KEYS = {"source_refs", "source_members", "evidence_refs"}
+_SOURCE_HASH_ENTRY_RE = re.compile(r"^(?P<ref>.+?)\s+sha256=(?P<digest>[0-9a-f]{64})$", re.IGNORECASE)
 _RESERVED_SLUGS = {
     "aux",
     "con",
@@ -289,6 +293,8 @@ def research_distill_quality_problem(source_rel: str, text: str) -> str:
         return ""
     if is_discovery_packet:
         packet_problem = _discovery_packet_frontmatter_problem(
+            frontmatter_data=frontmatter.data if frontmatter.has_frontmatter else {},
+            text=text,
             quality_status=quality_status,
             planning_reliance=planning_reliance,
             discovery_status=discovery_status,
@@ -296,6 +302,11 @@ def research_distill_quality_problem(source_rel: str, text: str) -> str:
         if packet_problem:
             return packet_problem
     if quality_status == QUALITY_STATUS_SUFFICIENT and planning_reliance == PLANNING_RELIANCE_ALLOWED:
+        if is_discovery_packet:
+            return ""
+        quality = assess_research_distill_quality(source_rel, text)
+        if quality.planning_reliance != PLANNING_RELIANCE_ALLOWED:
+            return f"{quality_status}/{planning_reliance}: {'; '.join(quality.quality_gate_issues)}"
         return ""
     if quality_status == QUALITY_STATUS_PROVISIONAL or planning_reliance == PLANNING_RELIANCE_BLOCKED:
         issue_text = "; ".join(issues) if issues else "quality gate is provisional"
@@ -316,7 +327,14 @@ def _is_discovery_packet_profile(schema: str, source_type: str) -> bool:
     )
 
 
-def _discovery_packet_frontmatter_problem(*, quality_status: str, planning_reliance: str, discovery_status: str) -> str:
+def _discovery_packet_frontmatter_problem(
+    *,
+    frontmatter_data: dict[str, object],
+    text: str,
+    quality_status: str,
+    planning_reliance: str,
+    discovery_status: str,
+) -> str:
     if not quality_status or not planning_reliance:
         return (
             f"{QUALITY_STATUS_PROVISIONAL}/{PLANNING_RELIANCE_BLOCKED}: discovery packet requires "
@@ -327,6 +345,8 @@ def _discovery_packet_frontmatter_problem(*, quality_status: str, planning_relia
         invalid.append(f"quality_status must be {QUALITY_STATUS_SUFFICIENT} or {QUALITY_STATUS_PROVISIONAL}")
     if planning_reliance not in _VALID_PLANNING_RELIANCE:
         invalid.append(f"planning_reliance must be {PLANNING_RELIANCE_ALLOWED} or {PLANNING_RELIANCE_BLOCKED}")
+    if not discovery_status or discovery_status not in _VALID_DISCOVERY_STATUSES:
+        invalid.append("discovery_status must be ready-for-plan, blocked, contested, or draft")
     if invalid:
         return f"{quality_status}/{planning_reliance}: discovery packet {'; '.join(invalid)}"
     if discovery_status in _DISCOVERY_PACKET_BLOCKED_STATUSES and planning_reliance != PLANNING_RELIANCE_BLOCKED:
@@ -334,7 +354,91 @@ def _discovery_packet_frontmatter_problem(*, quality_status: str, planning_relia
             f"{quality_status}/{planning_reliance}: discovery_status={discovery_status} "
             f"must map to planning_reliance={PLANNING_RELIANCE_BLOCKED}"
         )
+    if quality_status == QUALITY_STATUS_SUFFICIENT and planning_reliance == PLANNING_RELIANCE_ALLOWED:
+        ref_problem = _discovery_packet_ref_hash_problem(frontmatter_data, text)
+        if ref_problem:
+            return f"{quality_status}/{planning_reliance}: discovery packet {ref_problem}"
     return ""
+
+
+def _discovery_packet_ref_hash_problem(frontmatter_data: dict[str, object], text: str) -> str:
+    refs = _dedupe(
+        _clean_ref(value)
+        for value in (
+            *_frontmatter_named_values(frontmatter_data, _DISCOVERY_PACKET_REF_KEYS),
+            *_frontmatter_key_values_from_text(text, _DISCOVERY_PACKET_REF_KEYS),
+        )
+        if _clean_ref(value)
+    )
+    if not refs:
+        return "requires at least one source/evidence ref before planning_reliance=allowed"
+    source_hash_entries = _dedupe(
+        (
+            *_frontmatter_named_values(frontmatter_data, {"source_hashes"}),
+            *_frontmatter_key_values_from_text(text, {"source_hashes"}),
+        )
+    )
+    if not source_hash_entries:
+        return "requires source_hashes for source/evidence refs before planning_reliance=allowed"
+
+    malformed: list[str] = []
+    hashed_refs: list[str] = []
+    for entry in source_hash_entries:
+        source_ref = _source_hash_ref(entry)
+        if source_ref:
+            hashed_refs.append(source_ref)
+        else:
+            malformed.append(_normalized_note(entry))
+    if malformed:
+        return "has malformed source_hashes entries: " + ", ".join(malformed)
+
+    hashed = {ref.casefold() for ref in hashed_refs}
+    missing_hashes = tuple(ref for ref in refs if ref.casefold() not in hashed)
+    if missing_hashes:
+        return "is missing source_hashes for refs: " + ", ".join(missing_hashes)
+    return ""
+
+
+def _source_hash_ref(entry: str) -> str:
+    match = _SOURCE_HASH_ENTRY_RE.match(_normalized_note(entry))
+    if not match:
+        return ""
+    return _clean_ref(match.group("ref"))
+
+
+def _frontmatter_key_values_from_text(text: str, names: set[str]) -> tuple[str, ...]:
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return ()
+    try:
+        closing_index = next(index for index, line in enumerate(lines[1:], start=1) if line.strip() == "---")
+    except StopIteration:
+        return ()
+
+    normalized_names = {name.casefold() for name in names}
+    current_key = ""
+    values: list[str] = []
+    for line in lines[1:closing_index]:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        key_match = re.match(r"^([A-Za-z0-9_-]+):(.*)$", stripped)
+        if key_match:
+            current_key = key_match.group(1).strip().casefold()
+            inline_value = key_match.group(2).strip()
+            if current_key in normalized_names and inline_value:
+                values.append(_frontmatter_text_scalar(inline_value))
+            continue
+        if stripped.startswith("- ") and current_key in normalized_names:
+            values.append(_frontmatter_text_scalar(stripped[2:].strip()))
+    return _dedupe(values)
+
+
+def _frontmatter_text_scalar(value: str) -> str:
+    text = value.strip()
+    if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")):
+        text = text[1:-1]
+    return "" if text.casefold() == "none" else text
 
 
 def _research_distill_preflight_errors(
@@ -560,6 +664,7 @@ def _source_links(source_rel: str, text: str) -> tuple[str, ...]:
             links.extend(_frontmatter_values(frontmatter.data.get(key)))
         for key in ("related_artifacts", "source_hashes", "evidence_refs"):
             links.extend(_frontmatter_values(frontmatter.data.get(key)))
+        links.extend(_frontmatter_named_values(frontmatter.data, _DISCOVERY_PACKET_REF_KEYS))
     links.extend(ref.target for ref in extract_path_refs(text))
     return _dedupe(_clean_ref(value) for value in links if _clean_ref(value))
 
@@ -636,6 +741,26 @@ def _frontmatter_values(value: object) -> list[str]:
         return values
     text = str(value).strip()
     return [] if not text or text == "none" else [text]
+
+
+def _frontmatter_named_values(value: object, names: set[str]) -> list[str]:
+    if value is None:
+        return []
+    normalized_names = {name.casefold() for name in names}
+    if isinstance(value, dict):
+        values: list[str] = []
+        for key, item in value.items():
+            if str(key).strip().casefold() in normalized_names:
+                values.extend(_frontmatter_values(item))
+            else:
+                values.extend(_frontmatter_named_values(item, names))
+        return values
+    if isinstance(value, list):
+        values = []
+        for item in value:
+            values.extend(_frontmatter_named_values(item, names))
+        return values
+    return []
 
 
 def _target_findings(target: ResearchDistillTarget, apply: bool) -> list[Finding]:

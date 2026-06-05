@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
@@ -8,7 +9,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from mylittleharness.planning import make_plan_request, render_implementation_plan
+from mylittleharness.inventory import load_inventory
+from mylittleharness.planning import make_plan_request, plan_dry_run_findings, render_implementation_plan
 from mylittleharness.roadmap import RoadmapSliceContract, RoadmapSynthesisReport
 
 
@@ -190,6 +192,50 @@ class PlanningTests(unittest.TestCase):
         self.assertIn("- read_context:", rendered)
         self.assertNotIn("source_members:", rendered)
 
+    def test_plan_dry_run_refuses_ready_discovery_packet_without_source_hashes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            packet_rel = "project/research/hashless-discovery-packet.md"
+            packet_path = root / packet_rel
+            packet_path.parent.mkdir(parents=True, exist_ok=True)
+            packet_path.write_text(
+                "---\n"
+                'schema: "mylittleharness.discovery-packet.v1"\n'
+                'status: "research-ready"\n'
+                'discovery_status: "ready-for-plan"\n'
+                'quality_status: "sufficient-for-planning"\n'
+                'planning_reliance: "allowed"\n'
+                "source_refs:\n"
+                '  - "project/research/repo-research.md"\n'
+                "---\n"
+                "# Hashless Discovery Packet\n",
+                encoding="utf-8",
+            )
+            (root / "project/roadmap.md").write_text(
+                "# Roadmap\n\n"
+                "## Items\n\n"
+                "### Hashless Discovery Packet Plan\n\n"
+                "- `id`: `hashless-discovery-packet-plan`\n"
+                "- `status`: `accepted`\n"
+                "- `order`: `10`\n"
+                "- `execution_slice`: `hashless-discovery-packet-plan`\n"
+                f"- `source_research`: `{packet_rel}`\n"
+                "- `target_artifacts`: `[\"src/mylittleharness/planning.py\", \"tests/test_planning.py\"]`\n"
+                "- `verification_summary`: `Discovery packet source hashes must gate plan opening.`\n",
+                encoding="utf-8",
+            )
+
+            findings = plan_dry_run_findings(
+                load_inventory(root),
+                make_plan_request(None, None, None, roadmap_item="hashless-discovery-packet-plan"),
+            )
+
+            rendered = "\n".join(finding.render() for finding in findings)
+            self.assertFalse((root / "project/implementation-plan.md").exists())
+            self.assertIn("plan-roadmap-source-evidence-refused", rendered)
+            self.assertIn("research quality gate blocks planning", rendered)
+            self.assertIn("requires source_hashes for source/evidence refs", rendered)
+
     def test_renderer_includes_docs_scope_when_docs_decision_will_be_updated(self) -> None:
         request = make_plan_request(
             "Docs Scope",
@@ -317,6 +363,33 @@ class PlanningTests(unittest.TestCase):
         rendered = render_implementation_plan(request, today=date(2026, 5, 1), slice_contract=contract, synthesis_report=report)
 
         self.assertIn("pytest -q 'tests/test command.py'", rendered)
+
+
+def make_live_root(root: Path) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / ".codex").mkdir()
+    (root / "project").mkdir()
+    (root / ".codex/project-workflow.toml").write_text(
+        'workflow = "workflow-core"\n'
+        "version = 1\n\n"
+        "[memory]\n"
+        'state_file = "project/project-state.md"\n'
+        'plan_file = "project/implementation-plan.md"\n',
+        encoding="utf-8",
+    )
+    (root / "project/project-state.md").write_text(
+        "---\n"
+        'project: "Sample"\n'
+        'workflow: "workflow-core"\n'
+        'operating_mode: "plan"\n'
+        'plan_status: "none"\n'
+        'active_plan: ""\n'
+        "---\n"
+        "# Sample\n",
+        encoding="utf-8",
+    )
+    (root / "AGENTS.md").write_text("# Contract\n", encoding="utf-8")
+    return root
 
 
 if __name__ == "__main__":

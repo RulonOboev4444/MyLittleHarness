@@ -77,6 +77,57 @@ class ResearchIntakeTests(unittest.TestCase):
             self.assertIn("The result is evidence, not authority.", text)
             self.assertIn("It does not promote findings to stable specs", text)
 
+    def test_apply_from_attachment_writes_research_handoff_with_attachment_source_hashes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            attachment_rel = "project/attachments/vendor-proposals/2026-06-02-mts-internet/artifact.md"
+            attachment_dir = root / "project/attachments/vendor-proposals/2026-06-02-mts-internet"
+            attachment_dir.mkdir(parents=True)
+            (attachment_dir / "original.pdf").write_text("%PDF\nproposal\n", encoding="utf-8")
+            (root / attachment_rel).write_text(
+                "---\n"
+                'type: "attachment"\n'
+                'kind: "vendor-proposal"\n'
+                'status: "imported"\n'
+                'title: "MTS internet commercial proposal"\n'
+                'source_file: "original.pdf"\n'
+                'mime_type: "application/pdf"\n'
+                'sha256: "placeholder"\n'
+                "size_bytes: 14\n"
+                'received_at: "2026-06-02"\n'
+                'source: "email attachment"\n'
+                'authority: "binary is source evidence; this md card is metadata authority"\n'
+                "---\n"
+                "# Attachment\n",
+                encoding="utf-8",
+            )
+            before = snapshot_tree(root)
+
+            findings = research_import_apply_findings(
+                load_inventory(root),
+                make_research_import_request(
+                    "MTS Proposal Review",
+                    "",
+                    text_source=f"--from-attachment {attachment_rel}",
+                    target="project/research/mts-proposal-review.md",
+                    source_attachment=attachment_rel,
+                ),
+            )
+
+            rendered = "\n".join(finding.render() for finding in findings)
+            self.assertIn("research-import-written", rendered)
+            self.assertIn("research-import-source-attachment", rendered)
+            after = snapshot_tree(root)
+            changed = [rel for rel in after if before.get(rel) != after.get(rel)]
+            self.assertEqual(["project/research/mts-proposal-review.md"], changed)
+            text = (root / "project/research/mts-proposal-review.md").read_text(encoding="utf-8")
+            self.assertIn("source_attachments:", text)
+            self.assertIn(f'  - "{attachment_rel}"', text)
+            self.assertIn(f"- Source attachment: `{attachment_rel}`", text)
+            self.assertIn(f"{attachment_rel} sha256=", text)
+            self.assertIn("project/attachments/vendor-proposals/2026-06-02-mts-internet/original.pdf sha256=", text)
+            self.assertIn("Review the binary source evidence and sidecar metadata", text)
+
     def test_apply_refuses_product_fixture_unsafe_target_and_existing_file_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             product_root = make_product_root(Path(tmp) / "product")
@@ -213,6 +264,59 @@ class ResearchIntakeTests(unittest.TestCase):
             rendered = "\n".join(finding.render() for finding in findings)
             self.assertEqual(before, snapshot_tree(product_root))
             self.assertIn("product-source compatibility fixture", rendered)
+
+    def test_discovery_packet_refuses_unsafe_and_unknown_ready_evidence_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            source = root / "project/research/repo-review.md"
+            link = root / "project/research/repo-review-link.md"
+            source.parent.mkdir(parents=True)
+            source.write_text("# Repo Review\n\n- Discovery evidence is source-bound.\n", encoding="utf-8")
+            try:
+                link.symlink_to(source)
+            except (NotImplementedError, OSError) as exc:
+                self.skipTest(f"symlinks are unavailable in this environment: {exc}")
+            before = snapshot_tree(root)
+
+            findings = discovery_packet_apply_findings(
+                load_inventory(root),
+                make_discovery_packet_request(
+                    "Unsafe Packet",
+                    quality_status="sufficient-for-planning",
+                    planning_reliance="allowed",
+                    discovery_status="ready-for-plan",
+                    source_refs=("project/research/repo-review-link.md",),
+                ),
+            )
+
+            rendered = "\n".join(finding.render() for finding in findings)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("unsafe source/evidence ref", rendered)
+            self.assertIn("crosses symlink inside root", rendered)
+            self.assertIn("discover-refused", rendered)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_live_root(Path(tmp))
+            source = root / "project/research/repo-review.md"
+            source.parent.mkdir(parents=True)
+            source.write_text("# Repo Review\n\n- Discovery evidence is source-bound.\n", encoding="utf-8")
+            before = snapshot_tree(root)
+
+            findings = discovery_packet_apply_findings(
+                load_inventory(root),
+                make_discovery_packet_request(
+                    "Unknown Status Packet",
+                    quality_status="sufficient-for-planning",
+                    planning_reliance="allowed",
+                    discovery_status="triaged",
+                    source_refs=("project/research/repo-review.md",),
+                ),
+            )
+
+            rendered = "\n".join(finding.render() for finding in findings)
+            self.assertEqual(before, snapshot_tree(root))
+            self.assertIn("--discovery-status must be ready-for-plan, blocked, contested, or draft", rendered)
+            self.assertIn("discover-refused", rendered)
 
 
 def make_live_root(root: Path) -> Path:

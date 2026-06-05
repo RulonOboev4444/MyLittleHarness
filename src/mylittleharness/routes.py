@@ -4,6 +4,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from .root_boundary import root_relative_path_conflict
+
 
 @dataclass(frozen=True)
 class MemoryRoute:
@@ -36,6 +38,20 @@ class RouteOrchestrationPolicy:
     max_parallelism_hint: str
     stale_claim_policy: str
     conflict_policy: str
+
+
+@dataclass(frozen=True)
+class RouteDestinationPolicy:
+    route_ids: frozenset[str]
+    path_prefixes: tuple[str, ...]
+    label: str
+
+
+@dataclass(frozen=True)
+class ChangedRouteMetadataProfile:
+    route_id: str
+    route_status_fields: tuple[str, ...]
+    recovery_fields: tuple[str, ...]
 
 
 LIVE_LIFECYCLE_ROUTES: tuple[MemoryRoute, ...] = (
@@ -75,6 +91,13 @@ LIVE_LIFECYCLE_ROUTES: tuple[MemoryRoute, ...] = (
         "non-authority until promoted",
     ),
     MemoryRoute(
+        "attachments",
+        "project/attachments/**/artifact.md plus original binary evidence",
+        "incoming binary artifacts with sidecar metadata, hash, provenance, and explicit research/lifecycle boundaries",
+        "by task",
+        "binary is source evidence; sidecar metadata authority",
+    ),
+    MemoryRoute(
         "stable-specs",
         "project/specs/**/*.md",
         "stable workflow contracts and routing rules",
@@ -110,11 +133,32 @@ LIVE_LIFECYCLE_ROUTES: tuple[MemoryRoute, ...] = (
         "evidence",
     ),
     MemoryRoute(
+        "handoffs",
+        "project/verification/handoffs/*.json; project/verification/handoffs/*.md",
+        "repo-visible worker handoff packets and handoff notes",
+        "at explicit handoff evidence record",
+        "evidence",
+    ),
+    MemoryRoute(
         "work-claims",
         "project/verification/work-claims/*.json",
         "repo-visible scoped work and fan-in coordination evidence",
         "at explicit work claim record",
         "evidence",
+    ),
+    MemoryRoute(
+        "approval-packets",
+        "project/verification/approval-packets/*.json",
+        "repo-visible human-gate approval packet evidence",
+        "at explicit approval packet record",
+        "evidence",
+    ),
+    MemoryRoute(
+        "symphony-queue",
+        "project/symphony/queue/*.json",
+        "repo-visible Symphony queue snapshots; dependency state resolves from current item files",
+        "during Symphony queue dispatch or review",
+        "coordination advisory",
     ),
     MemoryRoute(
         "closeout-writeback",
@@ -162,6 +206,13 @@ SUPPORT_ROUTES: tuple[MemoryRoute, ...] = (
         "authority for product behavior",
     ),
     MemoryRoute(
+        "product-source",
+        "<configured product_source_root>",
+        "configured product source root served by this operating root",
+        "at bounded implementation work",
+        "authority for product source changes",
+    ),
+    MemoryRoute(
         "generated-cache",
         ".mylittleharness/generated/**",
         "rebuildable navigation and search cache",
@@ -186,6 +237,52 @@ SUPPORT_ROUTES: tuple[MemoryRoute, ...] = (
 
 ROUTE_REGISTRY: tuple[MemoryRoute, ...] = LIVE_LIFECYCLE_ROUTES + SUPPORT_ROUTES
 ROUTE_BY_ID = {route.route_id: route for route in ROUTE_REGISTRY}
+CHANGED_ROUTE_METADATA_PROFILES: dict[str, ChangedRouteMetadataProfile] = {
+    "adrs": ChangedRouteMetadataProfile("adrs", ("status",), ()),
+    "decisions": ChangedRouteMetadataProfile("decisions", ("status",), ()),
+    "incubation": ChangedRouteMetadataProfile("incubation", ("status",), ("related_plan",)),
+    "research": ChangedRouteMetadataProfile("research", ("status",), ("source_members",)),
+    "attachments": ChangedRouteMetadataProfile("attachments", ("status",), ("related_research",)),
+    "roadmap": ChangedRouteMetadataProfile("roadmap", ("status",), ()),
+    "stable-specs": ChangedRouteMetadataProfile("stable-specs", ("status", "spec_status"), ()),
+    "verification": ChangedRouteMetadataProfile("verification", ("status",), ("source_members", "related_plan")),
+    "agent-runs": ChangedRouteMetadataProfile("agent-runs", ("status",), ("source_members",)),
+    "handoffs": ChangedRouteMetadataProfile("handoffs", ("status",), ("source_members",)),
+}
+ROUTE_DESTINATION_POLICIES: dict[str, RouteDestinationPolicy] = {
+    "source_research": RouteDestinationPolicy(frozenset({"research"}), ("project/archive/reference/research/",), "a research route"),
+    "related_research": RouteDestinationPolicy(frozenset({"research"}), ("project/archive/reference/research/",), "a research route"),
+    "source_attachments": RouteDestinationPolicy(frozenset({"attachments"}), ("project/archive/reference/attachments/",), "an attachment route"),
+    "related_attachments": RouteDestinationPolicy(frozenset({"attachments"}), ("project/archive/reference/attachments/",), "an attachment route"),
+    "attachment_refs": RouteDestinationPolicy(frozenset({"attachments"}), ("project/archive/reference/attachments/",), "an attachment route"),
+    "source_incubation": RouteDestinationPolicy(frozenset({"incubation"}), ("project/archive/reference/incubation/",), "an incubation route"),
+    "related_incubation": RouteDestinationPolicy(frozenset({"incubation"}), ("project/archive/reference/incubation/",), "an incubation route"),
+    "related_plan": RouteDestinationPolicy(frozenset({"active-plan"}), ("project/archive/plans/",), "an active or archived plan route"),
+    "archived_plan": RouteDestinationPolicy(frozenset({"active-plan"}), ("project/archive/plans/",), "an active or archived plan route"),
+    "implemented_by": RouteDestinationPolicy(frozenset({"active-plan"}), ("project/archive/plans/",), "an active or archived plan route"),
+    "related_roadmap": RouteDestinationPolicy(frozenset({"roadmap"}), (), "a roadmap route"),
+    "source_roadmap": RouteDestinationPolicy(frozenset({"roadmap"}), (), "a roadmap route"),
+    "related_decision": RouteDestinationPolicy(frozenset({"decisions"}), ("project/archive/reference/decisions/",), "a decision route"),
+    "related_decisions": RouteDestinationPolicy(frozenset({"decisions"}), ("project/archive/reference/decisions/",), "a decision route"),
+    "related_adr": RouteDestinationPolicy(frozenset({"adrs"}), ("project/archive/reference/adrs/",), "an ADR route"),
+    "related_adrs": RouteDestinationPolicy(frozenset({"adrs"}), ("project/archive/reference/adrs/",), "an ADR route"),
+    "related_verification": RouteDestinationPolicy(frozenset({"verification"}), ("project/archive/reference/verification/",), "a verification route"),
+    "related_spec": RouteDestinationPolicy(frozenset({"stable-specs"}), ("docs/specs/",), "a stable-spec route"),
+    "related_specs": RouteDestinationPolicy(frozenset({"stable-specs"}), ("docs/specs/",), "a stable-spec route"),
+    "related_doc": RouteDestinationPolicy(frozenset({"product-docs"}), (), "a product-docs route"),
+    "related_docs": RouteDestinationPolicy(frozenset({"product-docs"}), (), "a product-docs route"),
+    "source_members": RouteDestinationPolicy(
+        frozenset({"attachments", "incubation", "research", "verification"}),
+        (
+            "project/archive/reference/attachments/",
+            "project/archive/reference/incubation/",
+            "project/archive/reference/research/",
+            "project/archive/reference/verification/",
+        ),
+        "an attachment, incubation, research, or verification route",
+    ),
+}
+SAME_ROUTE_DESTINATION_FIELDS = frozenset({"supersedes", "superseded_by"})
 
 EXACT_DOC_TARGET_PREFIXES = ("docs/", "project/specs/", "src/mylittleharness/templates/")
 
@@ -199,7 +296,7 @@ def normalize_route_path(value: str) -> str:
 
 def is_exact_doc_target(value: str) -> bool:
     rel = normalize_route_path(value).casefold()
-    if not rel or ".." in rel.split("/"):
+    if root_relative_path_conflict(rel):
         return False
     if rel.endswith("/"):
         return False
@@ -241,6 +338,23 @@ def doc_target_exists(root: Path, value: str) -> bool:
         return False
     candidate = root / rel
     return candidate.is_file() and not candidate.is_symlink()
+
+
+def route_id_is_known(route_id: str) -> bool:
+    return str(route_id or "").strip() in ROUTE_BY_ID
+
+
+def route_destination_policy_for_field(field: str, *, owner_route_id: str = "") -> RouteDestinationPolicy | None:
+    key = str(field or "").strip()
+    if key in SAME_ROUTE_DESTINATION_FIELDS and owner_route_id:
+        return RouteDestinationPolicy(frozenset({owner_route_id}), (), f"the same {owner_route_id} route")
+    return ROUTE_DESTINATION_POLICIES.get(key)
+
+
+def route_destination_matches(policy: RouteDestinationPolicy, rel_path: str) -> bool:
+    normalized = normalize_route_path(rel_path)
+    route_id = classify_memory_route(normalized).route_id
+    return route_id in policy.route_ids or any(normalized.startswith(prefix) for prefix in policy.path_prefixes)
 
 
 def _known_doc_target_alternates(rel: str) -> tuple[str, ...]:
@@ -379,8 +493,13 @@ AMBIGUOUS_INTAKE = IntakeRouteAdvice(
 ROLE_TO_ROUTE_ID = {
     "active-plan": "active-plan",
     "adr": "adrs",
+    "agent-run": "agent-runs",
+    "attachment": "attachments",
+    "approval-packet": "approval-packets",
     "decision": "decisions",
     "docmap": "docs-routing",
+    "handoff": "handoffs",
+    "handoff-note": "handoffs",
     "incubation": "incubation",
     "manifest": "operating-guardrails",
     "operator-contract": "operating-guardrails",
@@ -391,7 +510,9 @@ ROLE_TO_ROUTE_ID = {
     "roadmap": "roadmap",
     "research": "research",
     "stable-spec": "stable-specs",
+    "symphony-queue": "symphony-queue",
     "verification": "verification",
+    "work-claim": "work-claims",
 }
 
 _ROUTE_MUTABILITY = {
@@ -399,6 +520,10 @@ _ROUTE_MUTABILITY = {
     "adrs": "human-reviewed-authority",
     "archive": "archive-apply-rail",
     "agent-runs": "evidence-record-apply-rail",
+    "attachments": "attachment-import-apply-rail",
+    "approval-packets": "approval-packet-apply-rail",
+    "handoffs": "handoff-apply-rail",
+    "symphony-queue": "external-queue-update-rail",
     "work-claims": "claim-apply-rail",
     "closeout-writeback": "lifecycle-apply-rail",
     "decisions": "human-reviewed-authority",
@@ -419,6 +544,10 @@ _ROUTE_GATE_CLASS = {
     "adrs": "authority",
     "archive": "archive",
     "agent-runs": "evidence",
+    "attachments": "evidence",
+    "approval-packets": "evidence",
+    "handoffs": "evidence",
+    "symphony-queue": "coordination-advisory",
     "work-claims": "evidence",
     "closeout-writeback": "lifecycle",
     "decisions": "authority",
@@ -433,8 +562,12 @@ _ROUTE_ALLOWED_DECISIONS = {
     "active-plan": ("plan", "writeback", "transition"),
     "adrs": ("accept", "supersede", "archive"),
     "archive": ("archive", "restore-reference"),
-    "agent-runs": ("record", "inspect"),
-    "work-claims": ("create", "release", "inspect"),
+    "agent-runs": ("record", "inspect", "propose-route"),
+    "attachments": ("import", "inspect", "reference"),
+    "approval-packets": ("create", "inspect"),
+    "handoffs": ("create", "accept", "inspect", "preflight"),
+    "symphony-queue": ("inspect", "resolve-dependencies", "preflight"),
+    "work-claims": ("create", "release", "inspect", "preflight"),
     "closeout-writeback": ("writeback", "transition"),
     "decisions": ("accept", "supersede", "archive"),
     "operating-guardrails": ("repair", "manual-review"),
@@ -528,6 +661,10 @@ _ROUTE_ORCHESTRATION = {
     "stable-specs": _AUTHORITY_ORCHESTRATION,
     "verification": _EVIDENCE_ORCHESTRATION,
     "agent-runs": _EVIDENCE_ORCHESTRATION,
+    "attachments": _EVIDENCE_ORCHESTRATION,
+    "approval-packets": _EVIDENCE_ORCHESTRATION,
+    "handoffs": _EVIDENCE_ORCHESTRATION,
+    "symphony-queue": _EVIDENCE_ORCHESTRATION,
     "work-claims": _EVIDENCE_ORCHESTRATION,
     "incubation": _SYNTHESIS_ORCHESTRATION,
     "research": _SYNTHESIS_ORCHESTRATION,
@@ -770,11 +907,15 @@ def classify_memory_route(rel_path: str, role: str = "") -> MemoryRoute:
         ("docs/", "product-docs"),
         ("project/adrs/", "adrs"),
         ("project/archive/", "archive"),
+        ("project/attachments/", "attachments"),
         ("project/decisions/", "decisions"),
         ("project/plan-incubation/", "incubation"),
         ("project/research/", "research"),
         ("project/verification/agent-runs/", "agent-runs"),
+        ("project/verification/handoffs/", "handoffs"),
+        ("project/verification/approval-packets/", "approval-packets"),
         ("project/verification/work-claims/", "work-claims"),
+        ("project/symphony/queue/", "symphony-queue"),
         ("project/specs/", "stable-specs"),
         ("project/verification/", "verification"),
         ("specs/workflow/", "package-mirror"),

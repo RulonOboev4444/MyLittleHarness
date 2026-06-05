@@ -12,7 +12,9 @@ from .atomic_files import AtomicFileWrite, apply_file_transaction
 from .evidence import lifecycle_mutation_provenance_findings
 from .inventory import Inventory
 from .models import Finding
+from .parsing import parse_frontmatter
 from .reporting import RouteWriteEvidence, route_write_findings
+from .root_boundary import source_path_boundary_violation
 from .research_distill import (
     DISCOVERY_PACKET_SCHEMA,
     DISCOVERY_PACKET_SOURCE_TYPE,
@@ -37,6 +39,7 @@ DISCOVERY_PACKET_NON_AUTHORITY_NOTE = (
 DISCOVERY_PACKET_READY_STATUS = "ready-for-plan"
 DISCOVERY_PACKET_DEFAULT_STATUS = "draft"
 DISCOVERY_PACKET_BLOCKED_STATUSES = {"blocked", "contested", "draft"}
+DISCOVERY_PACKET_STATUSES = {DISCOVERY_PACKET_READY_STATUS, *DISCOVERY_PACKET_BLOCKED_STATUSES}
 _DISCOVERY_PACKET_QUALITY_STATUSES = {QUALITY_STATUS_SUFFICIENT, QUALITY_STATUS_PROVISIONAL}
 _DISCOVERY_PACKET_PLANNING_RELIANCE = {PLANNING_RELIANCE_ALLOWED, PLANNING_RELIANCE_BLOCKED}
 DECISION_PACKET_FIELDS = (
@@ -81,6 +84,7 @@ class ResearchImportRequest:
     source_label: str = ""
     related_prompt: str = ""
     input_path: str = ""
+    source_attachment: str = ""
 
 
 @dataclass(frozen=True)
@@ -94,6 +98,7 @@ class ResearchImportTarget:
     source_label: str
     related_prompt: str
     input_path: str
+    source_attachment: str
     imported_text_hash: str
 
 
@@ -133,6 +138,7 @@ class DiscoveryPacketTarget:
     open_questions: tuple[str, ...]
     stop_conditions: tuple[str, ...]
     missing_refs: tuple[str, ...]
+    source_ref_errors: tuple[str, ...]
     source_hashes: tuple[str, ...]
 
 
@@ -146,6 +152,7 @@ def make_research_import_request(
     source_label: str | None = None,
     related_prompt: str | None = None,
     input_path: str | None = None,
+    source_attachment: str | None = None,
 ) -> ResearchImportRequest:
     return ResearchImportRequest(
         title=_normalized_note(title),
@@ -156,6 +163,7 @@ def make_research_import_request(
         source_label=_normalized_note(source_label),
         related_prompt=_normalize_rel(related_prompt),
         input_path=_normalized_note(input_path),
+        source_attachment=_normalize_rel(source_attachment),
     )
 
 
@@ -351,9 +359,10 @@ def _research_import_target(inventory: Inventory, request: ResearchImportRequest
     rel_path = request.target or _default_research_rel(request.title)
     if not rel_path:
         return None
+    text = request.text or _attachment_research_stub(request)
     return ResearchImportTarget(
         title=request.title,
-        text=request.text,
+        text=text,
         text_source=request.text_source,
         rel_path=rel_path,
         path=inventory.root / rel_path,
@@ -361,7 +370,8 @@ def _research_import_target(inventory: Inventory, request: ResearchImportRequest
         source_label=request.source_label,
         related_prompt=request.related_prompt,
         input_path=request.input_path,
-        imported_text_hash=hashlib.sha256(request.text.encode("utf-8")).hexdigest(),
+        source_attachment=request.source_attachment,
+        imported_text_hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
     )
 
 
@@ -370,8 +380,7 @@ def _discovery_packet_target(inventory: Inventory, request: DiscoveryPacketReque
     if not rel_path:
         return None
     refs = (*request.source_refs, *request.source_members, *request.evidence_refs)
-    missing_refs = tuple(ref for ref in refs if ref and not (inventory.root / ref).is_file())
-    source_hashes = tuple(_source_ref_hash(inventory.root, ref) for ref in refs if ref and (inventory.root / ref).is_file())
+    missing_refs, source_ref_errors, source_hashes = _discovery_ref_inventory(inventory.root, refs)
     return DiscoveryPacketTarget(
         topic=request.topic,
         goal=request.goal or request.topic,
@@ -389,6 +398,7 @@ def _discovery_packet_target(inventory: Inventory, request: DiscoveryPacketReque
         open_questions=request.open_questions,
         stop_conditions=request.stop_conditions,
         missing_refs=missing_refs,
+        source_ref_errors=source_ref_errors,
         source_hashes=source_hashes,
     )
 
@@ -403,12 +413,14 @@ def _research_import_preflight_errors(
         errors.append(Finding("error", "research-import-refused", "--title is required and cannot be empty or whitespace-only"))
     elif target is None:
         errors.append(Finding("error", "research-import-refused", "--title does not produce a safe non-empty ASCII target slug"))
-    if not request.text:
-        errors.append(Finding("error", "research-import-refused", "research text is required and cannot be empty or whitespace-only"))
+    if not request.text and not request.source_attachment:
+        errors.append(Finding("error", "research-import-refused", "research text or --from-attachment is required and cannot be empty"))
     if request.target and _root_relative_path_conflict(request.target):
         errors.append(Finding("error", "research-import-refused", f"target {_root_relative_path_conflict(request.target)}", request.target))
     if request.related_prompt and _root_relative_path_conflict(request.related_prompt):
         errors.append(Finding("error", "research-import-refused", f"related prompt {_root_relative_path_conflict(request.related_prompt)}", request.related_prompt))
+    if request.source_attachment:
+        errors.extend(_source_attachment_preflight_errors(inventory, request.source_attachment))
 
     if inventory.root_kind == "product_source_fixture":
         errors.append(
@@ -468,6 +480,58 @@ def _research_import_preflight_errors(
     return errors
 
 
+def _source_attachment_preflight_errors(inventory: Inventory, rel_path: str) -> list[Finding]:
+    errors: list[Finding] = []
+    conflict = _root_relative_path_conflict(rel_path)
+    if conflict:
+        return [Finding("error", "research-import-refused", f"source attachment {conflict}", rel_path)]
+    if not rel_path.startswith("project/attachments/") or not rel_path.endswith("/artifact.md"):
+        errors.append(Finding("error", "research-import-refused", "source attachment must point to project/attachments/**/artifact.md", rel_path))
+    path = inventory.root / rel_path
+    if _path_escapes_root(inventory.root, path):
+        errors.append(Finding("error", "research-import-refused", "source attachment path escapes the target root", rel_path))
+        return errors
+    if not path.exists():
+        errors.append(Finding("error", "research-import-refused", "source attachment metadata card is missing", rel_path))
+        return errors
+    if path.is_symlink():
+        errors.append(Finding("error", "research-import-refused", "source attachment metadata card is a symlink", rel_path))
+        return errors
+    if not path.is_file():
+        errors.append(Finding("error", "research-import-refused", "source attachment metadata card is not a regular file", rel_path))
+        return errors
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return [Finding("error", "research-import-refused", f"source attachment metadata card is unreadable: {exc}", rel_path)]
+    frontmatter = parse_frontmatter(text)
+    if not frontmatter.has_frontmatter:
+        errors.append(Finding("error", "research-import-refused", "source attachment metadata card requires frontmatter", rel_path))
+        return errors
+    if frontmatter.errors:
+        errors.append(Finding("error", "research-import-refused", "source attachment metadata card frontmatter is malformed", rel_path))
+        return errors
+    if frontmatter.data.get("type") != "attachment":
+        errors.append(Finding("error", "research-import-refused", 'source attachment card type must be "attachment"', rel_path))
+    if frontmatter.data.get("status") != "imported":
+        errors.append(Finding("error", "research-import-refused", 'source attachment card status must be "imported"', rel_path))
+    source_file = str(frontmatter.data.get("source_file") or "")
+    if not source_file or _root_relative_path_conflict(source_file):
+        errors.append(Finding("error", "research-import-refused", "source attachment card source_file must be a safe card-relative file name", rel_path))
+        return errors
+    binary_path = path.parent / source_file
+    if _path_escapes_root(path.parent, binary_path):
+        errors.append(Finding("error", "research-import-refused", "source attachment card source_file escapes its attachment directory", rel_path))
+        return errors
+    if not binary_path.exists():
+        errors.append(Finding("error", "research-import-refused", f"source attachment binary is missing: {source_file}", rel_path))
+    elif binary_path.is_symlink():
+        errors.append(Finding("error", "research-import-refused", f"source attachment binary is a symlink: {source_file}", rel_path))
+    elif not binary_path.is_file():
+        errors.append(Finding("error", "research-import-refused", f"source attachment binary is not a regular file: {source_file}", rel_path))
+    return errors
+
+
 def _discovery_packet_preflight_errors(
     inventory: Inventory,
     request: DiscoveryPacketRequest,
@@ -514,6 +578,15 @@ def _discovery_packet_preflight_errors(
                 target.rel_path if target else RESEARCH_DIR_REL,
             )
         )
+    if request.discovery_status not in DISCOVERY_PACKET_STATUSES:
+        errors.append(
+            Finding(
+                "error",
+                "discover-refused",
+                "--discovery-status must be ready-for-plan, blocked, contested, or draft",
+                target.rel_path if target else RESEARCH_DIR_REL,
+            )
+        )
     if request.discovery_status in DISCOVERY_PACKET_BLOCKED_STATUSES and request.planning_reliance == PLANNING_RELIANCE_ALLOWED:
         errors.append(
             Finding(
@@ -523,6 +596,9 @@ def _discovery_packet_preflight_errors(
                 target.rel_path if target else RESEARCH_DIR_REL,
             )
         )
+    if target and target.source_ref_errors:
+        for error in target.source_ref_errors:
+            errors.append(Finding("error", "discover-refused", f"unsafe source/evidence ref: {error}", target.rel_path))
     if (
         target
         and target.missing_refs
@@ -615,6 +691,7 @@ def _render_research_import(root: Path, target: ResearchImportTarget) -> tuple[s
         frontmatter.append('  - "none"')
     frontmatter.extend(
         (
+            *_yaml_source_attachments_lines(target),
             "source_hashes:",
             *(f'  - "{_yaml_double_quoted_value(entry)}"' for entry in source_hashes),
             "---",
@@ -634,6 +711,7 @@ def _render_research_import(root: Path, target: ResearchImportTarget) -> tuple[s
         f"- Source label: `{target.source_label or 'not supplied'}`",
         f"- Imported text sha256: `{target.imported_text_hash}`",
         f"- Related prompt: `{target.related_prompt or 'not supplied'}`",
+        f"- Source attachment: `{target.source_attachment or 'not supplied'}`",
         "",
         "## Source Hashes",
         "",
@@ -682,6 +760,7 @@ def _render_discovery_packet(root: Path, target: DiscoveryPacketTarget) -> tuple
         *_yaml_list_lines("source_refs", target.source_refs),
         *_yaml_list_lines("source_members", target.source_members),
         *_yaml_list_lines("evidence_refs", target.evidence_refs),
+        *_yaml_list_lines("source_hashes", target.source_hashes),
     ]
     if gate_issues:
         frontmatter.extend(_yaml_list_lines("quality_gate_issues", gate_issues))
@@ -788,6 +867,13 @@ def _render_discovery_packet(root: Path, target: DiscoveryPacketTarget) -> tuple
 
 def _source_hash_entries(root: Path, target: ResearchImportTarget) -> tuple[str, ...]:
     entries = [f"imported_text sha256={target.imported_text_hash}"]
+    if target.source_attachment:
+        attachment_path = root / target.source_attachment
+        if attachment_path.is_file():
+            entries.append(_source_ref_hash(root, target.source_attachment))
+        binary_rel = _attachment_binary_rel(root, target.source_attachment)
+        if binary_rel:
+            entries.append(_source_ref_hash(root, binary_rel))
     input_path = Path(target.input_path).expanduser() if target.input_path and target.input_path != "-" else None
     if input_path:
         try:
@@ -803,6 +889,26 @@ def _source_hash_entries(root: Path, target: ResearchImportTarget) -> tuple[str,
     return tuple(entries)
 
 
+def _attachment_binary_rel(root: Path, rel_path: str) -> str:
+    card_path = root / rel_path
+    try:
+        frontmatter = parse_frontmatter(card_path.read_text(encoding="utf-8"))
+    except OSError:
+        return ""
+    if not frontmatter.has_frontmatter or frontmatter.errors:
+        return ""
+    source_file = _normalize_rel(frontmatter.data.get("source_file"))
+    if not source_file or _root_relative_path_conflict(source_file):
+        return ""
+    binary_path = card_path.parent / source_file
+    if _path_escapes_root(card_path.parent, binary_path) or not binary_path.is_file():
+        return ""
+    try:
+        return binary_path.relative_to(root).as_posix()
+    except ValueError:
+        return ""
+
+
 def _source_ref_hash(root: Path, rel_path: str) -> str:
     path = root / rel_path
     try:
@@ -812,12 +918,37 @@ def _source_ref_hash(root: Path, rel_path: str) -> str:
     return f"{rel_path} sha256={digest}"
 
 
+def _discovery_ref_inventory(root: Path, refs: Sequence[str]) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    missing_refs: list[str] = []
+    source_ref_errors: list[str] = []
+    source_hashes: list[str] = []
+    for ref in refs:
+        if not ref or _root_relative_path_conflict(ref):
+            continue
+        path = root / ref
+        violation = source_path_boundary_violation(root, path, label="discovery source/evidence ref")
+        if violation is not None:
+            source_ref_errors.append(f"{ref}: {violation.message}")
+            continue
+        if not path.exists():
+            missing_refs.append(ref)
+            continue
+        if not path.is_file():
+            source_ref_errors.append(f"{ref}: discovery source/evidence ref is not a regular file")
+            continue
+        source_hashes.append(_source_ref_hash(root, ref))
+    return tuple(_dedupe(missing_refs)), tuple(_dedupe(source_ref_errors)), tuple(_dedupe(source_hashes))
+
+
 def _target_findings(target: ResearchImportTarget, apply: bool) -> list[Finding]:
     verb = "target research artifact" if apply else "would target research artifact"
-    return [
+    findings = [
         Finding("info", "research-import-title", f"normalized title: {target.title}", target.rel_path),
         Finding("info", "research-import-target", f"{verb}: {target.rel_path}", target.rel_path),
     ]
+    if target.source_attachment:
+        findings.append(Finding("info", "research-import-source-attachment", f"source attachment: {target.source_attachment}", target.rel_path))
+    return findings
 
 
 def _discovery_target_findings(target: DiscoveryPacketTarget, apply: bool) -> list[Finding]:
@@ -1093,8 +1224,12 @@ def _discovery_quality_gate_issues(target: DiscoveryPacketTarget) -> tuple[str, 
         issues.append(
             f"operator marked packet {target.quality_status}/{target.planning_reliance}; planning must remain blocked until explicit ready review"
         )
-    if target.discovery_status in DISCOVERY_PACKET_BLOCKED_STATUSES:
+    if target.discovery_status not in DISCOVERY_PACKET_STATUSES:
+        issues.append(f"discovery_status={target.discovery_status} is not recognized")
+    elif target.discovery_status in DISCOVERY_PACKET_BLOCKED_STATUSES:
         issues.append(f"discovery_status={target.discovery_status} is not ready for planning")
+    if target.source_ref_errors:
+        issues.append("unsafe referenced evidence: " + ", ".join(target.source_ref_errors))
     if target.missing_refs:
         issues.append("missing referenced evidence: " + ", ".join(target.missing_refs))
     return tuple(_dedupe(issues))
@@ -1104,6 +1239,12 @@ def _yaml_list_lines(key: str, values: tuple[str, ...]) -> list[str]:
     if not values:
         return [f"{key}:", '  - "none"']
     return [f"{key}:", *(f'  - "{_yaml_double_quoted_value(value)}"' for value in values)]
+
+
+def _yaml_source_attachments_lines(target: ResearchImportTarget) -> list[str]:
+    if not target.source_attachment:
+        return ["source_attachments: []"]
+    return ["source_attachments:", f'  - "{_yaml_double_quoted_value(target.source_attachment)}"']
 
 
 def _yaml_indented_list_lines(values: tuple[str, ...], *, indent: str) -> list[str]:
@@ -1137,6 +1278,21 @@ def _dedupe(values: Sequence[str]) -> list[str]:
 
 def _yaml_double_quoted_value(value: object) -> str:
     return str(value).replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _attachment_research_stub(request: ResearchImportRequest) -> str:
+    if not request.source_attachment:
+        return ""
+    return "\n".join(
+        [
+            "Attachment research handoff.",
+            "",
+            f"Source attachment metadata card: {request.source_attachment}",
+            "",
+            "Review the binary source evidence and sidecar metadata before recording findings here.",
+            "Attachment import/reference alone cannot approve purchase, commit, roadmap status, plans, archive, staging, or lifecycle decisions.",
+        ]
+    )
 
 
 __all__ = [

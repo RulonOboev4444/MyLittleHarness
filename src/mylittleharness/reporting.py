@@ -68,6 +68,26 @@ class NextSafeRoute:
     apply_after: str
     authority_boundary: str
     docs_decision: str
+    action_class: str = "dry-run-apply-route"
+    write_class: str = "reviewed-route-write"
+    requires_dry_run_review: bool = True
+    requires_explicit_command: bool = True
+
+
+@dataclass(frozen=True)
+class CommandAction:
+    command: str
+    source_code: str
+    severity: str
+    source: str | None
+    source_field: str
+    action_role: str
+    apply_after: str
+    authority_boundary: str
+    action_class: str
+    write_class: str
+    requires_dry_run_review: bool
+    requires_explicit_command: bool
 
 
 READ_ONLY_REPORT_COMMANDS = {
@@ -94,6 +114,7 @@ READ_ONLY_REPORT_COMMANDS = {
 }
 MUTATING_REPORT_COMMANDS = {
     "attach",
+    "attachment-import",
     "detach",
     "incubate",
     "init",
@@ -302,6 +323,7 @@ def render_json_report(
         "result": {"status": result, "advisory": True},
         "work_result": work_result_to_report_dict(work_result_capsule_for_report(command, result, findings, suggestions)),
         "next_safe_routes": [next_safe_route_to_report_dict(route) for route in next_safe_routes_for_report(findings)],
+        "command_actions": [command_action_to_report_dict(action) for action in command_actions_for_report(findings)],
         "boundary": {
             "reports_advisory": True,
             "repo_visible_files_authoritative": True,
@@ -334,6 +356,59 @@ def next_safe_route_to_report_dict(route: NextSafeRoute) -> dict[str, object]:
         "apply_after": route.apply_after,
         "authority_boundary": route.authority_boundary,
         "docs_decision": route.docs_decision,
+        "action_class": route.action_class,
+        "write_class": route.write_class,
+        "requires_dry_run_review": route.requires_dry_run_review,
+        "requires_explicit_command": route.requires_explicit_command,
+    }
+
+
+def command_action_report_dict(
+    command: str,
+    *,
+    source_code: str = "",
+    severity: str = "info",
+    source: str | None = None,
+    source_field: str = "",
+    action_role: str = "advisory-command",
+) -> dict[str, object]:
+    metadata = _command_action_metadata(command)
+    return command_action_to_report_dict(
+        CommandAction(
+            command=command,
+            source_code=source_code,
+            severity=severity,
+            source=source,
+            source_field=source_field,
+            action_role=action_role,
+            apply_after=str(metadata["apply_after"]),
+            authority_boundary=str(metadata["authority_boundary"]),
+            action_class=str(metadata["action_class"]),
+            write_class=str(metadata["write_class"]),
+            requires_dry_run_review=bool(metadata["requires_dry_run_review"]),
+            requires_explicit_command=bool(metadata["requires_explicit_command"]),
+        )
+    )
+
+
+def command_action_to_report_dict(action: CommandAction) -> dict[str, object]:
+    return {
+        "command": action.command,
+        "source_code": action.source_code,
+        "severity": action.severity,
+        "source": action.source,
+        "source_field": action.source_field,
+        "action_role": action.action_role,
+        "apply_after": action.apply_after,
+        "authority_boundary": action.authority_boundary,
+        "action_class": action.action_class,
+        "write_class": action.write_class,
+        "requires_dry_run_review": action.requires_dry_run_review,
+        "requires_explicit_command": action.requires_explicit_command,
+        "displayed_only": True,
+        "invoked_by_read_only_surfaces": False,
+        "approves_lifecycle": False,
+        "approves_git": False,
     }
 
 
@@ -538,6 +613,8 @@ def work_result_capsule_from_closeout_values(values: dict[str, str]) -> WorkResu
         remains.append(risk)
     if carry := _plain_text(values.get("carry_forward", "")):
         remains.append(carry)
+    if next_state := _plain_text(values.get("next_state", "")):
+        remains.append(f"Next/no-next action recorded as {next_state}.")
     if commit := _plain_text(values.get("commit_decision", "")):
         remains.append(commit)
     if docs_decision == "uncertain":
@@ -804,21 +881,52 @@ def next_safe_routes_for_report(findings: list[Finding]) -> tuple[NextSafeRoute,
             if key in seen:
                 continue
             seen.add(key)
+            metadata = _next_safe_route_metadata(command)
             routes.append(
                 NextSafeRoute(
                     command=command,
                     source_code=finding.code,
                     severity=finding.severity,
                     source=finding.source,
-                    apply_after=_apply_after_command(command),
-                    authority_boundary=(
-                        "advisory route candidate only; review the reported finding and matching dry-run before any apply, "
-                        "and do not treat it as closeout, archive, roadmap, staging, commit, rollback, or lifecycle approval"
-                    ),
+                    apply_after=str(metadata["apply_after"]),
+                    authority_boundary=str(metadata["authority_boundary"]),
                     docs_decision="not affected",
+                    action_class=str(metadata["action_class"]),
+                    write_class=str(metadata["write_class"]),
+                    requires_dry_run_review=bool(metadata["requires_dry_run_review"]),
+                    requires_explicit_command=bool(metadata["requires_explicit_command"]),
                 )
             )
     return tuple(routes)
+
+
+def command_actions_for_report(findings: list[Finding]) -> tuple[CommandAction, ...]:
+    actions: list[CommandAction] = []
+    seen: set[tuple[str, str, str]] = set()
+    for finding in findings:
+        for source_field, command in _command_actions_from_message(finding.message):
+            key = (finding.code, source_field, command)
+            if key in seen:
+                continue
+            seen.add(key)
+            metadata = _command_action_metadata(command)
+            actions.append(
+                CommandAction(
+                    command=command,
+                    source_code=finding.code,
+                    severity=finding.severity,
+                    source=finding.source,
+                    source_field=source_field,
+                    action_role=_command_action_role(source_field),
+                    apply_after=str(metadata["apply_after"]),
+                    authority_boundary=str(metadata["authority_boundary"]),
+                    action_class=str(metadata["action_class"]),
+                    write_class=str(metadata["write_class"]),
+                    requires_dry_run_review=bool(metadata["requires_dry_run_review"]),
+                    requires_explicit_command=bool(metadata["requires_explicit_command"]),
+                )
+            )
+    return tuple(actions)
 
 
 def _first_next_safe_route(findings: list[Finding], severities: set[str] | None = None) -> NextSafeRoute | None:
@@ -828,21 +936,77 @@ def _first_next_safe_route(findings: list[Finding], severities: set[str] | None 
     return None
 
 
-_NEXT_SAFE_COMMAND_RE = re.compile(r"\bnext_safe_command=([^;\n]+)")
+_COMMAND_FIELD_RE = re.compile(
+    r"\b("
+    r"next_safe_command|next_safe_candidate|next_safe_after_close|operator_hint|"
+    r"first_safe_command|batch_apply_command|apply_command|dry_run_command|"
+    r"recovery_command|mlhd_refresh_command|projection_warm_cache_recovery"
+    r")=([^;\n]+)",
+    re.IGNORECASE,
+)
 _NEXT_SAFE_COMMAND_PROSE_RE = re.compile(r"\bnext safe command:\s*(?:[^`\n]*?)`([^`\n]+)`", re.IGNORECASE)
+_NEXT_SAFE_ROUTE_FIELDS = {"next_safe_command", "next_safe_candidate", "next_safe_after_close", "operator_hint"}
 
 
 def _next_safe_commands_from_message(message: str) -> tuple[str, ...]:
     commands: list[str] = []
-    for match in _NEXT_SAFE_COMMAND_RE.finditer(str(message or "")):
-        command = _plain_text(match.group(1)).strip()
-        if command:
+    for source_field, command in _command_actions_from_message(message):
+        if source_field in _NEXT_SAFE_ROUTE_FIELDS:
             commands.append(command)
     for match in _NEXT_SAFE_COMMAND_PROSE_RE.finditer(str(message or "")):
-        command = _plain_text(match.group(1)).strip()
+        command = _normalized_command_text(match.group(1))
         if command:
             commands.append(command)
     return tuple(commands)
+
+
+def _command_actions_from_message(message: str) -> tuple[tuple[str, str], ...]:
+    actions: list[tuple[str, str]] = []
+    text = str(message or "")
+    for match in _COMMAND_FIELD_RE.finditer(text):
+        source_field = match.group(1).casefold()
+        command = _normalized_command_text(match.group(2))
+        if command and _looks_like_report_command_action(command):
+            actions.append((source_field, command))
+    for match in _NEXT_SAFE_COMMAND_PROSE_RE.finditer(text):
+        command = _normalized_command_text(match.group(1))
+        if command and _looks_like_report_command_action(command):
+            actions.append(("next_safe_prose", command))
+    return tuple(actions)
+
+
+def _normalized_command_text(raw: str) -> str:
+    command = _plain_text(raw).strip()
+    command = re.split(
+        r"\s+(?:then|and then)\s+(?=(?:mylittleharness|memory-hygiene|meta-feedback|roadmap|writeback|projection|hooks|adapter|mlhd|git|rg|python|py)\b)",
+        command,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
+    return command.strip(" \t\r\n`").rstrip(".,")
+
+
+def _looks_like_report_command_action(command: str) -> bool:
+    return re.search(
+        r"\b(mylittleharness|memory-hygiene|meta-feedback|roadmap|writeback|repair|plan|check|projection|hooks|adapter|mlhd|intake|attachment-import|research-import|research-distill|evidence|claim|handoff|approval-packet|discover|reconcile|git|rg)\b",
+        command or "",
+    ) is not None
+
+
+def _command_action_role(source_field: str) -> str:
+    if source_field in {"batch_apply_command", "apply_command", "mlhd_refresh_command"}:
+        return "explicit-apply-follow-up"
+    if source_field == "next_safe_after_close":
+        return "deferred-after-closeout"
+    if source_field in {"next_safe_command", "next_safe_candidate", "next_safe_prose"}:
+        return "next-safe-candidate"
+    if source_field == "operator_hint":
+        return "operator-hint"
+    if source_field == "first_safe_command":
+        return "first-safe-command"
+    if source_field in {"dry_run_command", "recovery_command", "projection_warm_cache_recovery"}:
+        return "review-or-recovery-command"
+    return "advisory-command"
 
 
 def _apply_after_command(command: str) -> str:
@@ -852,6 +1016,66 @@ def _apply_after_command(command: str) -> str:
             apply_command += " --source-hash <sha256-from-dry-run>"
         return apply_command
     return ""
+
+
+def _next_safe_route_metadata(command: str) -> dict[str, object]:
+    return _command_action_metadata(command)
+
+
+def _command_action_metadata(command: str) -> dict[str, object]:
+    if _is_direct_generated_cache_command(command):
+        return {
+            "apply_after": "",
+            "authority_boundary": (
+                "direct generated-cache recovery candidate only; no matching dry-run/apply lifecycle rail is implied, "
+                "execute only as an explicit command after reviewing stale or missing cache findings, and do not treat it "
+                "as closeout, archive, roadmap, staging, commit, rollback, lifecycle approval, or source truth"
+            ),
+            "action_class": "direct-generated-cache-recovery",
+            "write_class": "disposable-generated-cache-only",
+            "requires_dry_run_review": False,
+            "requires_explicit_command": True,
+        }
+    if re.search(r"\bmlhd\b", command or "") and "--apply" in command:
+        return {
+            "apply_after": "",
+            "authority_boundary": (
+                "explicit optional-runtime apply candidate only; review the matching dry-run or runtime posture first, "
+                "execute only as an explicit command, and do not treat it as lifecycle, archive, roadmap, staging, "
+                "commit, rollback, source-truth, cache-truth, or release approval"
+            ),
+            "action_class": "explicit-runtime-helper-apply",
+            "write_class": "disposable-runtime-or-generated-cache-only",
+            "requires_dry_run_review": True,
+            "requires_explicit_command": True,
+        }
+    if "--apply" in command:
+        return {
+            "apply_after": "",
+            "authority_boundary": (
+                "explicit apply candidate only; review the matching dry-run, token, source hash, and route boundary first, "
+                "and do not treat it as closeout, archive, roadmap, staging, commit, rollback, or lifecycle approval"
+            ),
+            "action_class": "explicit-apply-route",
+            "write_class": "reviewed-route-write",
+            "requires_dry_run_review": True,
+            "requires_explicit_command": True,
+        }
+    return {
+        "apply_after": _apply_after_command(command),
+        "authority_boundary": (
+            "advisory route candidate only; review the reported finding and matching dry-run before any apply, "
+            "and do not treat it as closeout, archive, roadmap, staging, commit, rollback, or lifecycle approval"
+        ),
+        "action_class": "dry-run-apply-route" if "--dry-run" in command else "read-only-or-advisory-route",
+        "write_class": "reviewed-route-write" if "--dry-run" in command else "read-only-report",
+        "requires_dry_run_review": "--dry-run" in command,
+        "requires_explicit_command": True,
+    }
+
+
+def _is_direct_generated_cache_command(command: str) -> bool:
+    return re.search(r"\bprojection\s+--(?:build|rebuild|delete|warm-cache)\b", command or "") is not None
 
 
 def _review_token_from_findings(findings: list[Finding]) -> str:
@@ -945,6 +1169,8 @@ def _work_kind_for_command(command: str) -> str:
         return "verification"
     if command in {"approval-packet", "handoff"}:
         return "coordination"
+    if command == "attachment-import":
+        return "evidence"
     if command in {"plan", "roadmap", "incubate", "intake", "meta-feedback"}:
         return "planning"
     if command in {"writeback", "transition", "closeout"}:

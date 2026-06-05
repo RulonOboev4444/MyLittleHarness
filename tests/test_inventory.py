@@ -36,6 +36,8 @@ class InventoryTests(unittest.TestCase):
             (root / "project/plan-incubation/memory-routing.md").write_text("# Incubation\n", encoding="utf-8")
             (root / "project/research").mkdir()
             (root / "project/research/memory-routing.md").write_text("# Research\n", encoding="utf-8")
+            (root / "project/attachments/vendor-proposals/2026-06-02-mts-internet").mkdir(parents=True)
+            (root / "project/attachments/vendor-proposals/2026-06-02-mts-internet/artifact.md").write_text("# Attachment\n", encoding="utf-8")
             (root / "project/roadmap.md").write_text("# Roadmap\n", encoding="utf-8")
 
             inventory = load_inventory(root)
@@ -46,6 +48,7 @@ class InventoryTests(unittest.TestCase):
             self.assertEqual("stable-specs", inventory.surface_by_rel["project/specs/workflow/workflow-memory-routing-spec.md"].memory_route)
             self.assertEqual("incubation", inventory.surface_by_rel["project/plan-incubation/memory-routing.md"].memory_route)
             self.assertEqual("research", inventory.surface_by_rel["project/research/memory-routing.md"].memory_route)
+            self.assertEqual("attachments", inventory.surface_by_rel["project/attachments/vendor-proposals/2026-06-02-mts-internet/artifact.md"].memory_route)
 
     def test_inventory_discovers_decision_adr_and_verification_routes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -62,6 +65,30 @@ class InventoryTests(unittest.TestCase):
             self.assertEqual("decisions", inventory.surface_by_rel["project/decisions/no-parallel-memory.md"].memory_route)
             self.assertEqual("adrs", inventory.surface_by_rel["project/adrs/0001-routing.md"].memory_route)
             self.assertEqual("verification", inventory.surface_by_rel["project/verification/route-metadata.md"].memory_route)
+
+    def test_inventory_discovers_nested_coordination_and_symphony_routes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_route_metadata_live_root(Path(tmp))
+            (root / "project/verification/agent-runs").mkdir(parents=True)
+            (root / "project/verification/handoffs").mkdir(parents=True)
+            (root / "project/verification/work-claims").mkdir(parents=True)
+            (root / "project/verification/approval-packets").mkdir(parents=True)
+            (root / "project/symphony/queue").mkdir(parents=True)
+            (root / "project/verification/agent-runs/research.md").write_text("# Run\n", encoding="utf-8")
+            (root / "project/verification/handoffs/research.md").write_text("# Handoff\n", encoding="utf-8")
+            (root / "project/verification/handoffs/research.json").write_text("{}", encoding="utf-8")
+            (root / "project/verification/work-claims/research.json").write_text("{}", encoding="utf-8")
+            (root / "project/verification/approval-packets/research.json").write_text("{}", encoding="utf-8")
+            (root / "project/symphony/queue/research.json").write_text("{}", encoding="utf-8")
+
+            inventory = load_inventory(root)
+
+            self.assertEqual("agent-runs", inventory.surface_by_rel["project/verification/agent-runs/research.md"].memory_route)
+            self.assertEqual("handoffs", inventory.surface_by_rel["project/verification/handoffs/research.md"].memory_route)
+            self.assertEqual("handoffs", inventory.surface_by_rel["project/verification/handoffs/research.json"].memory_route)
+            self.assertEqual("work-claims", inventory.surface_by_rel["project/verification/work-claims/research.json"].memory_route)
+            self.assertEqual("approval-packets", inventory.surface_by_rel["project/verification/approval-packets/research.json"].memory_route)
+            self.assertEqual("symphony-queue", inventory.surface_by_rel["project/symphony/queue/research.json"].memory_route)
 
     def test_roadmap_route_metadata_validation_accepts_route_relationships(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

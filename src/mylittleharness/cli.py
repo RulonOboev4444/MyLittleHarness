@@ -25,6 +25,11 @@ from .approval_packets import (
     approval_packet_dry_run_findings,
     make_approval_packet_request,
 )
+from .attachments import (
+    attachment_import_apply_findings,
+    attachment_import_dry_run_findings,
+    make_attachment_import_request,
+)
 from .bootstrap import bootstrap_sections, package_smoke_sections
 from .checks import (
     archive_context_findings,
@@ -32,8 +37,11 @@ from .checks import (
     attach_dry_run_findings,
     audit_link_findings,
     check_drift_findings,
+    cleanup_apply_findings,
+    cleanup_dry_run_findings,
     command_surface_findings,
     command_surface_manifest,
+    coordination_evidence_identity_findings,
     context_budget_findings,
     doctor_findings,
     external_orchestrator_shell_preflight_findings,
@@ -43,6 +51,7 @@ from .checks import (
     intake_apply_findings,
     intake_dry_run_findings,
     load_for_root,
+    make_cleanup_request,
     make_intake_request,
     migrate_apply_findings,
     migrate_dry_run_findings,
@@ -224,6 +233,7 @@ COMMANDS = (
     "closeout",
     "intake",
     "discover",
+    "attachment-import",
     "research-import",
     "research-distill",
     "research-compare",
@@ -234,6 +244,7 @@ COMMANDS = (
     "transition",
     "memory-hygiene",
     "relationship-drift",
+    "cleanup",
     "roadmap",
     "meta-feedback",
     "projection",
@@ -250,6 +261,7 @@ CACHE_DIRTY_APPLY_COMMANDS = {
     "incubation-reconcile",
     "intake",
     "discover",
+    "attachment-import",
     "memory-hygiene",
     "relationship-drift",
     "meta-feedback",
@@ -262,6 +274,7 @@ CACHE_DIRTY_APPLY_COMMANDS = {
     "roadmap",
     "transition",
     "writeback",
+    "cleanup",
 }
 
 
@@ -503,7 +516,12 @@ def main(argv: list[str] | None = None) -> int:
         result = _result_for(findings)
         suggestions = _suggestions(command, findings)
         if args.json:
-            emit_text(render_json_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, suggestions, sections, route_manifest()))
+            payload = json.loads(
+                render_json_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, suggestions, sections, route_manifest())
+            )
+            if args.focus:
+                payload["report_scope"] = _focused_report_scope(args.focus, sections)
+            emit_text(json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=True))
         else:
             emit_text(render_sectioned_report(report_name, inventory.root, result, inventory.sources_for_report(), sections, suggestions))
         return 1 if any(finding.severity == "error" for finding in findings) else 0
@@ -672,7 +690,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if command == "claim":
         if args.status:
-            findings = work_claim_status_findings(inventory)
+            findings = [
+                *work_claim_status_findings(inventory),
+                *coordination_evidence_identity_findings(inventory, "work-claim-identity", ("work-claim",)),
+            ]
             result = _result_for(findings)
             suggestions = _suggestions(command, findings)
             if args.json:
@@ -697,6 +718,7 @@ def main(argv: list[str] | None = None) -> int:
                 *handoff_packet_status_findings(inventory),
                 *dispatcher_launch_status_findings(inventory),
                 *dispatcher_worktree_coordination_findings(inventory),
+                *coordination_evidence_identity_findings(inventory, "handoff-identity", ("handoff",)),
             ]
             result = _result_for(findings)
             emit_text(render_report("handoff --status", inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
@@ -723,7 +745,10 @@ def main(argv: list[str] | None = None) -> int:
         emit_text(render_report("review-token", inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
         return 1 if result == "error" else 0
     if command == "reconcile":
-        findings = reconcile_findings(inventory)
+        findings = [
+            *reconcile_findings(inventory),
+            *coordination_evidence_identity_findings(inventory, "reconcile-coordination-evidence"),
+        ]
         result = _result_for(findings)
         emit_text(render_report("reconcile", inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
         return 1 if result == "error" else 0
@@ -750,6 +775,22 @@ def main(argv: list[str] | None = None) -> int:
         result = _result_for(findings)
         emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
         return 2 if args.apply and result == "error" else 0
+    if command == "attachment-import":
+        request = make_attachment_import_request(
+            args.file,
+            kind=args.kind,
+            topic=args.topic,
+            title=args.title,
+            received_at=args.received_at,
+            source_label=args.source_label,
+            related_research=tuple(args.related_research or ()),
+        )
+        report_name = "attachment-import --apply" if args.apply else "attachment-import --dry-run"
+        findings = attachment_import_apply_findings(inventory, request) if args.apply else attachment_import_dry_run_findings(inventory, request)
+        findings = _with_projection_cache_dirty_findings(command, args, inventory, findings)
+        result = _result_for(findings)
+        emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
+        return 2 if args.apply and result == "error" else 0
     if command == "research-import":
         research_text = args.text
         text_source = "--text"
@@ -762,6 +803,9 @@ def main(argv: list[str] | None = None) -> int:
             research_text = text_result[0]
             text_source = f"--text-file {args.text_file}"
             input_path = args.text_file
+        elif args.from_attachment is not None:
+            research_text = ""
+            text_source = f"--from-attachment {args.from_attachment}"
         request = make_research_import_request(
             args.title,
             research_text,
@@ -771,6 +815,7 @@ def main(argv: list[str] | None = None) -> int:
             source_label=args.source_label,
             related_prompt=args.related_prompt,
             input_path=input_path,
+            source_attachment=args.from_attachment,
         )
         report_name = "research-import --apply" if args.apply else "research-import --dry-run"
         findings = research_import_apply_findings(inventory, request) if args.apply else research_import_dry_run_findings(inventory, request)
@@ -847,6 +892,7 @@ def main(argv: list[str] | None = None) -> int:
             verification=args.verification,
             commit_decision=args.commit_decision,
             residual_risk=args.residual_risk,
+            next_state=args.next_state,
             carry_forward=args.carry_forward,
             work_result=args.work_result,
             active_phase=args.active_phase,
@@ -918,6 +964,14 @@ def main(argv: list[str] | None = None) -> int:
         request = make_relationship_drift_request(args.roadmap_item)
         report_name = "relationship-drift --apply" if args.apply else "relationship-drift --dry-run"
         findings = relationship_drift_apply_findings(inventory, request) if args.apply else relationship_drift_dry_run_findings(inventory, request)
+        findings = _with_projection_cache_dirty_findings(command, args, inventory, findings)
+        result = _result_for(findings)
+        emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
+        return 2 if args.apply and result == "error" else 0
+    if command == "cleanup":
+        request = make_cleanup_request(args.target, args.reason)
+        report_name = "cleanup --apply" if args.apply else "cleanup --dry-run"
+        findings = cleanup_apply_findings(inventory, request) if args.apply else cleanup_dry_run_findings(inventory, request)
         findings = _with_projection_cache_dirty_findings(command, args, inventory, findings)
         result = _result_for(findings)
         emit_text(render_report(report_name, inventory.root, result, inventory.sources_for_report(), findings, _suggestions(command, findings)))
@@ -1191,11 +1245,11 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _transition_dry_run_findings(inventory, args) -> list[Finding]:
-    review_payload = _transition_review_payload(inventory, args)
-    token = _transition_review_token_from_payload(review_payload)
     next_plan_resolution = _transition_next_plan_resolution(inventory, args)
-    phase_completion_inventory = inventory
-    phase_completion_preview_ok = True
+    preview_findings = _transition_preview_delegate_findings(inventory, args, next_plan_resolution)
+    preview_errors = _transition_preview_input_errors(preview_findings)
+    review_payload = _transition_review_payload(inventory, args, next_plan_resolution, preview_findings)
+    token = _transition_review_token_from_payload(review_payload)
     findings = [
         Finding("info", "transition-dry-run", "transition proposal only; no files were written"),
         Finding(
@@ -1207,74 +1261,21 @@ def _transition_dry_run_findings(inventory, args) -> list[Finding]:
         Finding("info", "transition-targets", f"primary target files: {', '.join(_transition_target_rels(inventory, args)) or 'none'}"),
     ]
     findings.extend(_transition_review_token_input_findings(review_payload))
-    errors = _transition_input_errors(inventory, args, next_plan_resolution.request, apply=False)
-    if errors:
-        findings.extend(_with_severity(errors, "warn"))
+    if preview_errors:
+        findings.extend(_with_severity(preview_errors, "warn"))
         findings.append(Finding("info", "transition-validation-posture", "dry-run refused before apply; fix refusal reasons and rerun transition --dry-run"))
         return findings
-    if args.complete_current_phase:
-        findings.append(Finding("info", "transition-step", "would complete current phase through writeback --phase-status complete", "project/project-state.md"))
-        phase_findings = writeback_dry_run_findings(inventory, _transition_phase_complete_request(args))
-        findings.extend(phase_findings)
-        phase_completion_preview_ok = not any(finding.severity in {"warn", "error"} for finding in phase_findings)
-        if phase_completion_preview_ok:
-            phase_completion_inventory = _transition_phase_complete_preview_inventory(inventory)
-    if args.archive_active_plan:
-        findings.append(
-            Finding(
-                "info",
-                "transition-step",
-                f"would archive active plan through writeback --archive-active-plan with current roadmap status {_transition_current_roadmap_status(args)!r}",
-                "project/implementation-plan.md",
-            )
-        )
-        if args.complete_current_phase and _state_phase_status(inventory) != "complete":
-            if phase_completion_preview_ok:
-                findings.append(
-                    Finding(
-                        "info",
-                        "transition-sequenced-preview",
-                        "archive preview uses the projected phase-complete state, then reports archive-active-plan route writes without writing files",
-                        "project/project-state.md",
-                    )
-                )
-                findings.extend(writeback_dry_run_findings(phase_completion_inventory, _transition_archive_request(phase_completion_inventory, args)))
-            else:
-                findings.append(
-                    Finding(
-                        "info",
-                        "transition-sequenced-preview",
-                        "archive preview is sequenced after phase completion; phase-completion preview has warnings or errors, so detailed archive route-write evidence is deferred",
-                        "project/project-state.md",
-                    )
-                )
-        else:
-            findings.extend(writeback_dry_run_findings(inventory, _transition_archive_request(inventory, args)))
-    if args.next_roadmap_item:
-        findings.append(Finding("info", "transition-step", f"would open next active plan for roadmap item {args.next_roadmap_item!r}", "project/implementation-plan.md"))
-        findings.extend(_transition_next_plan_input_findings(next_plan_resolution, apply=False))
-        if args.archive_active_plan and _state_plan_status(inventory) == "active":
-            findings.append(
-                Finding(
-                    "info",
-                    "transition-sequenced-preview",
-                    "next-plan preview is sequenced after archive-active-plan clears the active lifecycle pointer",
-                    "project/implementation-plan.md",
-                )
-            )
-        else:
-            findings.extend(plan_dry_run_findings(inventory, _transition_next_plan_request(args)))
-        findings.append(Finding("info", "transition-step", f"would mark next roadmap item {args.next_roadmap_item!r} active", "project/roadmap.md"))
-        findings.extend(roadmap_dry_run_findings(inventory, _transition_next_roadmap_status_request(args)))
+    findings.extend(preview_findings)
     findings.extend(_transition_effective_write_set_findings(inventory, args, findings))
     findings.append(Finding("info", "transition-validation-posture", "apply requires the same flags plus --review-token; token mismatch refuses before writes"))
     return findings
 
 
 def _transition_apply_findings(inventory, args) -> list[Finding]:
-    review_payload = _transition_review_payload(inventory, args)
-    token = _transition_review_token_from_payload(review_payload)
     next_plan_resolution = _transition_next_plan_resolution(inventory, args)
+    preview_findings = _transition_preview_delegate_findings(inventory, args, next_plan_resolution)
+    review_payload = _transition_review_payload(inventory, args, next_plan_resolution, preview_findings)
+    token = _transition_review_token_from_payload(review_payload)
     errors = _transition_input_errors(inventory, args, next_plan_resolution.request, apply=True)
     if args.review_token and args.review_token != token:
         errors.append(
@@ -1431,6 +1432,76 @@ def _transition_partial_apply_recovery_findings(
         )
     )
     return recovery
+
+
+def _transition_preview_delegate_findings(inventory, args, next_plan_resolution=None) -> list[Finding]:
+    next_plan_resolution = next_plan_resolution or _transition_next_plan_resolution(inventory, args)
+    errors = _transition_input_errors(inventory, args, next_plan_resolution.request, apply=False)
+    if errors:
+        return errors
+
+    phase_completion_inventory = inventory
+    phase_completion_preview_ok = True
+    findings: list[Finding] = []
+    if args.complete_current_phase:
+        findings.append(Finding("info", "transition-step", "would complete current phase through writeback --phase-status complete", "project/project-state.md"))
+        phase_findings = writeback_dry_run_findings(inventory, _transition_phase_complete_request(args))
+        findings.extend(phase_findings)
+        phase_completion_preview_ok = not any(finding.severity in {"warn", "error"} for finding in phase_findings)
+        if phase_completion_preview_ok:
+            phase_completion_inventory = _transition_phase_complete_preview_inventory(inventory)
+    if args.archive_active_plan:
+        findings.append(
+            Finding(
+                "info",
+                "transition-step",
+                f"would archive active plan through writeback --archive-active-plan with current roadmap status {_transition_current_roadmap_status(args)!r}",
+                "project/implementation-plan.md",
+            )
+        )
+        if args.complete_current_phase and _state_phase_status(inventory) != "complete":
+            if phase_completion_preview_ok:
+                findings.append(
+                    Finding(
+                        "info",
+                        "transition-sequenced-preview",
+                        "archive preview uses the projected phase-complete state, then reports archive-active-plan route writes without writing files",
+                        "project/project-state.md",
+                    )
+                )
+                findings.extend(writeback_dry_run_findings(phase_completion_inventory, _transition_archive_request(phase_completion_inventory, args)))
+            else:
+                findings.append(
+                    Finding(
+                        "info",
+                        "transition-sequenced-preview",
+                        "archive preview is sequenced after phase completion; phase-completion preview has warnings or errors, so detailed archive route-write evidence is deferred",
+                        "project/project-state.md",
+                    )
+                )
+        else:
+            findings.extend(writeback_dry_run_findings(inventory, _transition_archive_request(inventory, args)))
+    if args.next_roadmap_item:
+        findings.append(Finding("info", "transition-step", f"would open next active plan for roadmap item {args.next_roadmap_item!r}", "project/implementation-plan.md"))
+        findings.extend(_transition_next_plan_input_findings(next_plan_resolution, apply=False))
+        if args.archive_active_plan and _state_plan_status(inventory) == "active":
+            findings.append(
+                Finding(
+                    "info",
+                    "transition-sequenced-preview",
+                    "next-plan preview is sequenced after archive-active-plan clears the active lifecycle pointer",
+                    "project/implementation-plan.md",
+                )
+            )
+        else:
+            findings.extend(plan_dry_run_findings(inventory, _transition_next_plan_request(args)))
+        findings.append(Finding("info", "transition-step", f"would mark next roadmap item {args.next_roadmap_item!r} active", "project/roadmap.md"))
+        findings.extend(roadmap_dry_run_findings(inventory, _transition_next_roadmap_status_request(args)))
+    return findings
+
+
+def _transition_preview_input_errors(findings: list[Finding]) -> list[Finding]:
+    return [finding for finding in findings if finding.code in {"transition-refused", "transition-next-plan-preflight-refused"}]
 
 
 def _transition_effective_write_set_findings(inventory, args, findings: list[Finding]) -> list[Finding]:
@@ -1612,6 +1683,7 @@ def _transition_archive_request(inventory, args):
         verification=args.verification,
         commit_decision=args.commit_decision,
         residual_risk=args.residual_risk,
+        next_state=args.next_state,
         carry_forward=args.carry_forward,
         work_result=args.work_result,
     )
@@ -1628,6 +1700,7 @@ def _transition_phase_complete_request(args):
         verification=args.verification,
         commit_decision=args.commit_decision,
         residual_risk=args.residual_risk,
+        next_state=args.next_state,
         carry_forward=args.carry_forward,
         work_result=args.work_result,
         phase_status="complete",
@@ -1819,9 +1892,11 @@ def _transition_review_token(inventory, args) -> str:
     return _transition_review_token_from_payload(_transition_review_payload(inventory, args))
 
 
-def _transition_review_payload(inventory, args) -> dict[str, object]:
-    next_plan_resolution = _transition_next_plan_resolution(inventory, args)
+def _transition_review_payload(inventory, args, next_plan_resolution=None, preview_findings: list[Finding] | None = None) -> dict[str, object]:
+    next_plan_resolution = next_plan_resolution or _transition_next_plan_resolution(inventory, args)
     next_plan_request = next_plan_resolution.request
+    if preview_findings is None:
+        preview_findings = _transition_preview_delegate_findings(inventory, args, next_plan_resolution)
     return {
         "actions": {
             "complete_current_phase": bool(args.complete_current_phase),
@@ -1840,6 +1915,10 @@ def _transition_review_payload(inventory, args) -> dict[str, object]:
         },
         "closeout": _transition_closeout_values(args),
         "files": _transition_file_digests(inventory, args),
+        "targets": _transition_target_rels(inventory, args),
+        "route_writes": _transition_review_route_write_inputs(preview_findings),
+        "blockers": _transition_review_blocker_inputs(preview_findings),
+        "dirty_cache": _transition_review_dirty_cache_inputs(inventory, preview_findings),
     }
 
 
@@ -1878,15 +1957,17 @@ def _transition_review_token_refresh_finding() -> Finding:
         "transition-review-token-refresh",
         (
             "no files were written; rerun the same transition --dry-run command against current repo-visible inputs, "
-            "review the new transition-review-token-file-inputs, then apply with the refreshed token. "
-            "Review-token file inputs are scoped to transition input routes, so unrelated route changes outside that set do not invalidate the token."
+            "review the new transition-review-token-file-inputs and preview/effective-write-set digests, then apply with the refreshed token. "
+            "Review-token inputs are scoped to transition input routes, derived targets, delegated route writes, blockers, and cache-dirty effects, "
+            "so unrelated route changes outside that set do not invalidate the token."
         ),
         "project/project-state.md",
     )
 
 
 def _transition_review_input_digest_summary(payload: dict[str, object]) -> str:
-    return "; ".join(f"{key}={_transition_payload_digest(payload.get(key, {}))}" for key in ("actions", "closeout", "files"))
+    keys = ("actions", "closeout", "files", "targets", "route_writes", "blockers", "dirty_cache")
+    return "; ".join(f"{key}={_transition_payload_digest(payload.get(key, {}))}" for key in keys)
 
 
 def _transition_review_file_digest_summary(file_digests: dict[object, object]) -> str:
@@ -1908,6 +1989,7 @@ def _transition_closeout_values(args) -> dict[str, str]:
         "verification",
         "commit_decision",
         "residual_risk",
+        "next_state",
         "carry_forward",
         "work_result",
     ):
@@ -1928,6 +2010,51 @@ def _transition_file_digests(inventory, args) -> dict[str, str]:
         else:
             digests[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
     return digests
+
+
+def _transition_review_route_write_inputs(findings: list[Finding]) -> list[dict[str, str]]:
+    inputs: list[dict[str, str]] = []
+    for finding in findings:
+        if str(finding.code).endswith("-route-write"):
+            inputs.append(
+                {
+                    "severity": str(finding.severity),
+                    "code": str(finding.code),
+                    "source": str(finding.source or ""),
+                    "message": str(finding.message or ""),
+                }
+            )
+    return inputs
+
+
+def _transition_review_blocker_inputs(findings: list[Finding]) -> list[dict[str, str]]:
+    blockers: list[dict[str, str]] = []
+    for finding in findings:
+        if finding.severity not in {"warn", "error"}:
+            continue
+        blockers.append(
+            {
+                "severity": str(finding.severity),
+                "code": str(finding.code),
+                "source": str(finding.source or ""),
+                "message": str(finding.message or ""),
+            }
+        )
+    return blockers
+
+
+def _transition_review_dirty_cache_inputs(inventory, findings: list[Finding]) -> dict[str, object]:
+    changed_paths = _projection_cache_changed_paths(findings)
+    has_error = any(finding.severity == "error" for finding in findings)
+    capsule_present = _existing_context_memory_capsule(inventory)
+    would_mark_dirty = not has_error
+    return {
+        "command": "transition --apply",
+        "would_mark_projection_cache_dirty": would_mark_dirty,
+        "changed_paths": list(changed_paths),
+        "context_memory_capsule_present": capsule_present,
+        "would_refresh_context_memory": bool(would_mark_dirty and changed_paths and capsule_present),
+    }
 
 
 def _transition_review_file_input_rels(args) -> tuple[str, ...]:
@@ -2174,16 +2301,23 @@ def _check_report(args: argparse.Namespace, inventory: object) -> tuple[str, lis
     ]
     if args.focus:
         focus_sections = {
-            "validation": ("Validation", validation_findings(inventory)),
-            "links": ("Links", audit_link_findings(inventory)),
-            "context": ("Context", context_budget_findings(inventory)),
-            "hygiene": ("Hygiene", doctor_findings(inventory.root, inventory)),
-            "grain": ("Grain", grain_findings(inventory)),
-            "archive-context": ("Archive Context", archive_context_findings(inventory)),
-            "route-references": ("Route References", route_reference_inventory_findings(inventory)),
-            "agents": ("Agents", reconcile_findings(inventory, "check-agents")),
+            "validation": ("Validation", lambda: validation_findings(inventory)),
+            "links": ("Links", lambda: audit_link_findings(inventory)),
+            "context": ("Context", lambda: context_budget_findings(inventory)),
+            "hygiene": ("Hygiene", lambda: doctor_findings(inventory.root, inventory)),
+            "grain": ("Grain", lambda: grain_findings(inventory)),
+            "archive-context": ("Archive Context", lambda: archive_context_findings(inventory)),
+            "route-references": ("Route References", lambda: route_reference_inventory_findings(inventory)),
+            "agents": (
+                "Agents",
+                lambda: [
+                    *reconcile_findings(inventory, "check-agents"),
+                    *coordination_evidence_identity_findings(inventory, "check-agents-coordination-evidence"),
+                ],
+            ),
         }
-        section = focus_sections[args.focus]
+        section_name, build_focus_findings = focus_sections[args.focus]
+        section = (section_name, build_focus_findings())
         boundary_section.append(Finding("info", "check-focus-read-only", f"check --focus {args.focus} runs one compatibility diagnostic without writing files"))
         return f"check --focus {args.focus}", [section, ("Boundary", boundary_section)]
 
@@ -2195,6 +2329,7 @@ def _check_report(args: argparse.Namespace, inventory: object) -> tuple[str, lis
         ("Agent Run Evidence", agent_run_record_findings(inventory, "check-agent-run")),
         ("Work Claims", work_claim_status_findings(inventory, "check-work-claim")),
         ("Handoff Packets", handoff_packet_status_findings(inventory, "check-handoff-packet")),
+        ("Coordination Evidence", coordination_evidence_identity_findings(inventory, "check-coordination-evidence")),
         ("Projection Cache", projection_cache_status_findings(inventory)),
         ("Drift", check_drift_findings(inventory)),
     ]
@@ -2212,6 +2347,32 @@ def _check_report(args: argparse.Namespace, inventory: object) -> tuple[str, lis
 
     boundary_section.append(Finding("info", "check-compatibility-diagnostics", "use check --deep or check --focus for consolidated links, context, and hygiene diagnostics; compatibility commands remain available"))
     return "check", [*sections, ("Boundary", boundary_section)]
+
+
+def _focused_report_scope(focus: str, sections: list[tuple[str, list[Finding]]]) -> dict[str, object]:
+    included = [name for name, _findings in sections]
+    all_focus_sections = {
+        "Validation",
+        "Links",
+        "Context",
+        "Hygiene",
+        "Grain",
+        "Archive Context",
+        "Route References",
+        "Agents",
+    }
+    return {
+        "scope": "focused",
+        "focus": focus,
+        "included_sections": included,
+        "omitted_sections": sorted(all_focus_sections.difference(included)),
+        "global_status_uncomputed": True,
+        "status_represents_included_sections_only": True,
+        "boundary": (
+            "focused JSON reports include only the selected diagnostic and boundary findings; "
+            "they do not compute whole-root clean posture or approve lifecycle, archive, staging, commit, or push"
+        ),
+    }
 
 
 def _read_text_argument(flag: str, value: str) -> tuple[str | None, str | None]:
@@ -2648,6 +2809,14 @@ def _suggestions(command: str, findings) -> list[str]:
         if any(finding.severity == "warn" for finding in findings):
             return ["Review reconcile warnings manually; reconcile does not apply cleanup, release claims, archive, stage, commit, or approve lifecycle movement."]
         return ["reconcile completed as a terminal-only read-only drift and worker-residue report."]
+    if command == "cleanup":
+        if any(finding.severity == "error" for finding in findings):
+            return ["cleanup was refused before deleting any file; review the target, JSON shape, Git tracking, and root boundary."]
+        if any(finding.code == "cleanup-dry-run" for finding in findings):
+            return ["cleanup dry-run reported the exact temporary roadmap manifest deletion boundary without writing files."]
+        if any(finding.code == "cleanup-deleted" for finding in findings):
+            return ["cleanup apply deleted only the reviewed temporary roadmap JSON manifest; lifecycle, archive, roadmap, Git, and hook-policy decisions remain explicit."]
+        return ["cleanup apply found no delete target and left repo-visible authority unchanged."]
     if command == "closeout":
         if any(finding.severity == "warn" for finding in findings):
             return ["Use closeout findings as assembly inputs; operator decisions, source files, manifest policy, and observed verification remain authority."]
@@ -2713,6 +2882,12 @@ def _suggestions(command: str, findings) -> list[str]:
         ):
             return ["intake apply wrote one explicit draft ADR/decision note; acceptance remains a separate review decision."]
         return ["intake apply wrote one explicit routed note; classification remains advisory and does not approve lifecycle movement."]
+    if command == "attachment-import":
+        if any(finding.severity == "error" for finding in findings):
+            return ["attachment-import apply was refused before any binary or metadata card was written."]
+        if any(finding.code == "attachment-import-dry-run" for finding in findings):
+            return ["attachment-import dry-run reported the binary target, metadata card, hash, size, MIME type, and research handoff without writing files."]
+        return ["attachment-import apply copied one binary and wrote its sidecar metadata card; research, roadmap, plan, purchase, staging, and commit decisions remain explicit."]
     if command == "research-import":
         if any(finding.severity == "error" for finding in findings):
             return ["research-import apply was refused before any research artifact was written."]

@@ -1707,19 +1707,28 @@ def plan_apply_findings(inventory: Inventory, request: PlanRequest) -> list[Find
     )
     lifecycle = _plan_lifecycle_values(_plan_active_phase_from_text(plan_text))
     state_text = sync_current_focus_block(_update_frontmatter_scalars(state.content, lifecycle))
-    plan_tmp = plan_path.with_name(f".{plan_path.name}.plan.tmp")
-    state_tmp = state.path.with_name(f".{state.path.name}.plan.tmp")
-    plan_backup = plan_path.with_name(f".{plan_path.name}.plan.backup")
-    state_backup = state.path.with_name(f".{state.path.name}.plan.backup")
+    reserved_sidecars: set[Path] = set()
+    plan_tmp = _plan_transaction_sidecar_path(plan_path, ".plan.tmp", reserved_sidecars)
+    state_tmp = _plan_transaction_sidecar_path(state.path, ".plan.tmp", reserved_sidecars)
+    plan_backup = _plan_transaction_sidecar_path(plan_path, ".plan.backup", reserved_sidecars)
+    state_backup = _plan_transaction_sidecar_path(state.path, ".plan.backup", reserved_sidecars)
     roadmap_target_path = roadmap_plans[-1].target_path if roadmap_plans else None
     roadmap_tmp = (
-        roadmap_target_path.with_name(f".{roadmap_target_path.name}.plan.tmp")
+        _plan_transaction_sidecar_path(roadmap_target_path, ".plan.tmp", reserved_sidecars)
         if roadmap_target_path and _plan_roadmap_has_changes(roadmap_plans)
         else None
     )
-    roadmap_backup = roadmap_target_path.with_name(f".{roadmap_target_path.name}.plan.backup") if roadmap_target_path else None
+    roadmap_backup = (
+        _plan_transaction_sidecar_path(roadmap_target_path, ".plan.backup", reserved_sidecars)
+        if roadmap_tmp and roadmap_target_path
+        else None
+    )
     source_plan_tmps = tuple(
-        (_plan_source_incubation_tmp(plan), _plan_source_incubation_backup(plan), plan)
+        (
+            _plan_source_incubation_tmp(plan, reserved_sidecars),
+            _plan_source_incubation_backup(plan, reserved_sidecars),
+            plan,
+        )
         for plan in source_plans
         if plan.current_text != plan.updated_text
     )
@@ -2654,11 +2663,38 @@ def _active_plan_source_incubation_rels(data: dict[str, object]) -> tuple[str, .
     return tuple(_dedupe_nonempty((_normalize_rel(str(data.get("source_incubation") or "")),)))
 
 
-def _plan_source_incubation_tmp(plan: RelationshipUpdatePlan) -> Path:
+def _plan_transaction_sidecar_path(target_path: Path, suffix: str, reserved_sidecars: set[Path]) -> Path:
+    candidate = target_path.with_name(f".{target_path.name}{suffix}")
+    index = 1
+    while _plan_transaction_sidecar_conflicts(candidate, reserved_sidecars):
+        candidate = target_path.with_name(f".{target_path.name}{suffix}.{index}")
+        index += 1
+    reserved_sidecars.add(candidate)
+    reserved_sidecars.add(_plan_portable_sidecar_path(candidate))
+    return candidate
+
+
+def _plan_transaction_sidecar_conflicts(path: Path, reserved_sidecars: set[Path]) -> bool:
+    portable_path = _plan_portable_sidecar_path(path)
+    return path in reserved_sidecars or portable_path in reserved_sidecars or path.exists() or portable_path.exists()
+
+
+def _plan_portable_sidecar_path(path: Path) -> Path:
+    if not path.name.startswith("."):
+        return path
+    portable_name = path.name.lstrip(".") or "mylittleharness-sidecar"
+    return path.with_name(portable_name)
+
+
+def _plan_source_incubation_tmp(plan: RelationshipUpdatePlan, reserved_sidecars: set[Path] | None = None) -> Path:
+    if reserved_sidecars is not None:
+        return _plan_transaction_sidecar_path(plan.target_path, ".plan-source-incubation.tmp", reserved_sidecars)
     return plan.target_path.with_name(f".{plan.target_path.name}.plan-source-incubation.tmp")
 
 
-def _plan_source_incubation_backup(plan: RelationshipUpdatePlan) -> Path:
+def _plan_source_incubation_backup(plan: RelationshipUpdatePlan, reserved_sidecars: set[Path] | None = None) -> Path:
+    if reserved_sidecars is not None:
+        return _plan_transaction_sidecar_path(plan.target_path, ".plan-source-incubation.backup", reserved_sidecars)
     return plan.target_path.with_name(f".{plan.target_path.name}.plan-source-incubation.backup")
 
 

@@ -18,9 +18,23 @@ from pathlib import Path
 
 from . import __version__
 from .atomic_files import AtomicFileWrite, FileTransactionError, apply_file_transaction
+from .attachments import attachment_validation_findings
 from .dashboard import connect_readiness_findings, dashboard_check_findings
 from .daemon import mlhd_runtime_findings
-from .evidence import lifecycle_mutation_provenance_findings
+from .approval_packets import APPROVAL_PACKET_SCHEMA, APPROVAL_PACKETS_DIR_REL, APPROVAL_STATUSES
+from .claims import WORK_CLAIM_SCHEMA, WORK_CLAIMS_DIR_REL, WORK_CLAIM_STATUSES
+from .context_memory import context_memory_capsule_findings
+from .evidence import (
+    AGENT_RUNS_DIR_REL,
+    AGENT_RUN_DOCS_DECISIONS,
+    AGENT_RUN_REQUIRED_LISTS,
+    AGENT_RUN_REQUIRED_SCALARS,
+    AGENT_RUN_SCHEMA,
+    AGENT_RUN_STATUSES,
+    agent_run_record_template_finding,
+    lifecycle_mutation_provenance_findings,
+)
+from .handoff import HANDOFF_PACKET_SCHEMA, HANDOFF_PACKETS_DIR_REL, HANDOFF_PACKET_STATUSES, HANDOFF_WORKER_FORBIDDEN_ROUTES
 from .inventory import (
     EXPECTED_SPEC_NAMES,
     Inventory,
@@ -77,13 +91,20 @@ from .projection_artifacts import (
 )
 from .projection_index import INDEX_REL_PATH, build_projection_index, full_text_search_findings, inspect_projection_index, warm_projection_index
 from .reporting import RouteWriteEvidence, route_write_findings
-from .root_boundary import PRODUCT_SOURCE_FIXTURE, source_path_boundary_violation
+from .root_boundary import (
+    PRODUCT_SOURCE_FIXTURE,
+    record_id_conflict,
+    root_relative_path_conflict,
+    source_path_boundary_violation,
+    windows_path_reference_reason,
+)
 from .safe_commands import shell_arg
 from .research_recovery import (
     deep_research_rubric_recovery_findings,
     deep_research_rubric_recovery_target_label,
 )
 from .routes import (
+    CHANGED_ROUTE_METADATA_PROFILES,
     INTAKE_ROUTE_ALLOWED_TARGETS,
     INTAKE_ROUTE_DEFAULT_STATUS,
     IntakeRouteAdvice,
@@ -97,6 +118,9 @@ from .routes import (
     intake_target_matches_route,
     lifecycle_route_rows,
     normalize_route_path,
+    route_destination_matches,
+    route_destination_policy_for_field,
+    route_id_is_known,
 )
 from .writeback import (
     CLOSEOUT_WRITEBACK_FIELDS,
@@ -110,10 +134,11 @@ from .writeback import (
     acceptance_evidence_findings,
     canonical_phase_body_status,
     closeout_values_are_complete,
+    completion_gate_packet_findings,
     state_writeback_facts,
     state_writeback_identity_matches_current_plan,
 )
-from .vcs import product_diff_write_scope_findings
+from .vcs import probe_vcs, product_diff_write_scope_findings
 
 
 LARGE_FILE_LINES = 500
@@ -134,9 +159,14 @@ NONROUTE_PROJECT_MARKDOWN_EXEMPT_PREFIXES = (
     "project/temp/",
     "project/tmp/",
 )
+BUG_HUNT_LEDGER_REL = "project/verification/continuous-bug-hunt-ledger.md"
+BUG_HUNT_COVERAGE_REL = "project/verification/bug-hunt-roadmap-coverage.md"
+BUG_HUNT_DISPOSITION_STATUSES = {"fixed", "delegated", "rejected-with-reason", "still-open"}
+BUG_HUNT_ROADMAP_OWNER_STATUSES = {"accepted", "active", "done"}
 COMMAND_SURFACE_SENTINEL_COMMANDS = ("transition", "roadmap", "meta-feedback")
 COMMAND_SURFACE_PROBE_TIMEOUT_SECONDS = 5
 RETIRED_COMMAND_DOC_SURFACES = ("mirror", "research-prompt")
+TEMPORARY_ROADMAP_MANIFEST_RE = re.compile(r"^project/verification/roadmap-routing-\d{4}-\d{2}-\d{2}-[a-z0-9._-]+\.json$")
 COMMAND_SURFACE_SCHEMA_VERSION = "mylittleharness.command-surface.v1"
 COMMAND_SURFACE_ROWS: tuple[dict[str, object], ...] = (
     {
@@ -152,7 +182,6 @@ COMMAND_SURFACE_ROWS: tuple[dict[str, object], ...] = (
             "context-budget",
             "doctor",
             "dashboard --inspect",
-            "intelligence",
             "manifest --inspect",
             "suggest --intent",
             "projection --inspect",
@@ -161,10 +190,11 @@ COMMAND_SURFACE_ROWS: tuple[dict[str, object], ...] = (
             "hooks --run",
             "hooks --doctor",
             "adapter --inspect",
+            "adapter --serve --target mcp-read-projection --transport stdio",
             "adapter --client-config",
             "claim --status",
             "handoff --status",
-            "approval-packet --status",
+            "reconcile",
             "closeout",
             "evidence",
             "review-token",
@@ -177,6 +207,16 @@ COMMAND_SURFACE_ROWS: tuple[dict[str, object], ...] = (
         "root_eligibility": "any readable MLH root matching the command-specific root posture",
         "write_path_posture": "writes no repo files, generated caches, package artifacts, hooks, Git state, user config, or workstation state",
         "authority_risk": "advisory navigation/report data only and not authority; cannot approve lifecycle, archive, roadmap status, staging, commit, push, release, or provider routing",
+    },
+    {
+        "schema_version": COMMAND_SURFACE_SCHEMA_VERSION,
+        "surface_id": "read-mostly-generated-cache-navigation",
+        "commands": ("intelligence",),
+        "read_write_class": "read-mostly-report-with-disposable-cache-refresh",
+        "apply_requirement": "no --apply path for this report posture; path/full-text search may refresh disposable generated projection cache without implying lifecycle apply",
+        "root_eligibility": "any readable MLH root matching the intelligence root posture",
+        "write_path_posture": "writes no repo source files, lifecycle routes, package artifacts, hooks, Git state, user config, workstation state, or runtime state; search-oriented navigation may refresh only disposable generated projection cache under .mylittleharness/generated/projection",
+        "authority_risk": "source/lifecycle report data and refreshed generated navigation cache are advisory only; neither can approve lifecycle, archive, roadmap status, staging, commit, push, release, or provider routing",
     },
     {
         "schema_version": COMMAND_SURFACE_SCHEMA_VERSION,
@@ -197,17 +237,18 @@ COMMAND_SURFACE_ROWS: tuple[dict[str, object], ...] = (
             "incubate --dry-run|--apply",
             "incubation-reconcile --dry-run|--apply",
             "intake --dry-run|--apply",
+            "attachment-import --dry-run|--apply",
             "research-import --dry-run|--apply",
             "research-distill --dry-run|--apply",
             "research-compare --dry-run|--apply",
+            "discover --dry-run|--apply",
             "evidence --record --dry-run|--apply",
+            "cleanup --dry-run|--apply",
             "claim --dry-run|--apply",
             "handoff --dry-run|--apply",
             "approval-packet --dry-run|--apply",
             "meta-feedback --dry-run|--apply",
-            "projection --build|--rebuild|--delete|--warm-cache",
             "hooks adapter --dry-run|--apply",
-            "hooks install --dry-run|--apply",
             "adapter --install-client-config --dry-run|--apply",
         ),
         "read_write_class": "explicit-preview-then-write",
@@ -215,6 +256,16 @@ COMMAND_SURFACE_ROWS: tuple[dict[str, object], ...] = (
         "root_eligibility": "eligible live operating roots or explicitly supported command roots; product-source fixtures and archive roots are refused where unsafe",
         "write_path_posture": "writes only command-owned route files, scaffold files, generated cache paths, or local config targets named by the reviewed rail",
         "authority_risk": "apply writes evidence/state but still is not future authority and cannot approve future lifecycle decisions, archive, staging, commit, push, release, rollback, or provider routing",
+    },
+    {
+        "schema_version": COMMAND_SURFACE_SCHEMA_VERSION,
+        "surface_id": "direct-generated-cache-maintenance",
+        "commands": ("projection --build|--rebuild|--delete|--warm-cache",),
+        "read_write_class": "direct-disposable-generated-cache-mutation",
+        "apply_requirement": "no matching dry-run/apply lifecycle rail is implied; the explicit projection command mutates only disposable generated cache state",
+        "root_eligibility": "readable MLH roots with projection cache support; product source and live operating roots keep source files authoritative",
+        "write_path_posture": "writes only disposable generated projection cache files or cache markers under .mylittleharness/generated/projection",
+        "authority_risk": "generated-cache maintenance cannot approve lifecycle, archive, roadmap status, repair, staging, commit, push, release, rollback, provider routing, or source truth",
     },
     {
         "schema_version": COMMAND_SURFACE_SCHEMA_VERSION,
@@ -231,6 +282,7 @@ COMMAND_SURFACE_ROWS: tuple[dict[str, object], ...] = (
         "surface_id": "optional-runtime-helper",
         "commands": (
             "mlhd status",
+            "mlhd doctor",
             "mlhd run-once --dry-run|--apply",
             "mlhd start --dry-run|--apply",
             "mlhd stop --dry-run|--apply",
@@ -250,6 +302,602 @@ PRODUCT_DOC_COPY_DRIFT_SURFACES = (
     "docs/specs/attach-repair-status-cli.md",
     ".agents/docmap.yaml",
 )
+COORDINATION_EVIDENCE_RECORD_KINDS = ("agent-run", "work-claim", "handoff", "approval-packet")
+COORDINATION_RECORD_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+COORDINATION_SOURCE_HASH_RE = re.compile(r"^(.+?)\s+(?:sha256=([a-fA-F0-9]{64})|(missing)|(unreadable)|(invalid-path))$")
+COORDINATION_SOURCE_HASH_REQUIRED_PREFIXES = (".agents/", ".codex/", "docs/", "src/", "tests/")
+COORDINATION_SOURCE_HASH_REQUIRED_FILES = {"AGENTS.md", "README.md", "pyproject.toml"}
+SYMPHONY_QUEUE_DIR_REL = "project/symphony/queue"
+SYMPHONY_QUEUE_SCHEMA = "mlh.symphony.queue-item.v1"
+
+
+@dataclass(frozen=True)
+class CleanupRequest:
+    target: str
+    reason: str = ""
+
+
+def make_cleanup_request(target: str, reason: str | None = None) -> CleanupRequest:
+    return CleanupRequest(target=str(target or ""), reason=str(reason or ""))
+
+
+def cleanup_dry_run_findings(inventory: Inventory, request: CleanupRequest) -> list[Finding]:
+    findings = [
+        Finding(
+            "info",
+            "cleanup-dry-run",
+            "cleanup preview only; no files, lifecycle routes, archives, Git state, caches, or generated reports were changed",
+            request.target or None,
+        )
+    ]
+    target = _cleanup_target_review(inventory, request)
+    findings.extend(target.findings)
+    if target.errors:
+        findings.extend(_cleanup_boundary_findings())
+        return findings
+    if not target.path.exists():
+        findings.append(
+            Finding(
+                "info",
+                "cleanup-target-missing",
+                f"temporary roadmap manifest is already absent; no apply target exists: {target.rel_path}",
+                target.rel_path,
+            )
+        )
+    else:
+        findings.append(
+            Finding(
+                "info",
+                "cleanup-plan",
+                f"would delete exact obsolete temporary roadmap manifest: {target.rel_path}",
+                target.rel_path,
+            )
+        )
+    findings.extend(_cleanup_boundary_findings())
+    return findings
+
+
+def cleanup_apply_findings(inventory: Inventory, request: CleanupRequest) -> list[Finding]:
+    findings = [
+        Finding(
+            "info",
+            "cleanup-apply",
+            "cleanup apply started; this route may delete only one reviewed temporary roadmap JSON manifest",
+            request.target or None,
+        )
+    ]
+    target = _cleanup_target_review(inventory, request)
+    findings.extend(target.findings)
+    if target.errors:
+        findings.extend(_cleanup_boundary_findings())
+        return findings
+    if not target.path.exists():
+        findings.append(
+            Finding(
+                "info",
+                "cleanup-target-missing",
+                f"temporary roadmap manifest is already absent; no file was deleted: {target.rel_path}",
+                target.rel_path,
+            )
+        )
+        findings.extend(_cleanup_boundary_findings())
+        return findings
+    try:
+        target.path.unlink()
+    except OSError as exc:
+        findings.append(Finding("error", "cleanup-delete-failed", f"could not delete temporary roadmap manifest: {exc}", target.rel_path))
+        findings.extend(_cleanup_boundary_findings())
+        return findings
+    findings.append(Finding("info", "cleanup-deleted", f"deleted obsolete temporary roadmap manifest: {target.rel_path}", target.rel_path))
+    findings.extend(_cleanup_boundary_findings())
+    return findings
+
+
+@dataclass(frozen=True)
+class _CleanupTargetReview:
+    rel_path: str
+    path: Path
+    findings: list[Finding]
+    errors: bool
+
+
+def _cleanup_target_review(inventory: Inventory, request: CleanupRequest) -> _CleanupTargetReview:
+    rel_path, path, findings = _cleanup_target_shape_findings(inventory, request.target)
+    if any(finding.severity == "error" for finding in findings):
+        return _CleanupTargetReview(rel_path, path, findings, True)
+    findings.extend(_cleanup_existing_target_findings(path, rel_path, inventory.root))
+    return _CleanupTargetReview(rel_path, path, findings, any(finding.severity == "error" for finding in findings))
+
+
+def _cleanup_target_shape_findings(inventory: Inventory, target: str) -> tuple[str, Path, list[Finding]]:
+    raw = str(target or "").strip().replace("\\", "/")
+    rel_path = raw.strip("/")
+    path = inventory.root / rel_path
+    findings: list[Finding] = []
+    if inventory.root_kind != "live_operating_root":
+        findings.append(
+            Finding(
+                "error",
+                "cleanup-refused",
+                f"cleanup is available only in live operating roots; root kind is {inventory.root_kind}",
+                rel_path or None,
+            )
+        )
+    if not raw:
+        findings.append(Finding("error", "cleanup-refused", "cleanup requires --target <project/verification/roadmap-routing-*.json>"))
+    if Path(raw).is_absolute() or re.match(r"^[a-zA-Z]:/", raw):
+        findings.append(Finding("error", "cleanup-refused", "cleanup target must be root-relative, not absolute", raw))
+    if raw.startswith("../") or "/../" in raw or raw == "..":
+        findings.append(Finding("error", "cleanup-refused", "cleanup target must not contain parent traversal", raw))
+    if rel_path and not TEMPORARY_ROADMAP_MANIFEST_RE.match(rel_path.casefold()):
+        findings.append(
+            Finding(
+                "error",
+                "cleanup-refused",
+                "cleanup target must match project/verification/roadmap-routing-YYYY-MM-DD-*.json",
+                rel_path,
+            )
+        )
+    try:
+        root_resolved = inventory.root.resolve(strict=True)
+        path.resolve(strict=False).relative_to(root_resolved)
+    except (OSError, ValueError):
+        findings.append(Finding("error", "cleanup-refused", "cleanup target must resolve inside the operating root", rel_path or raw))
+    symlink_rel = _cleanup_symlink_segment(inventory.root, rel_path)
+    if symlink_rel:
+        findings.append(Finding("error", "cleanup-refused", f"cleanup target crosses a symlink segment: {symlink_rel}", symlink_rel))
+    if not any(finding.severity == "error" for finding in findings):
+        findings.append(
+            Finding(
+                "info",
+                "cleanup-target",
+                f"target is a bounded temporary roadmap manifest candidate: {rel_path}",
+                rel_path,
+            )
+        )
+    return rel_path, path, findings
+
+
+def _cleanup_existing_target_findings(path: Path, rel_path: str, root: Path) -> list[Finding]:
+    if not path.exists():
+        return []
+    findings: list[Finding] = []
+    if not path.is_file() or path.is_symlink():
+        findings.append(Finding("error", "cleanup-refused", "cleanup target must be a regular non-symlink file", rel_path))
+        return findings
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        findings.append(Finding("error", "cleanup-refused", f"cleanup target must be readable JSON: {exc}", rel_path))
+        return findings
+    if not isinstance(payload, (dict, list)):
+        findings.append(Finding("error", "cleanup-refused", "cleanup target JSON must be an object or array manifest", rel_path))
+    tracking = _cleanup_git_tracking_status(root, rel_path)
+    if tracking == "tracked":
+        findings.append(Finding("error", "cleanup-refused", "cleanup refuses to delete a Git-tracked file", rel_path))
+    elif tracking == "untracked":
+        findings.append(Finding("info", "cleanup-target-untracked", "target is not tracked by Git in this root", rel_path))
+    else:
+        findings.append(Finding("info", "cleanup-target-git-unknown", "Git tracking status unavailable; cleanup remains bounded by exact path and JSON shape", rel_path))
+    return findings
+
+
+def _cleanup_symlink_segment(root: Path, rel_path: str) -> str:
+    if not rel_path:
+        return ""
+    current = root
+    parts: list[str] = []
+    for part in Path(rel_path).parts:
+        parts.append(part)
+        current = current / part
+        if current.exists() and current.is_symlink():
+            return "/".join(parts)
+    return ""
+
+
+def _cleanup_git_tracking_status(root: Path, rel_path: str) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "--error-unmatch", "--", rel_path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=COMMAND_SURFACE_PROBE_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown"
+    if result.returncode == 0:
+        return "tracked"
+    if result.returncode == 1:
+        return "untracked"
+    return "unknown"
+
+
+def _cleanup_boundary_findings() -> list[Finding]:
+    return [
+        Finding(
+            "info",
+            "cleanup-boundary",
+            (
+                "cleanup owns only exact temporary roadmap JSON manifest removal under project/verification; "
+                "it cannot delete lifecycle Markdown, archive evidence, repair metadata, mark roadmap done, stage, commit, push, or weaken hooks"
+            ),
+            "project/verification",
+        )
+    ]
+
+
+def coordination_evidence_identity_findings(
+    inventory: Inventory,
+    code_prefix: str = "coordination-evidence",
+    record_kinds: tuple[str, ...] = COORDINATION_EVIDENCE_RECORD_KINDS,
+) -> list[Finding]:
+    findings: list[Finding] = [
+        Finding(
+            "info",
+            f"{code_prefix}-read-only",
+            "coordination evidence identity diagnostics are read-only; they write no records, locks, lifecycle state, generated caches, or Git state",
+            "project/verification",
+        )
+    ]
+    if inventory.root_kind != "live_operating_root":
+        findings.append(
+            Finding(
+                "info",
+                f"{code_prefix}-non-authority",
+                f"coordination evidence identity scan is live-root only; root kind is {inventory.root_kind}",
+                inventory.state.rel_path if inventory.state and inventory.state.exists else None,
+            )
+        )
+        findings.extend(_coordination_evidence_boundary_findings(code_prefix))
+        return findings
+
+    requested = set(record_kinds)
+    if "work-claim" in requested:
+        findings.extend(_coordination_work_claim_identity_findings(inventory.root, code_prefix))
+    if "handoff" in requested:
+        findings.extend(_coordination_handoff_identity_findings(inventory.root, code_prefix))
+    if "approval-packet" in requested:
+        findings.extend(_coordination_approval_packet_identity_findings(inventory.root, code_prefix))
+    if "agent-run" in requested:
+        findings.extend(_coordination_agent_run_identity_findings(inventory.root, code_prefix))
+
+    if not any(finding.severity == "warn" for finding in findings):
+        findings.append(
+            Finding(
+                "info",
+                f"{code_prefix}-clean",
+                f"coordination record identity scan found no malformed filenames, route ids, approval refs, accepted-handoff provenance, or source-hash coverage gaps for {', '.join(record_kinds)}",
+                "project/verification",
+            )
+        )
+    findings.extend(_coordination_evidence_boundary_findings(code_prefix))
+    return findings
+
+
+def _coordination_work_claim_identity_findings(root: Path, code_prefix: str) -> list[Finding]:
+    records, findings = _coordination_json_records(
+        root,
+        WORK_CLAIMS_DIR_REL,
+        label="work-claim",
+        id_field="claim_id",
+        schema=WORK_CLAIM_SCHEMA,
+        record_type="work-claim",
+        code_prefix=code_prefix,
+    )
+    if not records:
+        return findings
+    for rel_path, data in records:
+        status = str(data.get("status") or "").strip()
+        if status and status not in WORK_CLAIM_STATUSES:
+            findings.append(Finding("warn", f"{code_prefix}-work-claim-status-unknown", f"work claim status is unsupported: {status}", rel_path))
+        for route_id in _coordination_string_list(data.get("claimed_routes")):
+            if not route_id_is_known(route_id):
+                findings.append(Finding("warn", f"{code_prefix}-work-claim-route-unknown", f"work claim claimed_routes contains unknown route id: {route_id}", rel_path))
+        for rel in _coordination_string_list(data.get("claimed_paths")):
+            findings.extend(_coordination_ref_shape_findings(root, rel, rel_path, code_prefix, "work-claim-claimed-path", require_existing=False))
+        lease = str(data.get("lease_expires_at") or "").strip()
+        if lease and _coordination_parse_utc_timestamp(lease) is None:
+            findings.append(Finding("warn", f"{code_prefix}-work-claim-provenance", "work claim lease_expires_at is not a valid UTC timestamp", rel_path))
+    return findings
+
+
+def _coordination_handoff_identity_findings(root: Path, code_prefix: str) -> list[Finding]:
+    records, findings = _coordination_json_records(
+        root,
+        HANDOFF_PACKETS_DIR_REL,
+        label="handoff",
+        id_field="handoff_id",
+        schema=HANDOFF_PACKET_SCHEMA,
+        record_type="handoff-packet",
+        code_prefix=code_prefix,
+    )
+    findings.extend(_coordination_handoff_note_findings(root, code_prefix))
+    if not records:
+        return findings
+    for rel_path, data in records:
+        status = str(data.get("status") or "").strip()
+        if status and status not in HANDOFF_PACKET_STATUSES:
+            findings.append(Finding("warn", f"{code_prefix}-handoff-status-unknown", f"handoff status is unsupported: {status}", rel_path))
+        for route_id in _coordination_string_list(data.get("allowed_routes")):
+            if not route_id_is_known(route_id):
+                findings.append(Finding("warn", f"{code_prefix}-handoff-route-unknown", f"handoff allowed_routes contains unknown route id: {route_id}", rel_path))
+            if route_id in HANDOFF_WORKER_FORBIDDEN_ROUTES:
+                findings.append(Finding("warn", f"{code_prefix}-handoff-route-forbidden", f"existing handoff packet allows lifecycle-authority route: {route_id}", rel_path))
+        if status == "accepted":
+            if not str(data.get("accepted_by") or "").strip():
+                findings.append(Finding("warn", f"{code_prefix}-handoff-accepted-provenance", "accepted handoff packet is missing accepted_by", rel_path))
+            accepted_at = str(data.get("accepted_at_utc") or "").strip()
+            if not accepted_at:
+                findings.append(Finding("warn", f"{code_prefix}-handoff-accepted-provenance", "accepted handoff packet is missing accepted_at_utc", rel_path))
+            elif _coordination_parse_utc_timestamp(accepted_at) is None:
+                findings.append(Finding("warn", f"{code_prefix}-handoff-accepted-provenance", "accepted handoff packet accepted_at_utc is not a valid UTC timestamp", rel_path))
+        findings.extend(_coordination_ref_list_findings(root, data.get("evidence_refs"), rel_path, code_prefix, "handoff-evidence-ref", require_existing=True))
+        findings.extend(_coordination_ref_list_findings(root, data.get("approval_packet_refs"), rel_path, code_prefix, "handoff-approval-packet-ref", require_existing=True))
+        findings.extend(_coordination_ref_list_findings(root, data.get("claim_refs"), rel_path, code_prefix, "handoff-work-claim-ref", require_existing=True))
+    return findings
+
+
+def _coordination_handoff_note_findings(root: Path, code_prefix: str) -> list[Finding]:
+    directory = root / HANDOFF_PACKETS_DIR_REL
+    if not directory.exists() or not directory.is_dir():
+        return []
+    findings: list[Finding] = []
+    for path in sorted(directory.glob("*.md")):
+        rel_path = _coordination_to_rel_path(root, path)
+        findings.append(
+            Finding(
+                "info",
+                f"{code_prefix}-handoff-note-template",
+                (
+                    "handoff Markdown notes are discoverable evidence only; canonical dispatcher handoff packets are JSON "
+                    "records scaffolded with `mylittleharness --root <root> handoff --dry-run --action create ...`"
+                ),
+                rel_path,
+            )
+        )
+    return findings
+
+
+def _coordination_approval_packet_identity_findings(root: Path, code_prefix: str) -> list[Finding]:
+    records, findings = _coordination_json_records(
+        root,
+        APPROVAL_PACKETS_DIR_REL,
+        label="approval-packet",
+        id_field="approval_id",
+        schema=APPROVAL_PACKET_SCHEMA,
+        record_type="approval-packet",
+        code_prefix=code_prefix,
+    )
+    if not records:
+        return findings
+    for rel_path, data in records:
+        for field in ("requester", "subject", "requested_decision", "gate_class"):
+            if not str(data.get(field) or "").strip():
+                findings.append(Finding("warn", f"{code_prefix}-approval-packet-malformed", f"approval packet {field} is required", rel_path))
+        status = str(data.get("status") or "").strip()
+        if not status:
+            findings.append(Finding("warn", f"{code_prefix}-approval-packet-malformed", "approval packet status is required", rel_path))
+        elif status not in APPROVAL_STATUSES:
+            findings.append(Finding("warn", f"{code_prefix}-approval-packet-status-unknown", f"approval packet status is unsupported: {status}", rel_path))
+        elif status == "approved":
+            findings.append(Finding("info", f"{code_prefix}-approval-packet-authority-boundary", "approval packet status=approved remains append-only evidence and cannot approve lifecycle by itself", rel_path))
+        for field in ("input_refs", "human_gate_conditions"):
+            value = data.get(field)
+            if value not in (None, "") and not isinstance(value, list):
+                findings.append(Finding("warn", f"{code_prefix}-approval-packet-malformed", f"approval packet {field} must be a list of strings", rel_path))
+            if not _coordination_string_list(value):
+                findings.append(Finding("warn", f"{code_prefix}-approval-packet-malformed", f"approval packet {field} must contain at least one value", rel_path))
+        findings.extend(_coordination_ref_list_findings(root, data.get("input_refs"), rel_path, code_prefix, "approval-packet-input-ref", require_existing=True))
+    return findings
+
+
+def _coordination_agent_run_identity_findings(root: Path, code_prefix: str) -> list[Finding]:
+    directory = root / AGENT_RUNS_DIR_REL
+    if not directory.exists() or not directory.is_dir():
+        return []
+    findings: list[Finding] = []
+    for path in sorted(directory.glob("*.md")):
+        rel_path = _coordination_to_rel_path(root, path)
+        if path.is_symlink() or not path.is_file():
+            findings.append(Finding("warn", f"{code_prefix}-agent-run-malformed", "agent run record path is not a regular file", rel_path))
+            continue
+        try:
+            frontmatter = parse_frontmatter(path.read_text(encoding="utf-8"))
+        except OSError as exc:
+            findings.append(Finding("warn", f"{code_prefix}-agent-run-malformed", f"agent run record could not be read: {exc}", rel_path))
+            continue
+        data = frontmatter.data
+        if not frontmatter.has_frontmatter:
+            findings.append(Finding("warn", f"{code_prefix}-agent-run-malformed", "agent run record is missing frontmatter", rel_path))
+            findings.append(agent_run_record_template_finding(rel_path, code_prefix))
+            continue
+        for error in frontmatter.errors:
+            findings.append(Finding("warn", f"{code_prefix}-agent-run-malformed", error, rel_path))
+        for field in AGENT_RUN_REQUIRED_SCALARS:
+            value = data.get(field)
+            if not isinstance(value, str) or not value.strip():
+                findings.append(Finding("warn", f"{code_prefix}-agent-run-malformed", f"agent run record missing required field: {field}", rel_path))
+        if data.get("schema") != AGENT_RUN_SCHEMA:
+            findings.append(Finding("warn", f"{code_prefix}-agent-run-malformed", f"agent run record schema should be {AGENT_RUN_SCHEMA}", rel_path))
+        if data.get("record_type") != "agent-run":
+            findings.append(Finding("warn", f"{code_prefix}-agent-run-malformed", "agent run record record_type should be agent-run", rel_path))
+        record_id = str(data.get("record_id") or "").strip()
+        findings.extend(_coordination_record_id_findings(record_id, Path(rel_path).stem, rel_path, code_prefix, "agent-run", "record_id"))
+        status = str(data.get("status") or "").strip()
+        if status and status not in AGENT_RUN_STATUSES:
+            findings.append(Finding("warn", f"{code_prefix}-agent-run-status-unknown", f"agent run record status is unsupported: {status}", rel_path))
+        docs_decision = str(data.get("docs_decision") or "").strip()
+        if docs_decision and docs_decision not in AGENT_RUN_DOCS_DECISIONS:
+            findings.append(Finding("warn", f"{code_prefix}-agent-run-docs-decision-unknown", f"agent run record docs_decision is unsupported: {docs_decision}", rel_path))
+        for field in AGENT_RUN_REQUIRED_LISTS:
+            if not _coordination_string_list(data.get(field)):
+                findings.append(Finding("warn", f"{code_prefix}-agent-run-malformed", f"agent run record missing required list field: {field}", rel_path))
+        source_refs = _coordination_agent_run_source_refs(data)
+        source_hash_refs = _coordination_source_hash_refs(data.get("source_hashes"), rel_path, code_prefix)
+        findings.extend(source_hash_refs[1])
+        for source_ref in sorted(source_refs - source_hash_refs[0]):
+            findings.append(Finding("warn", f"{code_prefix}-agent-run-source-hash-missing", f"agent run record source_hashes does not bind source ref: {source_ref}", rel_path))
+    return findings
+
+
+def _coordination_json_records(
+    root: Path,
+    directory_rel: str,
+    *,
+    label: str,
+    id_field: str,
+    schema: str,
+    record_type: str,
+    code_prefix: str,
+) -> tuple[list[tuple[str, dict[str, object]]], list[Finding]]:
+    directory = root / directory_rel
+    if not directory.exists() or not directory.is_dir():
+        return [], []
+    records: list[tuple[str, dict[str, object]]] = []
+    findings: list[Finding] = []
+    for path in sorted(directory.glob("*.json")):
+        rel_path = _coordination_to_rel_path(root, path)
+        if path.is_symlink() or not path.is_file():
+            findings.append(Finding("warn", f"{code_prefix}-{label}-malformed", f"{label} record path is not a regular file", rel_path))
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            findings.append(Finding("warn", f"{code_prefix}-{label}-malformed", f"{label} record could not be read as JSON: {exc}", rel_path))
+            continue
+        if not isinstance(data, dict):
+            findings.append(Finding("warn", f"{code_prefix}-{label}-malformed", f"{label} record JSON root must be an object", rel_path))
+            continue
+        if data.get("schema") != schema:
+            findings.append(Finding("warn", f"{code_prefix}-{label}-malformed", f"{label} schema should be {schema}", rel_path))
+        if data.get("record_type") != record_type:
+            findings.append(Finding("warn", f"{code_prefix}-{label}-malformed", f"{label} record_type should be {record_type}", rel_path))
+        record_id = str(data.get(id_field) or "").strip()
+        findings.extend(_coordination_record_id_findings(record_id, path.stem, rel_path, code_prefix, label, id_field))
+        created_at = str(data.get("created_at_utc") or "").strip()
+        if created_at and _coordination_parse_utc_timestamp(created_at) is None:
+            findings.append(Finding("warn", f"{code_prefix}-{label}-provenance", f"{label} created_at_utc is not a valid UTC timestamp", rel_path))
+        records.append((rel_path, data))
+    return records, findings
+
+
+def _coordination_record_id_findings(record_id: str, filename_stem: str, rel_path: str, code_prefix: str, label: str, id_field: str) -> list[Finding]:
+    findings: list[Finding] = []
+    if not record_id:
+        findings.append(Finding("warn", f"{code_prefix}-{label}-id-missing", f"{label} {id_field} is required", rel_path))
+        return findings
+    if not COORDINATION_RECORD_ID_RE.match(record_id):
+        findings.append(Finding("warn", f"{code_prefix}-{label}-id-malformed", f"{label} {id_field} may contain only letters, digits, dot, underscore, or dash", rel_path))
+    elif record_id_conflict(record_id):
+        findings.append(Finding("warn", f"{code_prefix}-{label}-id-malformed", f"{label} {id_field} {record_id_conflict(record_id)}", rel_path))
+    if filename_stem != record_id:
+        findings.append(Finding("warn", f"{code_prefix}-{label}-id-mismatch", f"{label} filename stem {filename_stem} does not match {id_field} {record_id}", rel_path))
+    return findings
+
+
+def _coordination_ref_list_findings(root: Path, value: object, rel_path: str, code_prefix: str, label: str, *, require_existing: bool) -> list[Finding]:
+    if value in (None, ""):
+        return []
+    if not isinstance(value, list):
+        return [Finding("warn", f"{code_prefix}-{label}-malformed", f"{label} must be a list of strings", rel_path)]
+    findings: list[Finding] = []
+    for ref in _coordination_string_list(value):
+        findings.extend(_coordination_ref_shape_findings(root, ref, rel_path, code_prefix, label, require_existing=require_existing))
+    return findings
+
+
+def _coordination_ref_shape_findings(root: Path, ref: str, rel_path: str, code_prefix: str, label: str, *, require_existing: bool) -> list[Finding]:
+    normalized = _coordination_normalize_ref(ref)
+    findings: list[Finding] = []
+    conflict = root_relative_path_conflict(normalized)
+    if conflict:
+        return [Finding("warn", f"{code_prefix}-{label}-invalid", f"{label} {conflict}: {normalized}", rel_path)]
+    target = root / normalized
+    boundary_violation = source_path_boundary_violation(root, target, label=label)
+    if boundary_violation is not None:
+        return [Finding("warn", f"{code_prefix}-{label}-invalid", boundary_violation.message, rel_path)]
+    if require_existing:
+        if not target.exists():
+            findings.append(Finding("warn", f"{code_prefix}-{label}-missing", f"{label} is missing: {normalized}", rel_path))
+        elif target.is_symlink() or not target.is_file():
+            findings.append(Finding("warn", f"{code_prefix}-{label}-invalid", f"{label} is not a regular file: {normalized}", rel_path))
+    return findings
+
+
+def _coordination_agent_run_source_refs(data: dict[str, object]) -> set[str]:
+    refs: set[str] = set()
+    for field in ("claimed_paths", "changed_files"):
+        refs.update(_coordination_string_list(data.get(field)))
+    normalized_refs = {_coordination_normalize_ref(ref) for ref in refs if _coordination_normalize_ref(ref)}
+    return {ref for ref in normalized_refs if _coordination_source_hash_required(ref)}
+
+
+def _coordination_source_hash_required(rel_path: str) -> bool:
+    return rel_path in COORDINATION_SOURCE_HASH_REQUIRED_FILES or rel_path.startswith(COORDINATION_SOURCE_HASH_REQUIRED_PREFIXES)
+
+
+def _coordination_source_hash_refs(value: object, rel_path: str, code_prefix: str) -> tuple[set[str], list[Finding]]:
+    refs: set[str] = set()
+    findings: list[Finding] = []
+    if value not in (None, "") and not isinstance(value, list):
+        findings.append(Finding("warn", f"{code_prefix}-agent-run-source-hash-malformed", "agent run source_hashes must be a list of strings", rel_path))
+    for entry in _coordination_string_list(value):
+        match = COORDINATION_SOURCE_HASH_RE.match(entry.strip())
+        if not match:
+            findings.append(Finding("warn", f"{code_prefix}-agent-run-source-hash-malformed", f"malformed source_hashes entry: {entry}", rel_path))
+            continue
+        source_ref = _coordination_normalize_ref(match.group(1))
+        refs.add(source_ref)
+        conflict = root_relative_path_conflict(source_ref)
+        if conflict:
+            findings.append(Finding("warn", f"{code_prefix}-agent-run-source-hash-malformed", f"source_hashes path {conflict}: {source_ref}", rel_path))
+    return refs, findings
+
+
+def _coordination_string_list(value: object) -> tuple[str, ...]:
+    if isinstance(value, list):
+        return tuple(str(item).strip() for item in value if str(item).strip())
+    if isinstance(value, str) and value.strip():
+        return (value.strip(),)
+    return ()
+
+
+def _coordination_normalize_ref(value: str) -> str:
+    return str(value or "").replace("\\", "/").strip().lstrip("./")
+
+
+def _coordination_parse_utc_timestamp(value: object) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _coordination_to_rel_path(root: Path, path: Path) -> str:
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def _coordination_evidence_boundary_findings(code_prefix: str) -> list[Finding]:
+    return [
+        Finding(
+            "info",
+            f"{code_prefix}-authority-boundary",
+            "coordination evidence can block clean posture, dispatcher launch confidence, or fan-in review, but it cannot approve lifecycle, archive, roadmap status, staging, commit, push, release, or worker cleanup",
+            "project/verification",
+        )
+    ]
 DEFAULT_PLAN_REL = "project/implementation-plan.md"
 PHASE_WRITEBACK_BEGIN = "<!-- BEGIN mylittleharness-phase-writeback v1 -->"
 PHASE_WRITEBACK_END = "<!-- END mylittleharness-phase-writeback v1 -->"
@@ -440,7 +1088,7 @@ SPEC_SUPERSESSION_TARGET_FIELDS = (
     "deprecation_path",
     "archived_to",
 )
-ROUTE_METADATA_VALIDATED_ROUTES = {"adrs", "decisions", "incubation", "research", "roadmap", "stable-specs", "verification"}
+ROUTE_METADATA_VALIDATED_ROUTES = {"adrs", "attachments", "decisions", "incubation", "research", "roadmap", "stable-specs", "verification"}
 ROUTE_METADATA_STATUS_VALUES = {
     "accepted",
     "active",
@@ -477,6 +1125,7 @@ ROUTE_METADATA_STATUS_VALUES = {
 }
 ROUTE_METADATA_STATUS_HINTS_BY_ROUTE = {
     "adrs": ("draft", "accepted", "superseded", "archived"),
+    "attachments": ("imported", "archived", "stale"),
     "decisions": ("draft", "accepted", "superseded", "archived"),
     "incubation": ("incubating", "implemented", "rejected", "superseded", "archived", "stale"),
     "research": ("imported", "distilled", "compared", "research-ready", "accepted", "superseded", "archived", "stale"),
@@ -520,8 +1169,10 @@ ROUTE_METADATA_LIFECYCLE_STATES = {
 }
 ROUTE_METADATA_SCALAR_PATH_FIELDS = {"archived_to", "promoted_to"}
 ROUTE_METADATA_FLEXIBLE_PATH_FIELDS = {
+    "attachment_refs",
     "related_adr",
     "related_adrs",
+    "related_attachments",
     "related_decision",
     "related_decisions",
     "related_doc",
@@ -534,6 +1185,7 @@ ROUTE_METADATA_FLEXIBLE_PATH_FIELDS = {
     "related_specs",
     "related_verification",
     "archived_plan",
+    "source_attachments",
     "source_incubation",
     "source_members",
     "source_roadmap",
@@ -938,6 +1590,14 @@ def lifecycle_summary_findings(inventory: Inventory) -> list[Finding]:
     ]
 
 
+def _validation_status_scope_findings(inventory: Inventory) -> list[Finding]:
+    findings = [finding for finding in lifecycle_summary_findings(inventory) if finding.severity in {"error", "warn"}]
+    marker = inventory.surface_by_rel.get(DETACH_MARKER_REL_PATH)
+    if marker and marker.exists:
+        findings.extend(finding for finding in _detach_marker_status_findings(inventory, marker) if finding.severity in {"error", "warn"})
+    return findings
+
+
 def lifecycle_route_findings(inventory: Inventory) -> list[Finding]:
     if inventory.root_kind != "live_operating_root":
         return []
@@ -1047,11 +1707,183 @@ def _is_nonroute_project_markdown_exempt(rel_path: str) -> bool:
     return any(normalized.startswith(prefix) for prefix in NONROUTE_PROJECT_MARKDOWN_EXEMPT_PREFIXES)
 
 
+def symphony_queue_dependency_findings(inventory: Inventory, code_prefix: str = "symphony-queue") -> list[Finding]:
+    if inventory.root_kind != "live_operating_root":
+        return []
+    directory = inventory.root / SYMPHONY_QUEUE_DIR_REL
+    if not directory.exists() or not directory.is_dir():
+        return []
+
+    records: list[tuple[str, dict[str, object]]] = []
+    findings: list[Finding] = [
+        Finding(
+            "info",
+            f"{code_prefix}-read-only",
+            (
+                "Symphony queue dependency diagnostics are read-only; queue JSON files remain repo-visible "
+                "coordination evidence and this report writes no dispatcher, lifecycle, generated cache, or Git state"
+            ),
+            SYMPHONY_QUEUE_DIR_REL,
+        )
+    ]
+    for path in sorted(directory.glob("*.json")):
+        rel_path = _coordination_to_rel_path(inventory.root, path)
+        if path.is_symlink() or not path.is_file():
+            findings.append(Finding("warn", f"{code_prefix}-item-malformed", "queue item path is not a regular file", rel_path))
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            findings.append(Finding("warn", f"{code_prefix}-item-malformed", f"queue item could not be read as JSON: {exc}", rel_path))
+            continue
+        if not isinstance(data, dict):
+            findings.append(Finding("warn", f"{code_prefix}-item-malformed", "queue item JSON root must be an object", rel_path))
+            continue
+        schema = str(data.get("schema") or "").strip()
+        if schema and schema != SYMPHONY_QUEUE_SCHEMA:
+            findings.append(Finding("info", f"{code_prefix}-schema-advisory", f"queue item schema is external/advisory for MLH diagnostics: {schema}", rel_path))
+        records.append((rel_path, data))
+
+    current_by_key = _symphony_queue_current_item_index(records)
+    for rel_path, data in records:
+        for dependency in _symphony_queue_blocked_by_items(data.get("blocked_by")):
+            current = _symphony_queue_resolve_dependency(inventory.root, current_by_key, dependency)
+            dependency_label = _symphony_queue_dependency_label(dependency)
+            snapshot_state = str(dependency.get("state") or "").strip()
+            if current is None:
+                findings.append(
+                    Finding(
+                        "warn",
+                        f"{code_prefix}-blocked-by-unresolved",
+                        f"blocked_by dependency {dependency_label} could not be resolved to a current queue item; embedded state remains advisory only",
+                        rel_path,
+                    )
+                )
+                continue
+            current_rel, current_data = current
+            current_state = str(current_data.get("state") or "").strip()
+            if snapshot_state and current_state and snapshot_state.casefold() != current_state.casefold():
+                findings.append(
+                    Finding(
+                        "warn",
+                        f"{code_prefix}-blocked-by-stale-state",
+                        (
+                            f"blocked_by dependency {dependency_label} embeds state {snapshot_state}, but authoritative current "
+                            f"queue state is {current_state} from {current_rel}; resolve current dependency state before blocking"
+                        ),
+                        rel_path,
+                    )
+                )
+            elif current_state:
+                findings.append(
+                    Finding(
+                        "info",
+                        f"{code_prefix}-blocked-by-current",
+                        f"blocked_by dependency {dependency_label} resolves to current queue state {current_state} from {current_rel}",
+                        rel_path,
+                    )
+                )
+    findings.append(
+        Finding(
+            "info",
+            f"{code_prefix}-blocked-by-advisory-boundary",
+            (
+                "blocked_by state snapshots are advisory; dependent agents must resolve current dependency state from "
+                "project/symphony/queue/*.json before concluding Todo, Done, or Blocked"
+            ),
+            SYMPHONY_QUEUE_DIR_REL,
+        )
+    )
+    return findings
+
+
+def _symphony_queue_current_item_index(records: list[tuple[str, dict[str, object]]]) -> dict[str, tuple[str, dict[str, object]]]:
+    current_by_key: dict[str, tuple[str, dict[str, object]]] = {}
+    for rel_path, data in records:
+        for value in (
+            rel_path,
+            Path(rel_path).stem,
+            data.get("id"),
+            data.get("identifier"),
+            data.get("queue_item_id"),
+            data.get("item_id"),
+        ):
+            key = _symphony_queue_key(value)
+            if key:
+                current_by_key.setdefault(key, (rel_path, data))
+    return current_by_key
+
+
+def _symphony_queue_blocked_by_items(value: object) -> tuple[dict[str, object], ...]:
+    if isinstance(value, list):
+        blockers: list[dict[str, object]] = []
+        for item in value:
+            if isinstance(item, dict):
+                blockers.append(dict(item))
+            elif str(item).strip():
+                blockers.append({"id": str(item).strip()})
+        return tuple(blockers)
+    if isinstance(value, dict):
+        return (dict(value),)
+    if isinstance(value, str) and value.strip():
+        return ({"id": value.strip()},)
+    return ()
+
+
+def _symphony_queue_resolve_dependency(
+    root: Path,
+    current_by_key: dict[str, tuple[str, dict[str, object]]],
+    dependency: dict[str, object],
+) -> tuple[str, dict[str, object]] | None:
+    for field in ("id", "identifier", "queue_item_id", "item_id", "path", "ref", "url"):
+        value = dependency.get(field)
+        key = _symphony_queue_key(value)
+        if key and key in current_by_key:
+            return current_by_key[key]
+        rel = _symphony_queue_ref_to_rel(root, value)
+        if rel and rel in current_by_key:
+            return current_by_key[rel]
+    return None
+
+
+def _symphony_queue_ref_to_rel(root: Path, value: object) -> str:
+    text = str(value or "").replace("\\", "/").strip()
+    if not text:
+        return ""
+    if "://" in text:
+        return ""
+    while text.startswith("./"):
+        text = text[2:]
+    conflict = root_relative_path_conflict(text)
+    if conflict:
+        return ""
+    path = Path(text)
+    if path.is_absolute():
+        try:
+            return path.resolve().relative_to(root.resolve()).as_posix().casefold()
+        except (OSError, RuntimeError, ValueError):
+            return ""
+    return text.strip("/").casefold()
+
+
+def _symphony_queue_key(value: object) -> str:
+    return str(value or "").replace("\\", "/").strip().strip("/").casefold()
+
+
+def _symphony_queue_dependency_label(dependency: dict[str, object]) -> str:
+    for field in ("id", "identifier", "queue_item_id", "item_id", "path", "ref", "url"):
+        value = str(dependency.get(field) or "").strip()
+        if value:
+            return f"{field}={value}"
+    return "<unlabeled>"
+
+
 def validation_findings(inventory: Inventory) -> list[Finding]:
     findings: list[Finding] = []
     findings.extend(_required_surface_findings(inventory))
     findings.extend(_manifest_findings(inventory))
     findings.extend(_state_findings(inventory))
+    findings.extend(_validation_status_scope_findings(inventory))
     findings.extend(_incubation_contract_findings(inventory))
     findings.extend(_product_posture_findings(inventory))
     findings.extend(_active_plan_findings(inventory))
@@ -1059,6 +1891,8 @@ def validation_findings(inventory: Inventory) -> list[Finding]:
     findings.extend(_spec_lifecycle_posture_findings(inventory))
     findings.extend(_frontmatter_findings(inventory))
     findings.extend(_route_metadata_findings(inventory))
+    findings.extend(_changed_route_metadata_findings(inventory))
+    findings.extend(attachment_validation_findings(inventory))
     findings.extend(_nonroute_project_markdown_findings(inventory))
     findings.extend(roadmap_order_namespace_findings(inventory))
     findings.extend(roadmap_terminal_related_plan_findings(inventory))
@@ -1079,8 +1913,10 @@ def validation_findings(inventory: Inventory) -> list[Finding]:
     findings.extend(roadmap_acceptance_readiness_findings(inventory))
     findings.extend(_target_artifact_ownership_findings(inventory))
     findings.extend(_verification_ledger_status_findings(inventory))
+    findings.extend(_bug_hunt_traceability_findings(inventory))
     findings.extend(_working_memory_compaction_rail_findings(inventory))
     findings.extend(multi_agent_security_findings(inventory))
+    findings.extend(symphony_queue_dependency_findings(inventory, "check-symphony-queue"))
     findings.extend(connect_readiness_findings(inventory, "check-connect-readiness"))
     findings.extend(mlhd_runtime_findings(inventory, "check-mlhd"))
     findings.extend(dashboard_check_findings(inventory))
@@ -1255,6 +2091,174 @@ def _verification_ledger_status_findings(inventory: Inventory) -> list[Finding]:
             )
         )
     return findings
+
+
+def _bug_hunt_traceability_findings(inventory: Inventory) -> list[Finding]:
+    if inventory.root_kind != "live_operating_root":
+        return []
+    ledger = inventory.surface_by_rel.get(BUG_HUNT_LEDGER_REL)
+    if not ledger or not ledger.exists:
+        return []
+
+    ledger_ids = _bug_hunt_ledger_id_lines(ledger)
+    if not ledger_ids:
+        return [
+            Finding(
+                "info",
+                "bug-hunt-traceability-empty",
+                f"{BUG_HUNT_LEDGER_REL} has no numeric BH headings to trace",
+                BUG_HUNT_LEDGER_REL,
+            )
+        ]
+
+    coverage_records, findings = _bug_hunt_coverage_records(inventory)
+    roadmap_records, roadmap_findings = _bug_hunt_roadmap_records(inventory)
+    findings.extend(roadmap_findings)
+
+    covered_ids = set(coverage_records) | set(roadmap_records)
+    missing_ids = sorted(set(ledger_ids) - covered_ids)
+    stale_ids = sorted(covered_ids - set(ledger_ids))
+
+    if missing_ids:
+        first_missing = missing_ids[0]
+        findings.append(
+            Finding(
+                "warn",
+                "bug-hunt-traceability-gap",
+                (
+                    f"{len(missing_ids)} numeric bug-hunt ledger id(s) have no fixed/delegated/rejected "
+                    f"coverage row or accepted/active/done roadmap bh_ids owner: {_summarize_bh_ids(missing_ids)}"
+                ),
+                BUG_HUNT_LEDGER_REL,
+                ledger_ids.get(first_missing),
+            )
+        )
+    else:
+        findings.append(
+            Finding(
+                "info",
+                "bug-hunt-traceability-complete",
+                (
+                    f"bug-hunt traceability covers {len(ledger_ids)} numeric ledger id(s): "
+                    f"coverage_matrix={len(coverage_records)}; roadmap_bh_ids={len(roadmap_records)}"
+                ),
+                BUG_HUNT_LEDGER_REL,
+            )
+        )
+
+    if stale_ids:
+        stale_source, stale_line = _bug_hunt_first_record_location((coverage_records, roadmap_records), stale_ids[0])
+        findings.append(
+            Finding(
+                "warn",
+                "bug-hunt-traceability-stale-reference",
+                f"bug-hunt coverage references id(s) not present as numeric ledger headings: {_summarize_bh_ids(stale_ids)}",
+                stale_source or BUG_HUNT_LEDGER_REL,
+                stale_line,
+            )
+        )
+    return findings
+
+
+def _bug_hunt_ledger_id_lines(surface: Surface) -> dict[str, int]:
+    ids: dict[str, int] = {}
+    for line_number, line in enumerate(surface.content.splitlines(), start=1):
+        match = re.match(r"^###\s+(BH-\d{8}-\d{3})\b", line.strip())
+        if match:
+            ids.setdefault(match.group(1), line_number)
+    return ids
+
+
+def _bug_hunt_coverage_records(inventory: Inventory) -> tuple[dict[str, list[tuple[str, int | None]]], list[Finding]]:
+    coverage = inventory.surface_by_rel.get(BUG_HUNT_COVERAGE_REL)
+    if not coverage or not coverage.exists:
+        return {}, [
+            Finding(
+                "warn",
+                "bug-hunt-traceability-coverage-missing",
+                f"{BUG_HUNT_COVERAGE_REL} is absent; current ledger ids must be covered by roadmap bh_ids",
+                BUG_HUNT_COVERAGE_REL,
+            )
+        ]
+
+    records: dict[str, list[tuple[str, int | None]]] = {}
+    findings: list[Finding] = []
+    for line_number, line in enumerate(coverage.content.splitlines(), start=1):
+        match = re.match(r"^\|\s*(BH-\d{8}-\d{3})\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|", line)
+        if not match:
+            continue
+        bh_id = match.group(1)
+        status = match.group(2).strip().casefold()
+        owner = match.group(3).strip()
+        if status not in BUG_HUNT_DISPOSITION_STATUSES:
+            findings.append(
+                Finding(
+                    "warn",
+                    "bug-hunt-traceability-invalid-disposition",
+                    (
+                        f"{bh_id} has unsupported bug-hunt coverage status {status!r}; "
+                        f"expected one of {sorted(BUG_HUNT_DISPOSITION_STATUSES)}"
+                    ),
+                    BUG_HUNT_COVERAGE_REL,
+                    line_number,
+                )
+            )
+            continue
+        if not owner:
+            findings.append(
+                Finding(
+                    "warn",
+                    "bug-hunt-traceability-empty-owner",
+                    f"{bh_id} has no owner/disposition in the bug-hunt coverage matrix",
+                    BUG_HUNT_COVERAGE_REL,
+                    line_number,
+                )
+            )
+            continue
+        records.setdefault(bh_id, []).append((BUG_HUNT_COVERAGE_REL, line_number))
+    return records, findings
+
+
+def _bug_hunt_roadmap_records(inventory: Inventory) -> tuple[dict[str, list[tuple[str, int | None]]], list[Finding]]:
+    records: dict[str, list[tuple[str, int | None]]] = {}
+    roadmap_items, parse_findings = roadmap_items_for_diagnostics(inventory)
+    if parse_findings:
+        return records, [
+            Finding(
+                "warn",
+                "bug-hunt-traceability-roadmap-unreadable",
+                "roadmap bh_ids traceability could not be checked because project/roadmap.md has parse findings",
+                ROADMAP_REL,
+            )
+        ]
+
+    for _item_id, item in sorted(roadmap_items.items(), key=lambda row: (row[1].start, row[0])):
+        status = str(item.fields.get("status") or "").strip().casefold()
+        if status not in BUG_HUNT_ROADMAP_OWNER_STATUSES:
+            continue
+        for bh_id in _bug_hunt_ids_from_text(str(item.fields.get("bh_ids") or "")):
+            records.setdefault(bh_id, []).append((ROADMAP_REL, item.start + 1))
+    return records, []
+
+
+def _bug_hunt_ids_from_text(text: str) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(re.findall(r"BH-\d{8}-\d{3}", text or "")))
+
+
+def _bug_hunt_first_record_location(
+    record_maps: tuple[dict[str, list[tuple[str, int | None]]], ...],
+    bh_id: str,
+) -> tuple[str | None, int | None]:
+    for record_map in record_maps:
+        for source, line in record_map.get(bh_id, []):
+            return source, line
+    return None, None
+
+
+def _summarize_bh_ids(ids: list[str]) -> str:
+    if len(ids) <= 8:
+        return ", ".join(ids)
+    return ", ".join(ids[:8]) + f", +{len(ids) - 8} more"
 
 
 def _regular_markdown_files(path: Path, *, recursive: bool = False) -> list[Path]:
@@ -1705,6 +2709,7 @@ def context_budget_findings(inventory: Inventory) -> list[Finding]:
             f"start-path aggregate: {total_lines} lines, {total_chars} chars, ~{max(1, total_chars // 4) if total_chars else 0} tokens, label={aggregate_label}",
         ),
     )
+    findings.extend(context_memory_capsule_findings(inventory, "context-budget-context-memory"))
     return findings
 
 
@@ -7967,6 +8972,9 @@ def resolve_link(root: Path, target: str, source_rel: str | None = None) -> Link
     path_part = clean.split("#", 1)[0]
     if not path_part:
         return LinkResolution("anchor", True)
+    unsafe_reason = windows_path_reference_reason(path_part, allow_uri=False, allow_rooted=False)
+    if unsafe_reason and unsafe_reason != "Windows drive-absolute path":
+        return LinkResolution("unsafe", False)
     base = _link_base(root, path_part, source_rel)
     if any(char in path_part for char in "*?[]{}<>"):
         patterns = _expand_brace_pattern(path_part)
@@ -8616,6 +9624,8 @@ def _active_plan_findings(inventory: Inventory) -> list[Finding]:
             findings.extend(_active_plan_lifecycle_drift_findings(inventory, plan, data))
             findings.extend(_active_plan_phase_evidence_findings(inventory, data))
             findings.extend(product_diff_write_scope_findings(inventory, code_prefix="active-plan"))
+            if str(data.get("phase_status") or "") != "complete":
+                findings.extend(completion_gate_packet_findings(inventory, code_prefix="active-plan", include_success=True))
             findings.extend(_active_plan_work_result_capsule_findings(inventory, plan, data))
             findings.extend(_active_plan_source_incubation_relationship_findings(inventory, plan))
             findings.extend(_active_plan_covered_roadmap_scope_findings(inventory, plan, data))
@@ -9668,6 +10678,15 @@ def _active_plan_phase_evidence_findings(inventory: Inventory, state_data: dict[
             include_success=True,
         )
     )
+    findings.extend(
+        completion_gate_packet_findings(
+            inventory,
+            values,
+            completion_reason="completed active-plan phase",
+            code_prefix="active-plan",
+            include_success=True,
+        )
+    )
     return findings
 
 
@@ -10037,6 +11056,7 @@ def archive_context_findings(inventory: Inventory) -> list[Finding]:
 
     roadmap_items, parse_findings = roadmap_items_for_diagnostics(inventory)
     findings: list[Finding] = [*parse_findings]
+    findings.extend(roadmap_terminal_related_plan_findings(inventory))
     roadmap_surface = inventory.surface_by_rel.get(ROADMAP_REL)
     roadmap_text = roadmap_surface.content if roadmap_surface and roadmap_surface.exists else ""
 
@@ -10735,6 +11755,7 @@ def route_reference_inventory_findings(inventory: Inventory) -> list[Finding]:
     else:
         findings.append(Finding("info", "route-reference-missing-summary", "no missing route references were found"))
 
+    findings.extend(_route_metadata_findings(inventory))
     findings.append(
         Finding(
             "info",
@@ -10989,7 +12010,7 @@ def _route_reference_target_state(inventory: Inventory, record: RouteReferenceRe
         return ("unsafe", target) if _is_absolute_path(target) else ("external_non_file", target)
     if not rel_path:
         return "skip", target
-    if _route_metadata_path_is_unsafe(rel_path):
+    if _route_metadata_path_is_unsafe(rel_path) or root_relative_path_conflict(rel_path):
         return "unsafe", rel_path
     if _route_reference_has_glob(rel_path):
         return ("present", rel_path) if _route_reference_pattern_exists(inventory, rel_path) else ("optional_pattern", rel_path)
@@ -11271,10 +12292,175 @@ def _route_metadata_findings(inventory: Inventory) -> list[Finding]:
     return findings
 
 
+def _changed_route_metadata_findings(inventory: Inventory) -> list[Finding]:
+    if inventory.root_kind != "live_operating_root":
+        return []
+    if not _root_has_local_git_metadata(inventory.root):
+        return []
+
+    posture = probe_vcs(inventory.root)
+    if not posture.git_available or not posture.is_worktree or posture.state != "dirty":
+        return []
+
+    changed_route_paths = _changed_route_metadata_paths(posture.changed_paths or posture.changed_samples)
+    if not changed_route_paths:
+        return []
+
+    findings: list[Finding] = []
+    for rel_path in changed_route_paths:
+        surface = inventory.surface_by_rel.get(rel_path)
+        route_id = surface.memory_route if surface else classify_memory_route(rel_path).route_id
+        profile = CHANGED_ROUTE_METADATA_PROFILES.get(route_id)
+        if profile is None:
+            continue
+        if not surface or not surface.exists or surface.path.suffix.lower() != ".md":
+            continue
+
+        line = 1
+        if surface.frontmatter.errors:
+            for error in surface.frontmatter.errors:
+                findings.append(
+                    Finding(
+                        "warn",
+                        "route-metadata-changed-frontmatter",
+                        (
+                            f"{surface.rel_path} changed {route_id} route has malformed frontmatter: {error}; "
+                            "route recovery metadata remains advisory only"
+                        ),
+                        surface.rel_path,
+                        line,
+                        route_id=route_id,
+                    )
+                )
+            findings.append(_changed_route_metadata_boundary_finding(surface, route_id))
+            continue
+
+        if not surface.frontmatter.has_frontmatter:
+            findings.append(
+                Finding(
+                    "warn",
+                    "route-metadata-changed-frontmatter",
+                    (
+                        f"{surface.rel_path} changed {route_id} route is missing route frontmatter; "
+                        "future agents may lose status, provenance, and recovery hints; advisory only"
+                    ),
+                    surface.rel_path,
+                    line,
+                    route_id=route_id,
+                )
+            )
+            findings.append(_changed_route_metadata_boundary_finding(surface, route_id))
+            continue
+
+        data = surface.frontmatter.data
+        status_field = _changed_route_status_field(data, profile.route_status_fields)
+        if not status_field:
+            field_hint = " or ".join(profile.route_status_fields)
+            findings.append(
+                Finding(
+                    "warn",
+                    "route-metadata-changed-route-status",
+                    (
+                        f"{surface.rel_path} changed {route_id} route is missing route status metadata "
+                        f"({field_hint}); advisory only, no lifecycle approval"
+                    ),
+                    surface.rel_path,
+                    None,
+                    route_id=route_id,
+                    allowed_decisions=profile.route_status_fields,
+                )
+            )
+
+        for field in profile.recovery_fields:
+            if _frontmatter_value_present(data.get(field)):
+                continue
+            findings.append(
+                Finding(
+                    "warn",
+                    f"route-metadata-changed-{field.replace('_', '-')}",
+                    (
+                        f"{surface.rel_path} changed {route_id} route is missing recovery metadata field "
+                        f"{field}; later agents may need manual graph reconstruction; advisory only"
+                    ),
+                    surface.rel_path,
+                    None,
+                    route_id=route_id,
+                )
+            )
+        findings.append(_changed_route_metadata_boundary_finding(surface, route_id))
+
+    if findings:
+        findings.append(
+            Finding(
+                "info",
+                "route-metadata-changed-authority",
+                (
+                    "changed route metadata diagnostics improve recovery/reviewability only; they cannot approve "
+                    "closeout, archive, roadmap movement, staging, commit, rollback, repair, or lifecycle decisions"
+                ),
+            )
+        )
+    return findings
+
+
+def _root_has_local_git_metadata(root: Path) -> bool:
+    return (root / ".git").exists()
+
+
+def _changed_route_metadata_paths(entries: tuple[object, ...]) -> tuple[str, ...]:
+    paths: list[str] = []
+    seen: set[str] = set()
+    for entry in entries:
+        status = str(getattr(entry, "status", "") or "").upper()
+        if status == "D":
+            continue
+        for raw_path in _changed_route_path_candidates(str(getattr(entry, "path", "") or "")):
+            rel_path = _normalize_route_metadata_path(raw_path).strip("/")
+            if not rel_path.endswith(".md"):
+                continue
+            if CHANGED_ROUTE_METADATA_PROFILES.get(classify_memory_route(rel_path).route_id) is None:
+                continue
+            if rel_path not in seen:
+                paths.append(rel_path)
+                seen.add(rel_path)
+    return tuple(paths)
+
+
+def _changed_route_path_candidates(path: str) -> tuple[str, ...]:
+    if " -> " not in path:
+        return (path,)
+    old, new = path.split(" -> ", 1)
+    return (old.strip(), new.strip())
+
+
+def _changed_route_status_field(data: dict[str, object], fields: tuple[str, ...]) -> str:
+    for field in fields:
+        if _frontmatter_value_present(data.get(field)):
+            return field
+    return ""
+
+
+def _changed_route_metadata_boundary_finding(surface: Surface, route_id: str) -> Finding:
+    route = ROUTE_BY_ID.get(route_id)
+    authority = route.authority if route else "unknown"
+    return Finding(
+        "info",
+        "route-metadata-changed-boundary",
+        (
+            f"{surface.rel_path} changed route class={route_id}; lifecycle_boundary={authority}; "
+            "route metadata is a recovery hint, not approval"
+        ),
+        surface.rel_path,
+        route_id=route_id,
+        advisory=True,
+    )
+
+
 def _route_metadata_status_findings(surface: Surface) -> list[Finding]:
     if "status" not in surface.frontmatter.data:
         return []
     value = surface.frontmatter.data.get("status")
+    allowed_values = _route_metadata_allowed_status_values(surface)
     if not isinstance(value, str) or not value.strip():
         return [
             Finding(
@@ -11286,15 +12472,14 @@ def _route_metadata_status_findings(surface: Surface) -> list[Finding]:
             )
         ]
     normalized = value.strip().casefold()
-    if normalized not in ROUTE_METADATA_STATUS_VALUES:
-        allowed_values = _route_metadata_allowed_status_values(surface)
+    if normalized not in ROUTE_METADATA_STATUS_VALUES or normalized not in allowed_values:
         allowed_hint = ", ".join(allowed_values)
         return [
             Finding(
                 "warn",
                 "route-metadata-status",
                 (
-                    f"{surface.rel_path} status is {value!r}; expected a known status for route "
+                    f"{surface.rel_path} status is {value!r}; expected a route-specific status for route "
                     f"{surface.memory_route!r}; route-specific allowed statuses: {allowed_hint}; "
                     "next_safe_command=mylittleharness --root <root> suggest --intent \"metadata status\"; "
                     "advisory only, no lifecycle approval"
@@ -11342,7 +12527,7 @@ def _route_metadata_lifecycle_state(status: str) -> str:
 
 
 def _is_route_metadata_path_field(key: str) -> bool:
-    return key in ROUTE_METADATA_SCALAR_PATH_FIELDS or key in ROUTE_METADATA_FLEXIBLE_PATH_FIELDS or key.startswith("related_")
+    return key in ROUTE_METADATA_SCALAR_PATH_FIELDS or key in ROUTE_METADATA_FLEXIBLE_PATH_FIELDS
 
 
 def _route_metadata_path_values(surface: Surface, key: str, value: object) -> tuple[list[str], list[Finding]]:
@@ -11373,15 +12558,30 @@ def _route_metadata_path_values(surface: Surface, key: str, value: object) -> tu
             ]
         normalized = _normalize_route_metadata_path(value)
         if not _route_metadata_value_is_path_like(normalized):
-            return [], []
+            return [], [_route_metadata_non_path_value_finding(surface, key, value, line)]
         return [normalized], []
 
     if isinstance(value, list) and value and all(isinstance(item, str) and item.strip() for item in value):
-        return [
-            normalized
-            for item in value
-            if _route_metadata_value_is_path_like(normalized := _normalize_route_metadata_path(item))
-        ], []
+        paths: list[str] = []
+        non_path_values: list[str] = []
+        for item in value:
+            normalized = _normalize_route_metadata_path(item)
+            if _route_metadata_value_is_path_like(normalized):
+                paths.append(normalized)
+            else:
+                non_path_values.append(item)
+        if non_path_values:
+            sample = ", ".join(repr(item) for item in non_path_values[:3])
+            return paths, [
+                Finding(
+                    "warn",
+                    "route-metadata-field",
+                    f"{surface.rel_path} {key} contains non-path route metadata value(s): {sample}",
+                    surface.rel_path,
+                    line,
+                )
+            ]
+        return paths, []
 
     return [], [
         Finding(
@@ -11392,6 +12592,16 @@ def _route_metadata_path_values(surface: Surface, key: str, value: object) -> tu
             line,
         )
     ]
+
+
+def _route_metadata_non_path_value_finding(surface: Surface, key: str, value: object, line: int | None) -> Finding:
+    return Finding(
+        "warn",
+        "route-metadata-field",
+        f"{surface.rel_path} {key} must be a root-relative route path, got non-path value: {value!r}",
+        surface.rel_path,
+        line,
+    )
 
 
 def _route_metadata_path_findings(inventory: Inventory, surface: Surface, key: str, rel_path: str) -> list[Finding]:
@@ -11468,45 +12678,18 @@ def _route_metadata_destination_finding(surface: Surface, key: str, rel_path: st
             )
         return None
 
-    allowed = _route_metadata_allowed_targets(surface, key)
-    if allowed is None:
+    policy = route_destination_policy_for_field(key, owner_route_id=surface.memory_route)
+    if policy is None:
         return None
-    allowed_routes, allowed_archive_prefixes, label = allowed
-    if route_id in allowed_routes or any(rel_path.startswith(prefix) for prefix in allowed_archive_prefixes):
+    if route_destination_matches(policy, rel_path):
         return None
     return Finding(
         "warn",
         "route-metadata-destination",
-        f"{surface.rel_path} {key} must point to {label}: {rel_path}",
+        f"{surface.rel_path} {key} must point to {policy.label}: {rel_path}",
         surface.rel_path,
         line,
     )
-
-
-def _route_metadata_allowed_targets(surface: Surface, key: str) -> tuple[set[str], tuple[str, ...], str] | None:
-    if key in {"source_research", "related_research"}:
-        return {"research"}, ("project/archive/reference/research/",), "a research route"
-    if key in {"source_incubation", "related_incubation"}:
-        return {"incubation"}, ("project/archive/reference/incubation/",), "an incubation route"
-    if key == "related_plan":
-        return {"active-plan"}, ("project/archive/plans/",), "an active or archived plan route"
-    if key == "archived_plan":
-        return {"active-plan"}, ("project/archive/plans/",), "an active or archived plan route"
-    if key in {"related_roadmap", "source_roadmap"}:
-        return {"roadmap"}, (), "a roadmap route"
-    if key in {"related_decision", "related_decisions"}:
-        return {"decisions"}, ("project/archive/reference/decisions/",), "a decision route"
-    if key in {"related_adr", "related_adrs"}:
-        return {"adrs"}, ("project/archive/reference/adrs/",), "an ADR route"
-    if key == "related_verification":
-        return {"verification"}, ("project/archive/reference/verification/",), "a verification route"
-    if key in {"related_spec", "related_specs"}:
-        return {"stable-specs"}, (), "a stable-spec route"
-    if key in {"related_doc", "related_docs"}:
-        return {"product-docs"}, (), "a product-docs route"
-    if key in {"supersedes", "superseded_by"}:
-        return {surface.memory_route}, (), f"the same {surface.memory_route} route"
-    return None
 
 
 def _route_metadata_stale_reference_finding(
@@ -11549,11 +12732,11 @@ def _route_metadata_value_is_path_like(value: str) -> bool:
 
 
 def _route_metadata_path_is_unsafe(rel_path: str) -> bool:
-    if not rel_path or rel_path.startswith("/") or _is_absolute_path(rel_path):
+    if root_relative_path_conflict(rel_path):
         return True
     if any(separator in rel_path for separator in (";", "|")):
         return True
-    return any(part in {".", ".."} for part in rel_path.split("/"))
+    return False
 
 
 def _route_metadata_path_conflict(root: Path, rel_path: str, target: Path) -> str | None:

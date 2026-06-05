@@ -14,9 +14,10 @@ from .approval_packets import APPROVAL_PACKET_SCHEMA, APPROVAL_PACKETS_DIR_REL
 from .inventory import Inventory, RootLoadError, load_inventory
 from .models import Finding
 from .projection import Projection, build_projection
-from .projection_artifacts import inspect_projection_artifacts, projection_cache_posture_payload
+from .projection_artifacts import inspect_projection_artifacts, projection_cache_posture_payload, quick_projection_cache_posture_findings
 from .projection_index import inspect_projection_index, source_verified_full_text_results
-from .root_boundary import PRODUCT_SOURCE_FIXTURE, source_path_boundary_violation
+from .reporting import command_action_report_dict
+from .root_boundary import PRODUCT_SOURCE_FIXTURE, root_relative_path_conflict, source_path_boundary_violation
 
 
 MCP_READ_PROJECTION_TARGET = "mcp-read-projection"
@@ -47,6 +48,9 @@ MCP_SEARCH_DEFAULT_LIMIT = 10
 MCP_SEARCH_MAX_LIMIT = 50
 MCP_RELATED_DEFAULT_LIMIT = 20
 MCP_RELATED_MAX_LIMIT = 100
+MCP_PROJECTION_DETAIL_MODES = ("auto", "full", "degraded")
+MCP_DEGRADED_SOURCE_THRESHOLD = 120
+MCP_DEGRADED_SOURCE_SAMPLE_LIMIT = 40
 InventoryLoader = Callable[[Path | str], Inventory]
 
 
@@ -286,12 +290,9 @@ def _relay_ref_tuple(values: tuple[str, ...]) -> tuple[str, ...]:
 
 
 def _relay_ref_conflict(rel_path: str) -> str:
-    if not rel_path:
-        return "must be a non-empty root-relative path"
-    if re.match(r"^[A-Za-z]:[\\/]", rel_path) or rel_path.startswith("/"):
-        return "must be root-relative, not absolute"
-    if any(part in {"..", ".", ""} for part in rel_path.split("/")):
-        return "must not contain parent traversal, current-directory, or empty path segments"
+    conflict = root_relative_path_conflict(rel_path)
+    if conflict:
+        return conflict
     if not rel_path.startswith(f"{APPROVAL_PACKETS_DIR_REL}/") or not rel_path.endswith(".json"):
         return f"must point under {APPROVAL_PACKETS_DIR_REL}/*.json"
     return ""
@@ -310,8 +311,9 @@ def mcp_read_projection_sections(
     *,
     default_root: Path | None = None,
     requested_root: str | None = None,
+    projection: Projection | None = None,
 ) -> list[tuple[str, list[Finding]]]:
-    projection = build_projection(inventory)
+    projection = projection or build_projection(inventory)
     root_selection = _root_selection_payload(inventory, _selection_default_root(inventory, default_root, requested_root), requested_root)
     return [
         ("Adapter", _adapter_findings(inventory, root_selection=root_selection)),
@@ -328,12 +330,22 @@ def mcp_read_projection_payload(
     *,
     default_root: Path | None = None,
     requested_root: str | None = None,
+    detail: str = "auto",
 ) -> dict[str, object]:
     root_selection = _root_selection_payload(inventory, _selection_default_root(inventory, default_root, requested_root), requested_root)
     runtime = _adapter_runtime_payload(inventory, root_selection)
-    sections = mcp_read_projection_sections(inventory, default_root=default_root, requested_root=requested_root)
-    findings = [finding for _, section_findings in sections for finding in section_findings]
+    detail_mode = _projection_detail_mode(detail)
+    if _mcp_projection_should_degrade(inventory, detail_mode):
+        return _mcp_read_projection_degraded_payload(
+            inventory,
+            root_selection=root_selection,
+            runtime=runtime,
+            detail=detail_mode,
+        )
+
     projection = build_projection(inventory)
+    sections = mcp_read_projection_sections(inventory, default_root=default_root, requested_root=requested_root, projection=projection)
+    findings = [finding for _, section_findings in sections for finding in section_findings]
     artifact_findings = inspect_projection_artifacts(inventory, projection)
     index_findings = inspect_projection_index(inventory, projection)
     cache_posture = projection_cache_posture_payload(
@@ -360,6 +372,8 @@ def mcp_read_projection_payload(
         "tools": list(MCP_TOOL_NAMES),
         "runtime": runtime,
         "rootSelection": root_selection,
+        "mode": "full",
+        "degraded": False,
         "cachePosture": cache_posture,
         "mlhd": mlhd,
         "agentPacket": agent_packet,
@@ -386,8 +400,187 @@ def mcp_read_projection_payload(
             ),
             "fallback": "generic CLI and repo-visible files remain sufficient without MCP tooling",
             "rootSelection": root_selection,
+            "detailMode": "full",
+            "fullProjectionAvailable": True,
         },
     }
+
+
+def _projection_detail_mode(value: str) -> str:
+    detail = str(value or "auto").strip().casefold()
+    return detail if detail in MCP_PROJECTION_DETAIL_MODES else "auto"
+
+
+def _mcp_projection_should_degrade(inventory: Inventory, detail: str) -> bool:
+    if detail == "full":
+        return False
+    if detail == "degraded":
+        return True
+    return len(inventory.surfaces) >= MCP_DEGRADED_SOURCE_THRESHOLD
+
+
+def _mcp_read_projection_degraded_payload(
+    inventory: Inventory,
+    *,
+    root_selection: dict[str, object],
+    runtime: dict[str, object],
+    detail: str,
+) -> dict[str, object]:
+    artifact_findings, index_findings = quick_projection_cache_posture_findings(inventory)
+    cache_posture = projection_cache_posture_payload(
+        artifact_findings,
+        index_findings,
+        runtime_refresh_allowed=_runtime_refresh_allowed(inventory),
+    )
+    from .dashboard import connect_readiness_packet, dashboard_agent_packet, mlhd_freshness_payload
+
+    source_summary = _degraded_source_summary(inventory)
+    agent_packet = dashboard_agent_packet(inventory)
+    mlhd = mlhd_freshness_payload(inventory)
+    sections = [
+        ("Adapter", _adapter_findings(inventory, root_selection=root_selection)),
+        ("Projection", _degraded_projection_findings(inventory, source_summary=source_summary, detail=detail)),
+        ("Generated Inputs", _generated_input_degraded_findings(inventory, artifact_findings, index_findings)),
+        ("Agent Action Packet", _agent_action_packet_findings(inventory)),
+        ("Boundary", _boundary_findings()),
+    ]
+    findings = [finding for _, section_findings in sections for finding in section_findings]
+    return {
+        "adapter": {
+            "id": MCP_READ_PROJECTION_TARGET,
+            "tool": MCP_READ_PROJECTION_TOOL,
+            "group": "MCP",
+            "role": "read/projection helper",
+            "owner": "MyLittleHarness adapter boundary",
+            "protocolVersion": MCP_PROTOCOL_VERSION,
+            "transport": "stdio",
+        },
+        "activation": mcp_read_projection_client_config(inventory),
+        "root": _root_payload(inventory),
+        "tools": list(MCP_TOOL_NAMES),
+        "runtime": runtime,
+        "rootSelection": root_selection,
+        "mode": "degraded",
+        "degraded": True,
+        "degradedReason": {
+            "detail": detail,
+            "reason": "bounded-degraded-default" if detail == "auto" else "explicit-degraded",
+            "sourceThreshold": MCP_DEGRADED_SOURCE_THRESHOLD,
+            "fullProjectionSkipped": True,
+        },
+        "sourceSummary": source_summary,
+        "cachePosture": cache_posture,
+        "mlhd": mlhd,
+        "agentPacket": agent_packet,
+        "connectReadiness": connect_readiness_packet(
+            inventory,
+            cache_posture=cache_posture,
+            agent_packet=agent_packet,
+        ),
+        "status": "degraded" if _result_for(findings) != "error" else "error",
+        "sources": source_summary["sample"],
+        "sections": [
+            {
+                "name": section_name,
+                "findings": [_finding_payload(finding) for finding in section_findings],
+            }
+            for section_name, section_findings in sections
+        ],
+        "boundary": {
+            **_mcp_tool_boundary(root_selection, source_bodies_included=False, source_body_mode="none"),
+            "serveCommand": mcp_read_projection_serve_command(inventory),
+            "refreshPolicy": (
+                "degraded tool calls reload the selected root inventory in memory, skip full projection rebuild, "
+                "and inspect only bounded cache markers/presence; generated cache is never refreshed by the adapter"
+            ),
+            "fallback": "generic CLI and repo-visible files remain sufficient without MCP tooling",
+            "rootSelection": root_selection,
+            "detailMode": "degraded",
+            "fullProjectionAvailable": True,
+            "fullProjectionRequest": {"detail": "full"},
+            "sourceListTruncated": source_summary["truncated"],
+        },
+    }
+
+
+def _degraded_source_summary(inventory: Inventory) -> dict[str, object]:
+    rows = inventory.sources_for_report()
+    present = sum(1 for source in inventory.surfaces if source.exists)
+    readable = sum(1 for source in inventory.surfaces if source.exists and not source.read_error)
+    total_bytes = sum(source.byte_count for source in inventory.surfaces if source.exists and source.byte_count)
+    return {
+        "sourceCount": len(inventory.surfaces),
+        "presentSourceCount": present,
+        "readableSourceCount": readable,
+        "totalBytes": total_bytes,
+        "sampleLimit": MCP_DEGRADED_SOURCE_SAMPLE_LIMIT,
+        "sample": rows[:MCP_DEGRADED_SOURCE_SAMPLE_LIMIT],
+        "truncated": len(rows) > MCP_DEGRADED_SOURCE_SAMPLE_LIMIT,
+    }
+
+
+def _degraded_projection_findings(inventory: Inventory, *, source_summary: dict[str, object], detail: str) -> list[Finding]:
+    return [
+        Finding(
+            "warn",
+            "adapter-projection-degraded",
+            (
+                "MCP read_projection returned a bounded degraded packet without rebuilding the full in-memory projection; "
+                f"detail={detail}; request detail=full when complete source/link/fan-in rows are needed"
+            ),
+        ),
+        Finding(
+            "info",
+            "adapter-projection-summary-degraded",
+            (
+                f"sources={source_summary['sourceCount']}; present={source_summary['presentSourceCount']}; "
+                f"readable={source_summary['readableSourceCount']}; total_bytes={source_summary['totalBytes']}; "
+                f"sample_limit={source_summary['sampleLimit']}; truncated={str(source_summary['truncated']).lower()}"
+            ),
+        ),
+        Finding(
+            "info",
+            "adapter-projection-degraded-next-safe",
+            (
+                "next_safe_commands=mylittleharness --root <root> mlhd run-once --apply; "
+                "mylittleharness --root <root> projection --rebuild --target all; "
+                "direct rg or bounded read_source remains required for exact source verification"
+            ),
+            "project/project-state.md" if inventory.state and inventory.state.exists else None,
+        ),
+    ]
+
+
+def _generated_input_degraded_findings(
+    inventory: Inventory,
+    artifact_findings: list[Finding],
+    index_findings: list[Finding],
+) -> list[Finding]:
+    posture = projection_cache_posture_payload(
+        artifact_findings,
+        index_findings,
+        runtime_refresh_allowed=_runtime_refresh_allowed(inventory),
+    )
+    refresh_commands = ", ".join(str(command) for command in posture.get("recommended_refresh_commands", [])[:2])
+    return [
+        Finding(
+            "info",
+            "adapter-generated-input-boundary",
+            "generated projection artifacts and SQLite indexes are optional adapter inputs; degraded MCP output inspects only marker/presence posture",
+        ),
+        Finding(
+            "info",
+            "adapter-cache-posture",
+            (
+                "cache_posture schema=mylittleharness.projection-cache-posture.v1; "
+                f"source_refs={len(posture['source_refs'])}; refresh_by_adapter=false; "
+                "adapter_executes_refresh=false; commands_are_suggestions_only=true; "
+                f"displayed_refresh_commands={refresh_commands}"
+            ),
+        ),
+        _generated_posture("artifacts", artifact_findings),
+        _generated_posture("index", index_findings),
+    ]
 
 
 def mcp_read_projection_serve_command(inventory: Inventory | None = None, *, bind_root: bool = False) -> list[str]:
@@ -581,6 +774,14 @@ def codex_mcp_adoption_payload(
     snippet = _codex_mcp_toml(command)
     status, mounted, reason, extra_keys = _codex_config_status(config_path, expected_server)
     merge_mode = _codex_merge_mode(status)
+    dry_run_command = "mylittleharness --root <root> adapter --install-client-config --target mcp-read-projection --dry-run"
+    apply_command = "mylittleharness --root <root> adapter --install-client-config --target mcp-read-projection --apply"
+    first_pass_commands = [
+        "mylittleharness --root <root> dashboard --inspect --json",
+        "mylittleharness --root <root> adapter --client-config --target mcp-read-projection",
+        "mylittleharness --root <root> projection --warm-cache --target all",
+        "rg \"<exact symbol or route>\"",
+    ]
     payload: dict[str, object] = {
         "schema": CODEX_MCP_ADOPTION_SCHEMA,
         "client": "codex",
@@ -594,8 +795,20 @@ def codex_mcp_adoption_payload(
         "merge": {
             "mode": merge_mode,
             "idempotent": True,
-            "dryRunCommand": "mylittleharness --root <root> adapter --install-client-config --target mcp-read-projection --dry-run",
-            "applyCommand": "mylittleharness --root <root> adapter --install-client-config --target mcp-read-projection --apply",
+            "dryRunCommand": dry_run_command,
+            "dryRunAction": command_action_report_dict(
+                dry_run_command,
+                source_code="codex-mcp-adoption",
+                source_field="merge.dryRunCommand",
+                action_role="adapter-config-dry-run",
+            ),
+            "applyCommand": apply_command,
+            "applyAction": command_action_report_dict(
+                apply_command,
+                source_code="codex-mcp-adoption",
+                source_field="merge.applyCommand",
+                action_role="adapter-config-apply",
+            ),
             "backupExistingConfigOnApply": True,
             "writesUserConfigOnApply": True,
             "writesProjectCodexHooksOnApply": True,
@@ -606,11 +819,15 @@ def codex_mcp_adoption_payload(
         },
         "projectHooks": codex_hook_adapter_adoption_payload(inventory),
         "dashboardPacketAvailable": True,
-        "firstPass": [
-            "mylittleharness --root <root> dashboard --inspect --json",
-            "mylittleharness --root <root> adapter --client-config --target mcp-read-projection",
-            "mylittleharness --root <root> projection --warm-cache --target all",
-            "rg \"<exact symbol or route>\"",
+        "firstPass": first_pass_commands,
+        "firstPassActions": [
+            command_action_report_dict(
+                item,
+                source_code="codex-mcp-adoption",
+                source_field="firstPass",
+                action_role="first-pass-command",
+            )
+            for item in first_pass_commands
         ],
         "toolCoverage": _mcp_navigation_tool_coverage_payload(),
         "exactVerification": {
@@ -916,8 +1133,7 @@ def _agent_action_packet_findings(inventory: Inventory) -> list[Finding]:
             "info",
             "adapter-agent-action-packet",
             (
-                f"read_projection surfaces active_phase={_payload_value(lifecycle, 'active_phase')}; "
-                f"phase_status={_payload_value(lifecycle, 'phase_status')}; "
+                f"read_projection surfaces {_lifecycle_phase_summary(lifecycle)}; "
                 f"writeback_required={str(writeback.get('requiredWhenPlanStatusActive') is True).lower()}; "
                 f"docmap={_payload_value(docs, 'docmapStatus')}; docs_decision={_payload_value(docs, 'docsDecision')}; "
                 f"mlhd={mlhd['control_status']}; dirty_count={mlhd['dirty_count']}; next_safe={readiness.get('nextSafeCommand')}"
@@ -938,6 +1154,20 @@ def _payload_value(payload: object, key: str) -> str:
         if value is not None and value != "":
             return str(value)
     return "<none>"
+
+
+def _lifecycle_phase_summary(payload: object) -> str:
+    if not isinstance(payload, dict):
+        return "active_phase=<none>; phase_status=<none>"
+    active_phase = str(payload.get("active_phase") or "")
+    phase_status = str(payload.get("phase_status") or "")
+    last_completed_phase = str(payload.get("last_completed_phase") or "")
+    last_phase_status = str(payload.get("last_phase_status") or "")
+    if active_phase or phase_status:
+        return f"active_phase={active_phase or '<none>'}; phase_status={phase_status or '<none>'}"
+    if last_completed_phase or last_phase_status:
+        return f"last_completed_phase={last_completed_phase or '<none>'}; last_phase_status={last_phase_status or '<none>'}"
+    return "active_phase=<none>; phase_status=<none>"
 
 
 def _runtime_refresh_allowed(inventory: Inventory) -> bool:
@@ -1424,6 +1654,14 @@ def _read_projection_input_schema() -> dict[str, object]:
         "type": "object",
         "properties": {
             "root": _root_input_property(),
+            "detail": {
+                "type": "string",
+                "enum": list(MCP_PROJECTION_DETAIL_MODES),
+                "description": (
+                    "Projection detail mode. Defaults to auto, which may return a bounded degraded packet on large roots. "
+                    "Use full to force complete projection rebuild, or degraded for an always-bounded summary."
+                ),
+            },
         },
         "additionalProperties": False,
     }
@@ -1531,6 +1769,10 @@ def _read_projection_tool_definition() -> dict[str, object]:
                 "tools": {"type": "array"},
                 "runtime": {"type": "object"},
                 "rootSelection": {"type": "object"},
+                "mode": {"type": "string"},
+                "degraded": {"type": "boolean"},
+                "degradedReason": {"type": "object"},
+                "sourceSummary": {"type": "object"},
                 "cachePosture": {"type": "object"},
                 "mlhd": {"type": "object"},
                 "agentPacket": {"type": "object"},
@@ -1547,6 +1789,8 @@ def _read_projection_tool_definition() -> dict[str, object]:
                 "tools",
                 "runtime",
                 "rootSelection",
+                "mode",
+                "degraded",
                 "cachePosture",
                 "mlhd",
                 "agentPacket",
@@ -1676,11 +1920,15 @@ def _tools_call_response(
 
     default_root = inventory.root if inventory is not None else None
     if name == MCP_READ_PROJECTION_TOOL:
+        detail, tool_error = _projection_detail_argument(arguments)
+        if tool_error:
+            return _tool_error_response(request_id, tool_error)
         structured, tool_error = (
             mcp_read_projection_payload(
                 selected_inventory,
                 default_root=default_root,
                 requested_root=requested_root,
+                detail=detail,
             ),
             None,
         )
@@ -1717,9 +1965,21 @@ def _tools_call_response(
     )
 
 
+def _projection_detail_argument(arguments: dict[str, object]) -> tuple[str, str | None]:
+    value = arguments.get("detail", "auto")
+    if value in (None, ""):
+        return "auto", None
+    if not isinstance(value, str):
+        return "auto", "Invalid arguments: detail must be one of auto, full, or degraded."
+    detail = value.strip().casefold()
+    if detail not in MCP_PROJECTION_DETAIL_MODES:
+        return "auto", "Invalid arguments: detail must be one of auto, full, or degraded."
+    return detail, None
+
+
 def _tool_argument_names(tool_name: str) -> set[str]:
     if tool_name == MCP_READ_PROJECTION_TOOL:
-        return {"root"}
+        return {"root", "detail"}
     if tool_name == MCP_READ_SOURCE_TOOL:
         return {"root", "path", "start", "limit"}
     if tool_name == MCP_SEARCH_TOOL:
@@ -1812,13 +2072,21 @@ def _mcp_search_payload(
         return {}, error
 
     projection = build_projection(inventory)
+    artifact_findings = inspect_projection_artifacts(inventory, projection)
+    index_findings = inspect_projection_index(inventory, projection)
+    cache_posture = projection_cache_posture_payload(
+        artifact_findings,
+        index_findings,
+        runtime_refresh_allowed=_runtime_refresh_allowed(inventory),
+    )
     findings = [
         Finding(
             "info",
             "mcp-search-read-only",
-            "MCP search reads current repo-visible sources and current generated index posture only; it does not refresh caches or write files",
+            "MCP search reloads the current in-memory projection from repo-visible sources; it does not refresh generated caches or write files",
         )
     ]
+    findings.extend(_mcp_search_cache_posture_findings(cache_posture, [*artifact_findings, *index_findings]))
     results: list[dict[str, object]] = []
     if mode in {"all", "exact"}:
         _append_exact_search_results(results, projection, query, limit)
@@ -1857,9 +2125,37 @@ def _mcp_search_payload(
         "mode": mode,
         "limit": limit,
         "results": results,
+        "cachePosture": cache_posture,
         "findings": [_finding_payload(finding) for finding in findings],
         "boundary": _mcp_tool_boundary(root_selection, source_bodies_included=True, source_body_mode="matched-line-snippets"),
     }, None
+
+
+def _mcp_search_cache_posture_findings(cache_posture: dict[str, object], cache_findings: list[Finding]) -> list[Finding]:
+    degraded = [
+        finding
+        for finding in cache_findings
+        if finding.severity in {"warn", "error"} or finding.code in {"projection-artifact-missing", "projection-index-missing"}
+    ]
+    if not degraded:
+        return [
+            Finding(
+                "info",
+                "mcp-search-generated-cache-current",
+                "generated projection cache is current; exact, path, and full-text search share current source posture",
+            )
+        ]
+    refresh_commands = ", ".join(str(command) for command in cache_posture.get("recommended_refresh_commands", [])[:2])
+    return [
+        Finding(
+            "info",
+            "mcp-search-generated-cache-stale",
+            (
+                f"generated projection cache is stale or missing ({degraded[0].code}); exact/path search uses the fresh "
+                f"in-memory projection, while full-text search may skip until refresh; next_safe={refresh_commands}"
+            ),
+        )
+    ]
 
 
 def _mcp_related_or_bundle_payload(

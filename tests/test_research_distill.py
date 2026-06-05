@@ -77,6 +77,9 @@ source_refs:
   - "project/research/repo-research.md"
 source_members:
   - "project/research/risk-review.md"
+source_hashes:
+  - "project/research/repo-research.md sha256=0000000000000000000000000000000000000000000000000000000000000000"
+  - "project/research/risk-review.md sha256=1111111111111111111111111111111111111111111111111111111111111111"
 roles:
   repo_researcher:
     status: "complete"
@@ -141,6 +144,49 @@ quality_gate_issues:
 # Blocked Discovery Packet
 """
 
+FRONTMATTER_ONLY_SUFFICIENT_DISTILLATE = """---
+status: "distilled"
+quality_status: "sufficient-for-planning"
+planning_reliance: "allowed"
+source_hashes:
+  - "project/research/source.md sha256=2222222222222222222222222222222222222222222222222222222222222222"
+---
+# Shallow Distillate
+"""
+
+UNKNOWN_STATUS_DISCOVERY_PACKET = """---
+schema: "mylittleharness.discovery-packet.v1"
+status: "research-ready"
+discovery_status: "triaged"
+quality_status: "sufficient-for-planning"
+planning_reliance: "allowed"
+source_refs:
+  - "project/research/repo-research.md"
+source_hashes:
+  - "project/research/repo-research.md sha256=3333333333333333333333333333333333333333333333333333333333333333"
+---
+# Unknown Status Discovery Packet
+"""
+
+NESTED_REF_MISSING_HASH_DISCOVERY_PACKET = """---
+schema: "mylittleharness.discovery-packet.v1"
+status: "research-ready"
+discovery_status: "ready-for-plan"
+quality_status: "sufficient-for-planning"
+planning_reliance: "allowed"
+source_refs:
+  - "project/research/repo-research.md"
+source_hashes:
+  - "project/research/repo-research.md sha256=4444444444444444444444444444444444444444444444444444444444444444"
+roles:
+  repo_researcher:
+    status: "complete"
+    evidence_refs:
+      - "project/research/nested-evidence.md"
+---
+# Nested Evidence Discovery Packet
+"""
+
 
 class ResearchDistillTests(unittest.TestCase):
     def test_distill_extracts_candidates_gaps_source_links_and_route_proposals(self) -> None:
@@ -183,6 +229,21 @@ class ResearchDistillTests(unittest.TestCase):
         self.assertIn("discovery_status=draft", misaligned)
         self.assertIn("planning_reliance=blocked", misaligned)
         self.assertIn("discovery packet requires quality_status and planning_reliance", missing)
+
+    def test_planning_ready_profiles_require_status_sections_refs_and_hashes(self) -> None:
+        shallow = research_distill_quality_problem("project/research/shallow-distillate.md", FRONTMATTER_ONLY_SUFFICIENT_DISTILLATE)
+        unknown_status = research_distill_quality_problem("project/research/unknown-discovery-packet.md", UNKNOWN_STATUS_DISCOVERY_PACKET)
+        missing_nested_hash = research_distill_quality_problem(
+            "project/research/nested-ref-discovery-packet.md",
+            NESTED_REF_MISSING_HASH_DISCOVERY_PACKET,
+        )
+
+        self.assertIn("sufficient-for-planning/allowed", shallow)
+        self.assertIn("missing gate-question coverage matrix", shallow)
+        self.assertIn("missing source-bound claim bullets", shallow)
+        self.assertIn("discovery_status must be ready-for-plan, blocked, contested, or draft", unknown_status)
+        self.assertIn("missing source_hashes for refs", missing_nested_hash)
+        self.assertIn("project/research/nested-evidence.md", missing_nested_hash)
 
     def test_discovery_packet_profile_preserves_provisional_blocker_issue(self) -> None:
         problem = research_distill_quality_problem("project/research/blocked-discovery-packet.md", PROVISIONAL_DISCOVERY_PACKET)

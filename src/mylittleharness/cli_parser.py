@@ -276,10 +276,26 @@ def build_parser() -> argparse.ArgumentParser:
     research_import_text = research_import.add_mutually_exclusive_group(required=True)
     research_import_text.add_argument("--text", help="External or human-run research output to import; prefer --text-file for multiline decision packets.")
     research_import_text.add_argument("--text-file", dest="text_file", help="Read research output from a UTF-8 file; use - for stdin; preserves multiline decision packets.")
+    research_import_text.add_argument("--from-attachment", dest="from_attachment", help="Root-relative project/attachments/**/artifact.md card to open a research handoff from.")
     research_import.add_argument("--target", help="Optional explicit root-relative target under project/research/*.md.")
     research_import.add_argument("--topic", help="Optional frontmatter topic. Defaults to --title.")
     research_import.add_argument("--source", dest="source_label", help="Optional source/provenance label for the imported research.")
     research_import.add_argument("--related-prompt", dest="related_prompt", help="Optional root-relative prompt or framing artifact.")
+    attachment_import = subparsers.add_parser(
+        "attachment-import",
+        help=argparse.SUPPRESS,
+        description="Advanced mutating command: copy a binary attachment into project/attachments with sidecar metadata authority.",
+    )
+    attachment_import_mode = attachment_import.add_mutually_exclusive_group(required=True)
+    attachment_import_mode.add_argument("--dry-run", action="store_true", help="Preview attachment copy and metadata sidecar creation without writing files.")
+    attachment_import_mode.add_argument("--apply", action="store_true", help="Copy one supported binary attachment and write its metadata sidecar.")
+    attachment_import.add_argument("--file", required=True, help="Source PDF/DOCX/XLSX/PNG/JPG/ZIP file to import.")
+    attachment_import.add_argument("--kind", required=True, help="Attachment kind slug, such as vendor-proposal.")
+    attachment_import.add_argument("--topic", required=True, help="Topic slug for the target attachment directory.")
+    attachment_import.add_argument("--title", required=True, help="Human-readable attachment title.")
+    attachment_import.add_argument("--received-at", dest="received_at", help="Optional received date as YYYY-MM-DD. Defaults to today.")
+    attachment_import.add_argument("--source", dest="source_label", help="Optional provenance label, such as email attachment.")
+    attachment_import.add_argument("--related-research", dest="related_research", action="append", default=(), help="Optional project/research/*.md reference; repeatable.")
     discover = subparsers.add_parser(
         "discover",
         help=argparse.SUPPRESS,
@@ -396,6 +412,7 @@ def build_parser() -> argparse.ArgumentParser:
     writeback.add_argument("--verification", help="Closeout verification value to record.")
     writeback.add_argument("--commit-decision", dest="commit_decision", help="Closeout commit_decision value to record.")
     writeback.add_argument("--residual-risk", dest="residual_risk", help="Optional closeout residual_risk value to record.")
+    writeback.add_argument("--next-state", dest="next_state", help="Explicit next/no-next closeout state: no-next-action, human-decision-required, or legal-dry-run-command:<dry-run command>.")
     writeback.add_argument("--carry-forward", dest="carry_forward", help="Optional closeout carry_forward value to record.")
     writeback.add_argument("--work-result", dest="work_result", help="Optional plain-language closeout work_result capsule to record.")
     writeback.add_argument("--active-phase", dest="active_phase", help="Lifecycle active_phase value to write to project-state frontmatter.")
@@ -456,6 +473,7 @@ def build_parser() -> argparse.ArgumentParser:
     transition.add_argument("--verification", help="Archive closeout verification value to record.")
     transition.add_argument("--commit-decision", dest="commit_decision", help="Archive closeout commit_decision value to record.")
     transition.add_argument("--residual-risk", dest="residual_risk", help="Optional archive closeout residual_risk value to record.")
+    transition.add_argument("--next-state", dest="next_state", help="Explicit next/no-next archive closeout state: no-next-action, human-decision-required, or legal-dry-run-command:<dry-run command>.")
     transition.add_argument("--carry-forward", dest="carry_forward", help="Optional archive closeout carry_forward value to record.")
     transition.add_argument("--work-result", dest="work_result", help="Optional plain-language archive closeout work_result capsule to record.")
     memory_hygiene = subparsers.add_parser(
@@ -487,6 +505,16 @@ def build_parser() -> argparse.ArgumentParser:
     relationship_drift_mode.add_argument("--dry-run", action="store_true", help="Preview relationship graph retarget/detach decisions without writing files.")
     relationship_drift_mode.add_argument("--apply", action="store_true", help="Write bounded relationship metadata repairs in an eligible live operating root.")
     relationship_drift.add_argument("--roadmap-item", dest="roadmap_item", help="Optional roadmap item id to inspect/repair; defaults to all roadmap items.")
+    cleanup = subparsers.add_parser(
+        "cleanup",
+        help=argparse.SUPPRESS,
+        description="Advanced mutating command: remove one reviewed temporary route-input artifact without touching lifecycle Markdown.",
+    )
+    cleanup_mode = cleanup.add_mutually_exclusive_group(required=True)
+    cleanup_mode.add_argument("--dry-run", action="store_true", help="Preview temporary artifact cleanup without deleting files.")
+    cleanup_mode.add_argument("--apply", action="store_true", help="Delete one reviewed temporary roadmap JSON manifest in an eligible live operating root.")
+    cleanup.add_argument("--target", required=True, help="Root-relative target, such as project/verification/roadmap-routing-YYYY-MM-DD-*.json.")
+    cleanup.add_argument("--reason", help="Optional one-line cleanup reason recorded in the report.")
     roadmap = subparsers.add_parser(
         "roadmap",
         help=argparse.SUPPRESS,

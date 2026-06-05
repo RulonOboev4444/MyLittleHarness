@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .atomic_files import AtomicFileDelete, AtomicFileWrite, FileTransactionError, apply_file_transaction
+from .claims import FanInEvidenceGate, fan_in_evidence_gate as coordination_fan_in_evidence_gate
 from .inventory import Inventory, Surface
 from .lifecycle_focus import sync_current_focus_block
 from .memory_hygiene import (
@@ -41,7 +42,7 @@ from .roadmap import (
     roadmap_source_incubation_consumers,
     roadmap_text_with_terminal_related_plan_retargets,
 )
-from .vcs import product_diff_write_scope_findings
+from .vcs import product_diff_scope_proof, product_diff_write_scope_findings
 
 
 WRITEBACK_BEGIN = "<!-- BEGIN mylittleharness-closeout-writeback v1 -->"
@@ -60,12 +61,44 @@ CLOSEOUT_WRITEBACK_FIELDS = (
     "verification",
     "commit_decision",
     "residual_risk",
+    "next_state",
     "carry_forward",
     "work_result",
 )
 CLOSEOUT_IDENTITY_FIELDS = ("plan_id", "active_plan", "archived_plan")
 LIFECYCLE_WRITEBACK_FIELDS = ("active_phase", "phase_status", "last_archived_plan", "product_source_root")
 DOCS_DECISION_VALUES = {"updated", "not-needed", "uncertain"}
+DOCS_DECISION_IMPACT_BASIS_VALUES = {"artifact-only", "docs-updated", "product-contract", "uncertain", "workflow-contract"}
+DOCS_DECISION_ALLOWED_IMPACT_BASIS = {
+    "not-needed": {"artifact-only", "product-contract", "workflow-contract"},
+    "updated": {"docs-updated", "product-contract", "workflow-contract"},
+    "uncertain": {"uncertain"},
+}
+NEXT_STATE_VALUES = {"no-next-action", "human-decision-required", "legal-dry-run-command"}
+NEXT_STATE_CONTRACT_MARKERS = (
+    "next_state",
+    "next-state",
+    "next state",
+    "next/no-next",
+    "next no next",
+    "no-next",
+    "no next",
+    "next_safe",
+    "next-safe",
+    "next safe",
+)
+NEXT_STATE_DRY_RUN_COMMANDS = {
+    "check",
+    "incubate",
+    "memory-hygiene",
+    "meta-feedback",
+    "plan",
+    "plan-cancel",
+    "repair",
+    "roadmap",
+    "transition",
+    "writeback",
+}
 PHASE_STATUS_VALUES = {"pending", "active", "in_progress", "blocked", "complete", "skipped", "paused"}
 UNSUCCESSFUL_ARCHIVE_ROADMAP_PHASE_STATUS = {"blocked": "blocked", "superseded": "skipped"}
 ARCHIVE_COLLISION_POLICY_VALUES = {"refuse", "preserve-existing"}
@@ -155,6 +188,7 @@ _FIELD_LABELS = {
     "verification": ("verification", "validation"),
     "commit_decision": ("commit_decision", "commit decision"),
     "residual_risk": ("residual_risk", "residual risk", "residual risks"),
+    "next_state": ("next_state", "next state", "next/no-next action"),
     "carry_forward": ("carry_forward", "carry-forward", "carry forward"),
     "work_result": ("work_result", "work result", "work result capsule", "result capsule"),
 }
@@ -202,9 +236,11 @@ class CloseoutWritebackPlan:
 
 @dataclass(frozen=True)
 class AcceptanceEvidenceContract:
+    work_class: str
     deliverable_class: str
     item_ids: tuple[str, ...]
     target_artifacts: tuple[str, ...]
+    write_scope: tuple[str, ...]
     acceptance_terms: tuple[str, ...]
     source: str
 
@@ -617,6 +653,16 @@ def writeback_dry_run_findings(inventory: Inventory, request: WritebackRequest) 
             code_prefix="writeback",
         )
     )
+    findings.extend(
+        completion_gate_packet_findings(
+            inventory,
+            planned,
+            completion_reason=completion_reason,
+            apply=False,
+            code_prefix="writeback",
+            include_success=True,
+        )
+    )
     planned_lifecycle = _planned_lifecycle_values(
         request,
         archive_plan.archive_rel_path if archive_plan else None,
@@ -901,6 +947,16 @@ def writeback_apply_findings(inventory: Inventory, request: WritebackRequest) ->
             code_prefix="writeback",
         )
     )
+    findings.extend(
+        completion_gate_packet_findings(
+            inventory,
+            planned,
+            completion_reason=completion_reason,
+            apply=True,
+            code_prefix="writeback",
+            include_success=True,
+        )
+    )
     if request.lifecycle:
         findings.append(
             Finding(
@@ -1103,6 +1159,15 @@ def _writeback_preflight_errors(inventory: Inventory, request: WritebackRequest)
         preflight=True,
     )
     errors.extend(finding for finding in product_diff_preflight if finding.severity == "error")
+    errors.extend(
+        completion_gate_packet_findings(
+            inventory,
+            closeout_plan.values,
+            completion_reason=completion_reason,
+            apply=True,
+            code_prefix="writeback",
+        )
+    )
 
     plan = inventory.active_plan_surface
     if plan and plan.exists:
@@ -2028,6 +2093,36 @@ def acceptance_evidence_findings(
             )
         )
 
+    fan_in_gate = _fan_in_evidence_gate(
+        inventory,
+        contract,
+        product_diff_proof=product_diff_scope_proof(inventory, closeout_values),
+    )
+    if fan_in_gate.activated and fan_in_gate.missing:
+        findings.append(
+            Finding(
+                severity,
+                f"{code_prefix}-fan-in-evidence-missing",
+                (
+                    f"{completion_reason} activates fan-in evidence ({_completion_gate_sample(fan_in_gate.reasons)}) "
+                    f"but is missing repo-visible evidence: {', '.join(fan_in_gate.missing)}; record matching "
+                    "work-claim, handoff, and agent-run evidence before confident closeout. Ordinary single-agent "
+                    "low-blast plans do not require fan-in evidence, and present records do not approve worker "
+                    "cleanup, archive, staging, commit, or next-plan opening"
+                ),
+                contract.source,
+            )
+        )
+    elif fan_in_gate.activated and include_success:
+        findings.append(
+            Finding(
+                "info",
+                f"{code_prefix}-fan-in-evidence",
+                f"{completion_reason} has activated fan-in evidence: {fan_in_gate.status}",
+                contract.source,
+            )
+        )
+
     docs_risk = _docs_decision_residual_risk_mismatch(closeout_values)
     if docs_risk:
         findings.append(
@@ -2039,9 +2134,30 @@ def acceptance_evidence_findings(
             )
         )
 
-    if findings or not include_success:
+    docs_impact_findings = _docs_decision_impact_findings(
+        closeout_values,
+        contract,
+        completion_reason=completion_reason,
+        severity=severity,
+        code_prefix=code_prefix,
+        include_success=include_success,
+    )
+    findings.extend(docs_impact_findings)
+    findings.extend(
+        _next_state_findings(
+            closeout_values,
+            contract,
+            completion_reason=completion_reason,
+            severity=severity,
+            code_prefix=code_prefix,
+            include_success=include_success,
+        )
+    )
+
+    if any(finding.severity != "info" for finding in findings) or not include_success:
         return findings
     return [
+        *findings,
         Finding(
             "info",
             f"{code_prefix}-acceptance-evidence",
@@ -2052,6 +2168,489 @@ def acceptance_evidence_findings(
             contract.source,
         )
     ]
+
+
+def completion_gate_packet_findings(
+    inventory: Inventory,
+    closeout_values: dict[str, str] | None = None,
+    *,
+    completion_reason: str = "",
+    apply: bool = False,
+    code_prefix: str = "writeback",
+    include_success: bool = False,
+) -> list[Finding]:
+    contract = _active_acceptance_evidence_contract(inventory)
+    if contract is None:
+        return []
+
+    values = closeout_values or {}
+    requires_acceptance = bool(completion_reason)
+    matrix, blocking = _completion_gate_matrix(
+        inventory,
+        values,
+        contract,
+        requires_acceptance=requires_acceptance,
+        completion_reason=completion_reason,
+    )
+    status = "blocked" if blocking else "ready" if requires_acceptance else "visible"
+    if blocking:
+        severity = "error" if apply else "warn"
+    elif include_success:
+        severity = "info"
+    else:
+        return []
+
+    blocked_text = _completion_gate_sample(blocking)
+    return [
+        Finding(
+            severity,
+            f"{code_prefix}-completion-gate-packet",
+            (
+                f"completion gate packet status={status}; work_class={contract.work_class}; "
+                f"deliverable_class={contract.deliverable_class}; item_ids={_completion_gate_sample(contract.item_ids)}; "
+                f"target_artifacts={_completion_gate_sample(contract.target_artifacts)}; "
+                f"write_scope={_completion_gate_sample(contract.write_scope)}; "
+                f"product_source_boundary={matrix['product_source_boundary']}; "
+                f"fan_in_evidence={matrix['fan_in_evidence']}; "
+                f"next_state={matrix['next_state']}; blocking={blocked_text}"
+            ),
+            contract.source,
+        ),
+        Finding(
+            severity,
+            f"{code_prefix}-completion-gate-evidence-matrix",
+            (
+                "completion gate evidence matrix: "
+                f"docs_decision={matrix['docs_decision']}; "
+                f"state_writeback={matrix['state_writeback']}; "
+                f"verification={matrix['verification']}; "
+                f"deliverable_evidence={matrix['deliverable_evidence']}; "
+                f"target_artifacts={matrix['target_artifacts']}; "
+                f"product_source_boundary={matrix['product_source_boundary']}; "
+                f"fan_in_evidence={matrix['fan_in_evidence']}; "
+                f"next_state={matrix['next_state']}"
+            ),
+            contract.source,
+        ),
+    ]
+
+
+def _completion_gate_matrix(
+    inventory: Inventory,
+    closeout_values: dict[str, str],
+    contract: AcceptanceEvidenceContract,
+    *,
+    requires_acceptance: bool,
+    completion_reason: str = "",
+) -> tuple[dict[str, str], tuple[str, ...]]:
+    blocking: list[str] = []
+    missing = _missing_acceptance_evidence_fields(closeout_values) if requires_acceptance else ()
+    blocking.extend(f"missing:{field}" for field in missing)
+
+    docs_decision = str(closeout_values.get("docs_decision") or "").strip().casefold()
+    docs_basis, docs_basis_source = _docs_decision_impact_basis(closeout_values, contract)
+    docs_mismatch = _docs_decision_impact_basis_mismatch(docs_decision, docs_basis)
+    if docs_decision in DOCS_DECISION_VALUES:
+        docs_status = "typed"
+        if docs_basis:
+            docs_status += f"; impact_basis={docs_basis}"
+            if docs_basis_source:
+                docs_status += f"; impact_source={docs_basis_source}"
+        else:
+            docs_status += "; impact_basis=missing"
+    elif requires_acceptance:
+        docs_status = "missing"
+    else:
+        docs_status = "not-yet-required"
+    if requires_acceptance and docs_decision in DOCS_DECISION_VALUES:
+        if not docs_basis:
+            blocking.append("docs_decision:impact-basis-missing")
+        elif docs_mismatch:
+            blocking.append("docs_decision:impact-basis-mismatch")
+        if _docs_decision_blocks_confident_closeout(docs_decision, completion_reason=completion_reason):
+            blocking.append("docs_decision:uncertain-closeout")
+
+    next_status, next_blocking = _next_state_status(closeout_values, contract, requires_acceptance=requires_acceptance)
+    blocking.extend(next_blocking)
+
+    state_present = _acceptance_evidence_value_is_present(closeout_values.get("state_writeback", ""))
+    state_status = "present" if state_present else "missing" if requires_acceptance else "not-yet-required"
+
+    verification = closeout_values.get("verification", "")
+    verification_present = _acceptance_evidence_value_is_present(verification)
+    verification_generic = bool(verification and _verification_evidence_is_generic(verification))
+    if requires_acceptance and verification_generic:
+        blocking.append("verification:generic")
+    if verification_generic:
+        verification_status = "generic"
+    elif verification_present:
+        verification_status = "concrete"
+    else:
+        verification_status = "missing" if requires_acceptance else "not-yet-required"
+
+    evidence_text = _acceptance_evidence_text(closeout_values)
+    evidence_matches = bool(evidence_text and _acceptance_evidence_matches_contract(evidence_text, contract))
+    class_mismatch = _acceptance_deliverable_class_mismatch(contract, evidence_text)
+    if requires_acceptance and evidence_text and not evidence_matches:
+        blocking.append("deliverable_evidence:mismatch")
+    if requires_acceptance and class_mismatch:
+        blocking.append("deliverable_class:mismatch")
+    if class_mismatch:
+        deliverable_status = f"class-mismatch:{class_mismatch}"
+    elif evidence_matches:
+        deliverable_status = "matched"
+    elif evidence_text:
+        deliverable_status = "mismatch"
+    else:
+        deliverable_status = "missing" if requires_acceptance else "not-yet-required"
+
+    target_refs = _completion_gate_target_reference_count(contract, evidence_text)
+    if contract.target_artifacts:
+        target_status = f"declared:{len(contract.target_artifacts)}; evidence_refs:{target_refs}"
+    else:
+        target_status = "not-declared"
+
+    target_findings = (
+        _declared_target_evidence_findings(
+            inventory,
+            closeout_values,
+            contract,
+            completion_reason="completion gate",
+            severity="error",
+            code_prefix="completion-gate",
+        )
+        if requires_acceptance
+        else []
+    )
+    if target_findings:
+        blocking.extend("target_artifacts:" + finding.code.rsplit("-", 1)[-1] for finding in target_findings)
+
+    proof = product_diff_scope_proof(inventory, closeout_values)
+    product_status = _completion_gate_product_status(proof)
+    if requires_acceptance and product_status in {"blocked", "out-of-scope"}:
+        blocking.append(f"product_source_boundary:{product_status}")
+
+    fan_in_gate = _fan_in_evidence_gate(inventory, contract, product_diff_proof=proof)
+    if requires_acceptance and fan_in_gate.activated and fan_in_gate.missing:
+        blocking.append(f"fan_in_evidence:{','.join(fan_in_gate.missing)}")
+
+    matrix = {
+        "docs_decision": docs_status,
+        "state_writeback": state_status,
+        "verification": verification_status,
+        "deliverable_evidence": deliverable_status,
+        "target_artifacts": target_status,
+        "product_source_boundary": product_status,
+        "fan_in_evidence": fan_in_gate.status,
+        "next_state": next_status,
+    }
+    return matrix, tuple(_dedupe_nonempty(blocking))
+
+
+def _next_state_findings(
+    closeout_values: dict[str, str],
+    contract: AcceptanceEvidenceContract,
+    *,
+    completion_reason: str,
+    severity: str,
+    code_prefix: str,
+    include_success: bool = False,
+) -> list[Finding]:
+    if not completion_reason or not _next_state_gate_enabled(closeout_values, contract):
+        return []
+    value = str(closeout_values.get("next_state") or "").strip()
+    if not _acceptance_evidence_value_is_present(value):
+        return [
+            Finding(
+                severity,
+                f"{code_prefix}-next-state-missing",
+                (
+                    f"{completion_reason} requires explicit next_state; record one of "
+                    "no-next-action, human-decision-required, or legal-dry-run-command:<mylittleharness --root ... --dry-run ...>. "
+                    "Reported next_safe advisory commands do not satisfy this closeout fact"
+                ),
+                contract.source,
+            )
+        ]
+    kind, command, problem = _parse_next_state(value)
+    if problem:
+        code = f"{code_prefix}-next-state-command-invalid" if kind == "legal-dry-run-command" else f"{code_prefix}-next-state-invalid"
+        return [
+            Finding(
+                severity,
+                code,
+                f"{completion_reason} next_state is invalid: {problem}",
+                contract.source,
+            )
+        ]
+    if include_success:
+        detail = f"{kind}: {command}" if command else kind
+        return [Finding("info", f"{code_prefix}-next-state", f"{completion_reason} records next_state={detail}", contract.source)]
+    return []
+
+
+def _next_state_status(
+    closeout_values: dict[str, str],
+    contract: AcceptanceEvidenceContract,
+    *,
+    requires_acceptance: bool,
+) -> tuple[str, tuple[str, ...]]:
+    if not _next_state_gate_enabled(closeout_values, contract):
+        return ("not-required" if not requires_acceptance else "not-enabled"), ()
+    value = str(closeout_values.get("next_state") or "").strip()
+    if not _acceptance_evidence_value_is_present(value):
+        return "missing", ("next_state:missing",) if requires_acceptance else ()
+    kind, command, problem = _parse_next_state(value)
+    if problem:
+        block = "next_state:command-invalid" if kind == "legal-dry-run-command" else "next_state:invalid"
+        status = f"invalid:{kind or 'unsupported'}"
+        return status, (block,) if requires_acceptance else ()
+    if kind == "legal-dry-run-command":
+        return f"{kind}; command=dry-run", ()
+    return kind, ()
+
+
+def _next_state_gate_enabled(closeout_values: dict[str, str], contract: AcceptanceEvidenceContract) -> bool:
+    if _acceptance_evidence_value_is_present(closeout_values.get("next_state", "")):
+        return True
+    haystack = _normalized_evidence_text(
+        " ".join(
+            (
+                *contract.item_ids,
+                *contract.target_artifacts,
+                *contract.write_scope,
+                *contract.acceptance_terms,
+            )
+        )
+    )
+    return any(marker in haystack for marker in NEXT_STATE_CONTRACT_MARKERS)
+
+
+def _parse_next_state(value: str) -> tuple[str, str, str]:
+    raw = str(value or "").strip()
+    normalized = re.sub(r"\s+", " ", raw).casefold()
+    if normalized in {"no-next-action", "human-decision-required"}:
+        return normalized, "", ""
+    for separator in (":", "="):
+        prefix = f"legal-dry-run-command{separator}"
+        if normalized.startswith(prefix):
+            command = raw[len(prefix) :].strip()
+            return "legal-dry-run-command", command, _legal_dry_run_command_problem(command)
+    if normalized == "legal-dry-run-command":
+        return "legal-dry-run-command", "", "legal-dry-run-command must include the exact dry-run command after ':'"
+    return "", "", f"expected one of: {', '.join(sorted(NEXT_STATE_VALUES))}"
+
+
+def _legal_dry_run_command_problem(command: str) -> str:
+    normalized = re.sub(r"\s+", " ", str(command or "").strip()).casefold()
+    tokens = set(re.findall(r"[a-z0-9_./:\\-]+", normalized))
+    if not normalized:
+        return "legal-dry-run-command requires a non-empty command"
+    if "mylittleharness" not in tokens:
+        return "legal-dry-run-command must name a mylittleharness command"
+    if "--root" not in tokens:
+        return "legal-dry-run-command must include --root"
+    if "--dry-run" not in tokens:
+        return "legal-dry-run-command must include --dry-run"
+    if "--apply" in tokens:
+        return "legal-dry-run-command must not include --apply"
+    if not (tokens & NEXT_STATE_DRY_RUN_COMMANDS):
+        allowed = ", ".join(sorted(NEXT_STATE_DRY_RUN_COMMANDS))
+        return f"legal-dry-run-command must use a bounded MLH dry-run command: {allowed}"
+    return ""
+
+
+def _docs_decision_impact_findings(
+    closeout_values: dict[str, str],
+    contract: AcceptanceEvidenceContract,
+    *,
+    completion_reason: str,
+    severity: str,
+    code_prefix: str,
+    include_success: bool = False,
+) -> list[Finding]:
+    docs_decision = str(closeout_values.get("docs_decision") or "").strip().casefold()
+    if docs_decision not in DOCS_DECISION_VALUES:
+        return []
+
+    findings: list[Finding] = []
+    basis, source = _docs_decision_impact_basis(closeout_values, contract)
+    if not basis:
+        findings.append(
+            Finding(
+                severity,
+                f"{code_prefix}-docs-decision-impact-basis-missing",
+                (
+                    f"{completion_reason} records docs_decision={docs_decision}, but does not record an impact basis; "
+                    "cite product-contract, workflow-contract, artifact-only, docs-updated, or uncertain evidence"
+                ),
+                contract.source,
+            )
+        )
+    else:
+        mismatch = _docs_decision_impact_basis_mismatch(docs_decision, basis)
+        if mismatch:
+            findings.append(
+                Finding(
+                    severity,
+                    f"{code_prefix}-docs-decision-impact-basis-mismatch",
+                    f"{completion_reason} docs_decision impact basis is inconsistent: {mismatch}",
+                    contract.source,
+                )
+            )
+        elif source and include_success:
+            findings.append(
+                Finding(
+                    "info",
+                    f"{code_prefix}-docs-decision-impact-basis",
+                    f"{completion_reason} docs_decision impact basis={basis} from {source}",
+                    contract.source,
+                )
+            )
+
+    if _docs_decision_blocks_confident_closeout(docs_decision, completion_reason=completion_reason):
+        findings.append(
+            Finding(
+                severity,
+                f"{code_prefix}-docs-decision-uncertain-closeout",
+                (
+                    f"{completion_reason} cannot be confidently closed with docs_decision=uncertain; "
+                    "record updated/not-needed with impact-basis evidence or keep the handoff provisional"
+                ),
+                contract.source,
+            )
+        )
+    return findings
+
+
+def _docs_decision_impact_basis(
+    closeout_values: dict[str, str],
+    contract: AcceptanceEvidenceContract,
+) -> tuple[str, str]:
+    docs_decision = str(closeout_values.get("docs_decision") or "").strip().casefold()
+    if docs_decision not in DOCS_DECISION_VALUES:
+        return "", ""
+    evidence = _normalized_evidence_text(_acceptance_evidence_text(closeout_values))
+    explicit_basis = _explicit_docs_decision_impact_basis(evidence)
+    if explicit_basis:
+        return explicit_basis, "explicit-evidence"
+    if docs_decision == "uncertain":
+        return "uncertain", "docs-decision"
+
+    scoped_paths = (*contract.target_artifacts, *contract.write_scope)
+    docs_scope = tuple(path for path in scoped_paths if _docs_decision_docs_scope_path(path))
+    workflow_scope = tuple(path for path in scoped_paths if _docs_decision_workflow_contract_scope_path(path))
+    if docs_decision == "updated" and docs_scope:
+        return "docs-updated", "declared-docs-scope"
+    if workflow_scope:
+        return "workflow-contract", "declared-workflow-scope"
+    if docs_decision == "not-needed" and scoped_paths and not docs_scope:
+        return "artifact-only", "declared-non-doc-scope"
+    return "", ""
+
+
+def _explicit_docs_decision_impact_basis(normalized_evidence: str) -> str:
+    basis_markers = (
+        ("docs-updated", ("docs-updated", "docs updated", "documentation updated", "updated docs", "updated documentation")),
+        ("artifact-only", ("artifact-only", "artifact only", "no docs/api impact", "no docs impact", "no documentation impact", "docs not needed", "documentation not needed")),
+        ("product-contract", ("product-contract", "product contract", "product api contract", "product/api contract")),
+        ("workflow-contract", ("workflow-contract", "workflow contract", "lifecycle contract", "operator contract")),
+        ("uncertain", ("docs impact uncertain", "documentation impact uncertain", "uncertain docs impact", "docs uncertainty")),
+    )
+    for basis, markers in basis_markers:
+        if any(marker in normalized_evidence for marker in markers):
+            return basis
+    return ""
+
+
+def _docs_decision_docs_scope_path(value: str) -> bool:
+    rel = _normalize_rel(value).casefold()
+    if not rel:
+        return False
+    if rel in {"readme.md", "changelog.md"}:
+        return True
+    return rel.startswith(("docs/", "project/adrs/", "project/decisions/"))
+
+
+def _docs_decision_workflow_contract_scope_path(value: str) -> bool:
+    rel = _normalize_rel(value).casefold()
+    if not rel:
+        return False
+    if rel in {"agents.md", "project/project-state.md", "project/implementation-plan.md"}:
+        return True
+    return rel.startswith((".agents/", ".codex/", ".mylittleharness/", "project/specs/"))
+
+
+def _docs_decision_impact_basis_mismatch(docs_decision: str, basis: str) -> str:
+    if docs_decision not in DOCS_DECISION_VALUES or not basis:
+        return ""
+    if basis not in DOCS_DECISION_IMPACT_BASIS_VALUES:
+        return f"impact_basis={basis!r} is unsupported"
+    allowed = DOCS_DECISION_ALLOWED_IMPACT_BASIS.get(docs_decision, set())
+    if basis not in allowed:
+        return f"docs_decision={docs_decision} does not accept impact_basis={basis}; expected one of {', '.join(sorted(allowed))}"
+    return ""
+
+
+def _docs_decision_blocks_confident_closeout(docs_decision: str, *, completion_reason: str) -> bool:
+    if docs_decision != "uncertain":
+        return False
+    normalized = str(completion_reason or "").strip().casefold()
+    return (
+        normalized.startswith("archive-active-plan")
+        or normalized.startswith("roadmap status")
+        or normalized in {"complete closeout facts", "completed-phase closeout writeback"}
+    )
+
+
+def _completion_gate_product_status(proof: dict[str, object] | None) -> str:
+    if proof is None:
+        return "not-applicable"
+    status = str(proof.get("status") or "").strip() or "unknown"
+    if status == "unavailable":
+        problem = str(proof.get("problem") or "").strip()
+        return f"unavailable:{problem}" if problem else "unavailable"
+    return status
+
+
+def _fan_in_evidence_gate(
+    inventory: Inventory,
+    contract: AcceptanceEvidenceContract,
+    *,
+    product_diff_proof: dict[str, object] | None = None,
+) -> FanInEvidenceGate:
+    plan = inventory.active_plan_surface
+    data: dict[str, object] = {}
+    if plan is not None and plan.exists and plan.frontmatter.has_frontmatter and not plan.frontmatter.errors:
+        data.update(plan.frontmatter.data)
+    if contract.item_ids:
+        data.setdefault("primary_roadmap_item", contract.item_ids[0])
+    if "target_artifacts" not in data and contract.target_artifacts:
+        data["target_artifacts"] = list(contract.target_artifacts)
+    if "execution_slice" not in data and contract.item_ids:
+        data["execution_slice"] = contract.item_ids[0]
+    return coordination_fan_in_evidence_gate(inventory.root, data, product_diff_proof=product_diff_proof)
+
+
+def _completion_gate_target_reference_count(contract: AcceptanceEvidenceContract, evidence_text: str) -> int:
+    normalized = _normalized_evidence_text(evidence_text)
+    count = 0
+    for target in contract.target_artifacts:
+        target_norm = _normalize_rel(target).casefold()
+        target_name = Path(target_norm).name
+        if (target_norm and target_norm in normalized) or (target_name and target_name in normalized):
+            count += 1
+    return count
+
+
+def _completion_gate_sample(values, limit: int = 5) -> str:
+    items = tuple(str(value) for value in values if str(value))
+    if not items:
+        return "<none>"
+    sample = ", ".join(items[:limit])
+    if len(items) > limit:
+        sample += f", +{len(items) - limit} more"
+    return sample
 
 
 def _scoped_interrupt_writeback_boundary_findings(
@@ -2115,6 +2714,14 @@ def _active_acceptance_evidence_contract(inventory: Inventory) -> AcceptanceEvid
             )
         )
     )
+    write_scope = tuple(
+        _dedupe_nonempty(
+            (
+                *target_artifacts,
+                *_active_plan_write_scope_values(plan.content),
+            )
+        )
+    )
     has_explicit_contract = bool(
         data.get("execution_slice")
         or data.get("deliverable_class")
@@ -2125,6 +2732,7 @@ def _active_acceptance_evidence_contract(inventory: Inventory) -> AcceptanceEvid
     if not has_explicit_contract:
         return None
     deliverable_class = _acceptance_deliverable_class(data, roadmap_fields, target_artifacts)
+    work_class = _acceptance_work_class(data, roadmap_fields, deliverable_class)
     text_parts = [
         str(data.get("plan_id") or ""),
         str(data.get("title") or ""),
@@ -2142,12 +2750,32 @@ def _active_acceptance_evidence_contract(inventory: Inventory) -> AcceptanceEvid
     if not item_ids and not target_artifacts and not acceptance_terms:
         return None
     return AcceptanceEvidenceContract(
+        work_class=work_class,
         deliverable_class=deliverable_class,
         item_ids=item_ids,
         target_artifacts=target_artifacts,
+        write_scope=write_scope,
         acceptance_terms=acceptance_terms,
         source=plan.rel_path,
     )
+
+
+def _acceptance_work_class(
+    plan_data: dict[str, object],
+    roadmap_fields: list[dict[str, object]],
+    deliverable_class: str,
+) -> str:
+    candidates = [
+        plan_data.get("work_class"),
+        *(fields.get("work_class") for fields in roadmap_fields),
+        plan_data.get("deliverable_class"),
+        *(fields.get("deliverable_class") for fields in roadmap_fields),
+    ]
+    for candidate in candidates:
+        normalized = _normalize_work_class(str(candidate or ""))
+        if normalized:
+            return normalized
+    return deliverable_class or "implementation"
 
 
 def _acceptance_deliverable_class(
@@ -2208,6 +2836,34 @@ def _normalize_deliverable_class(value: str) -> str:
     return normalized if normalized in allowed else ""
 
 
+def _normalize_work_class(value: str) -> str:
+    normalized = re.sub(r"[^a-z0-9_-]+", "-", str(value or "").strip().casefold()).strip("-")
+    aliases = {
+        "impl": "implementation",
+        "implement": "implementation",
+        "docs": "documentation",
+        "doc": "documentation",
+        "fan-in": "fan-in-review",
+        "fan_in": "fan-in-review",
+        "fan_in_review": "fan-in-review",
+    }
+    normalized = aliases.get(normalized, normalized)
+    allowed = {
+        "implementation",
+        "audit",
+        "proposal",
+        "diagnostic",
+        "evidence",
+        "fan-in-review",
+        "review",
+        "research",
+        "documentation",
+        "planning",
+        "lifecycle",
+    }
+    return normalized if normalized in allowed else ""
+
+
 def _metadata_list_values(value: object) -> tuple[str, ...]:
     if value in (None, "", [], ()):
         return ()
@@ -2218,6 +2874,38 @@ def _metadata_list_values(value: object) -> tuple[str, ...]:
         text = text[1:-1]
         return tuple(part.strip().strip("`\"'") for part in text.split(",") if part.strip().strip("`\"'"))
     return (text.strip("`\"'"),) if text.strip("`\"'") else ()
+
+
+def _active_plan_write_scope_values(text: str) -> tuple[str, ...]:
+    values: list[str] = []
+    for line in text.splitlines():
+        match = re.match(r"^\s*[-*]\s*write_scope\s*:\s*(.+?)\s*$", line, re.IGNORECASE)
+        if match:
+            values.extend(_scope_list_values(match.group(1)))
+    return tuple(_dedupe_nonempty(_normalize_rel(value) for value in values))
+
+
+def _scope_list_values(value: object) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, (list, tuple)):
+        return tuple(_strip_scope_token(item) for item in value if _strip_scope_token(item))
+    text = _strip_scope_token(value)
+    if not text:
+        return ()
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1]
+    return tuple(_strip_scope_token(part) for part in text.split(",") if _strip_scope_token(part))
+
+
+def _strip_scope_token(value: object) -> str:
+    text = str(value or "").strip()
+    while text.startswith(("-", "*")):
+        text = text[1:].strip()
+    for wrapper in ("`", '"', "'"):
+        if text.startswith(wrapper) and text.endswith(wrapper) and len(text) >= 2:
+            text = text[1:-1].strip()
+    return text.strip("`\"'").strip()
 
 
 def _acceptance_terms(values: tuple[str, ...]) -> tuple[str, ...]:

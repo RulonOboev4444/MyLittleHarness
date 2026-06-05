@@ -27,6 +27,9 @@ CYRILLIC_INTENT_TERMS: tuple[tuple[str, str], ...] = (
     ("человеческ", " human "),
     ("ревью", " review "),
     ("провер", " review "),
+    ("вложен", " attachment "),
+    ("аттач", " attachment "),
+    ("пдф", " pdf "),
 )
 RETIRED_COMMAND_SURFACES: tuple[tuple[str, tuple[str, ...], str], ...] = (
     (
@@ -428,6 +431,33 @@ COMMAND_INTENTS: tuple[CommandIntent, ...] = (
         ),
         "live operating root with missing docs/spec, backlink, fan-in, or intelligence warning evidence",
         "docs route recovery is read-only triage; restore, retarget, delete, or docs mutation decisions require explicit source review and cannot be inferred by suggest, promote roadmap state, move lifecycle, archive, stage, commit, or open a plan",
+    ),
+    CommandIntent(
+        "attachment-import-route",
+        "Import a PDF/DOCX/XLSX/PNG/JPG/ZIP as binary source evidence with a sidecar metadata card.",
+        (
+            "attachment import",
+            "binary attachment",
+            "binary artifact",
+            "import attachment",
+            "import pdf",
+            "import docx",
+            "import xlsx",
+            "import zip",
+            "sidecar metadata",
+            "вложение",
+            "аттачмент",
+            "пдф",
+            "pdf",
+        ),
+        'mylittleharness --root <root> attachment-import --dry-run --file "<path>" --kind <kind> --topic <topic> --title "<title>"',
+        (
+            'mylittleharness --root <root> attachment-import --apply --file "<path>" --kind <kind> --topic <topic> --title "<title>"',
+            'mylittleharness --root <root> research-import --dry-run --from-attachment "<project/attachments/.../artifact.md>" --title "<title>"',
+            "mylittleharness --root <root> check",
+        ),
+        "live operating root; source file may be outside the root, copied binary and sidecar metadata live under project/attachments",
+        "attachment-import copies one supported binary and writes one sidecar metadata card; import/reference cannot approve purchase, roadmap, plan, archive, staging, commit, push, release, rollback, or lifecycle decisions",
     ),
     CommandIntent(
         "research-route-recovery",
@@ -908,7 +938,10 @@ def command_suggestion_findings(
             Finding(
                 "warn",
                 "command-suggest-no-match",
-                f"no deterministic command intent matched {intent!r}; use suggest --list or start with `mylittleharness --root <root> check`",
+                (
+                    f"no deterministic command intent matched {intent!r}; use suggest --list or start with "
+                    "`mylittleharness --root <root> check`; next safe command: `mylittleharness --root <root> check`"
+                ),
                 route_id="unclassified",
             )
         )
@@ -962,7 +995,28 @@ def rails_not_cognition_boundary_finding(source: str | None = None, route_id: st
 
 
 def command_suggestions_to_dict(suggestions: tuple[CommandIntent, ...]) -> list[dict[str, object]]:
-    return [asdict(suggestion) for suggestion in suggestions]
+    from .reporting import command_action_report_dict
+
+    rows: list[dict[str, object]] = []
+    for suggestion in suggestions:
+        row = asdict(suggestion)
+        row["first_safe_action"] = command_action_report_dict(
+            suggestion.first_safe_command,
+            source_code="command-suggest-registry-entry",
+            source_field="first_safe_command",
+            action_role="first-safe-command",
+        )
+        row["follow_up_actions"] = [
+            command_action_report_dict(
+                command,
+                source_code="command-suggest-registry-entry",
+                source_field="follow_up_commands",
+                action_role="follow-up-command",
+            )
+            for command in suggestion.follow_up_commands
+        ]
+        rows.append(row)
+    return rows
 
 
 def _normalize(value: str) -> str:

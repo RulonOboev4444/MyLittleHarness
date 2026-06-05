@@ -164,8 +164,7 @@ def build_context_memory_capsule(inventory: Inventory, *, trigger: str, now: str
         "lifecycle": {
             "plan_status": str(state_data.get("plan_status") or ""),
             "active_plan": str(state_data.get("active_plan") or ""),
-            "active_phase": str(state_data.get("active_phase") or ""),
-            "phase_status": str(state_data.get("phase_status") or ""),
+            **_lifecycle_phase_fields(state_data),
             "last_archived_plan": str(state_data.get("last_archived_plan") or ""),
         },
         "active_plan": {
@@ -202,6 +201,28 @@ def build_context_memory_capsule(inventory: Inventory, *, trigger: str, now: str
     }
     capsule["capsule_id"] = _capsule_id(capsule)
     return capsule
+
+
+def _lifecycle_phase_fields(state_data: dict[str, object]) -> dict[str, object]:
+    active_phase = str(state_data.get("active_phase") or "")
+    phase_status = str(state_data.get("phase_status") or "")
+    has_active_plan = (
+        str(state_data.get("plan_status") or "").strip().casefold() == "active"
+        or bool(str(state_data.get("active_plan") or "").strip())
+    )
+    if has_active_plan:
+        return {
+            "active_phase": active_phase,
+            "phase_status": phase_status,
+            "last_completed_phase": "",
+            "last_phase_status": "",
+        }
+    return {
+        "active_phase": "",
+        "phase_status": "",
+        "last_completed_phase": active_phase,
+        "last_phase_status": phase_status,
+    }
 
 
 def _source_ref_rows(inventory: Inventory) -> list[dict[str, object]]:
@@ -279,20 +300,46 @@ def _capsule_freshness_status(inventory: Inventory, payload: dict[str, object]) 
     if not payload:
         return {"status": "missing", "stale_or_unknown": []}
     stale: list[str] = []
+    if payload.get("schema") != CONTEXT_MEMORY_SCHEMA:
+        stale.append("schema mismatch")
+    if str(payload.get("status") or "") != "current":
+        stale.append("capsule status not current")
+    if str(payload.get("source_hash_algorithm") or "") != "sha256":
+        stale.append("source_hash_algorithm mismatch")
+    capsule_id = str(payload.get("capsule_id") or "")
+    if not capsule_id:
+        stale.append("capsule_id missing")
+    elif capsule_id != _capsule_id(payload):
+        stale.append("capsule_id mismatch")
     refs = payload.get("source_refs")
     if not isinstance(refs, list):
         return {"status": "stale", "stale_or_unknown": ["source_refs missing"]}
+    if not refs:
+        stale.append("source_refs empty")
+    expected_refs = {str(row.get("rel_path") or ""): row for row in _source_ref_rows(inventory)}
+    recorded_refs: dict[str, dict[str, object]] = {}
     for ref in refs:
         if not isinstance(ref, dict):
             stale.append("malformed source ref")
             continue
         rel = str(ref.get("rel_path") or "")
+        if rel in recorded_refs:
+            stale.append(f"duplicate source ref: {rel or '<missing-rel>'}")
+            continue
+        recorded_refs[rel] = ref
+        if rel not in expected_refs:
+            stale.append(f"unexpected source ref: {rel or '<missing-rel>'}")
         recorded_hash = str(ref.get("sha256") or "")
-        current = _source_ref_row(inventory, rel)
+        current = expected_refs.get(rel) or _source_ref_row(inventory, rel)
         current_hash = str(current.get("sha256") or "")
         current_status = str(current.get("status") or "")
         if current_status != str(ref.get("status") or "") or current_hash != recorded_hash:
             stale.append(rel or "<missing-rel>")
+        if str(ref.get("status") or "") in {"unsafe", "unreadable"}:
+            stale.append(f"unsafe source ref: {rel or '<missing-rel>'}")
+    for rel in expected_refs:
+        if rel not in recorded_refs:
+            stale.append(f"missing source ref: {rel}")
     return {"status": "current" if not stale else "stale", "stale_or_unknown": stale}
 
 

@@ -12,7 +12,7 @@ from .handoff import handoff_packet_status_findings
 from .inventory import Inventory
 from .models import Finding
 from .parsing import parse_frontmatter
-from .root_boundary import source_path_boundary_violation
+from .root_boundary import root_relative_path_conflict, source_path_boundary_violation
 
 
 AGENT_RUNS_DIR_REL = "project/verification/agent-runs"
@@ -533,14 +533,7 @@ def _json_list(value: object) -> tuple[str, ...]:
 
 
 def _root_relative_path_conflict(rel_path: str) -> str:
-    normalized = _normalize_ref(rel_path)
-    if not normalized:
-        return "must be a non-empty root-relative path"
-    if re.match(r"^[A-Za-z]:[\\/]", normalized) or normalized.startswith("/"):
-        return "must be root-relative, not absolute"
-    if any(part in {"..", ".", ""} for part in normalized.split("/")):
-        return "must not contain parent traversal, current-directory, or empty path segments"
-    return ""
+    return root_relative_path_conflict(_normalize_ref(rel_path))
 
 
 def _normalize_ref(value: object) -> str:
